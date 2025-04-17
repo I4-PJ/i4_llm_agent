@@ -1,0 +1,39 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "i4_llm_agent"
+version = "0.1.0" # Starting fresh
+description = "Core library for building LLM agents, including API clients, history management, context handling, and memory operations."
+readme = "README.md" # Assuming you'll have a README
+requires-python = ">=3.8"
+license = { text = "MIT" } # Or your preferred license
+authors = [
+  { name = "Your Name/Handle", email = "your_email@example.com" }, # <<< UPDATE THIS
+]
+classifiers = [ # Add standard classifiers
+    "Development Status :: 3 - Alpha", # Initial development stage
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License", # Match license above
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "requests>=2.20.0", # Needed for api_client.py
+    # Add other core dependencies if the library itself will require them later
+    # e.g., "tiktoken>=0.6.0"
+]
+
+# Optional: Define entry points or project URLs if needed later
+# [project.urls]
+# "Homepage" = "https://github.com/yourusername/i4_llm_agent"
+# "Bug Tracker" = "https://github.com/yourusername/i4_llm_agent/issues"
