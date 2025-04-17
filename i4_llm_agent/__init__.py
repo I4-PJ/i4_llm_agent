@@ -10,6 +10,13 @@ from .prompting import (
 )
 from .memory import manage_tier1_summarization
 
+from .history import (
+    format_history_for_llm,
+    get_recent_turns,
+    get_dialogue_history,
+    select_turns_for_t0,
+)
+
 # --- Configure basic logging for the library ---
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -22,5 +29,5 @@ __all__ = [
     "call_google_llm_api", "format_history_for_llm", "get_recent_turns",
     "get_dialogue_history", "format_refiner_prompt", "construct_final_llm_payload",
     "assemble_tagged_context", "extract_tagged_context", "clean_context_tags",
-    "manage_tier1_summarization",
+    "manage_tier1_summarization", "select_turns_for_t0",
 ]
