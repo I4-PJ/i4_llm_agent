@@ -1,6 +1,7 @@
 # i4_llm_agent/history.py
 import logging
 from typing import List, Dict, Optional, Any
+import json # For pretty printing debug output
 
 logger = logging.getLogger(__name__) # Gets logger named 'i4_llm_agent.history'
 
@@ -27,18 +28,16 @@ def format_history_for_llm(
     start_idx = -max_messages if max_messages is not None and max_messages > 0 else 0
     chunk_to_format = history_chunk[start_idx:] # Slice the chunk if max_messages is set
 
-    logger.debug(f"Formatting {len(chunk_to_format)} messages (Max: {max_messages}).")
+    # logger.debug(f"Formatting {len(chunk_to_format)} messages (Max: {max_messages}).") # Less verbose
 
     for msg in chunk_to_format:
         role = msg.get('role', 'unk').capitalize() # Default to 'Unk' if role missing
         content = msg.get('content', '').strip()   # Default to empty string if content missing
         if not content: # Optionally skip empty messages
-            # logger.debug(f"Skipping empty message from role: {role}") # Can be noisy
             continue
         lines.append(f"{role}: {content}")
 
     formatted_string = "\n".join(lines)
-    # logger.debug(f"Formatted history string length: {len(formatted_string)}") # Also potentially noisy
     return formatted_string
 
 
@@ -62,14 +61,11 @@ def get_recent_turns(
     Returns:
         A list containing the selected recent messages, preserving order.
     """
-    logger.debug(f"Extracting up to {count} recent turns (roles: {roles}, exclude_last: {exclude_last})...")
+    # logger.debug(f"Extracting up to {count} recent turns (roles: {roles}, exclude_last: {exclude_last})...") # Less verbose
     if count <= 0 or not messages:
         return []
 
-    # Determine the effective list to filter from
     source_list = messages[:-1] if exclude_last and len(messages) > 0 else messages
-
-    # Filter messages by role from the source list
     filtered_messages = [
         msg for msg in source_list if isinstance(msg, dict) and msg.get("role") in roles
     ]
@@ -77,11 +73,10 @@ def get_recent_turns(
     if not filtered_messages:
         return []
 
-    # Get the last 'count' messages from the filtered list
     start_index = max(0, len(filtered_messages) - count)
     recent_history = filtered_messages[start_index:]
 
-    logger.debug(f"Extracted {len(recent_history)} recent turns.")
+    # logger.debug(f"Extracted {len(recent_history)} recent turns.") # Less verbose
     return recent_history
 
 
@@ -102,24 +97,21 @@ def get_dialogue_history(
     Returns:
         A list containing all matching messages, preserving order.
     """
-    logger.debug(f"Extracting dialogue history (roles: {roles}, exclude_last: {exclude_last})...")
+    # logger.debug(f"Extracting dialogue history (roles: {roles}, exclude_last: {exclude_last})...") # Less verbose
     if not messages:
         return []
 
-    # Determine the effective list to filter from
     source_list = messages[:-1] if exclude_last and len(messages) > 0 else messages
-
-    # Filter messages by role
     filtered_messages = [
         msg for msg in source_list if isinstance(msg, dict) and msg.get("role") in roles
     ]
 
-    logger.debug(f"Extracted {len(filtered_messages)} dialogue history messages.")
+    # logger.debug(f"Extracted {len(filtered_messages)} dialogue history messages.") # Less verbose
     return filtered_messages
 
-
-
-
+# ==============================================================================
+# === Turn-Aware T0 History Selection (with Debug Logging)                   ===
+# ==============================================================================
 def select_turns_for_t0(
     full_history: List[Dict],
     target_tokens: int,
@@ -130,131 +122,158 @@ def select_turns_for_t0(
     """
     Selects recent messages for T0 context, aiming for a token limit,
     but prioritizing inclusion of the preceding user turn for the earliest
-    assistant turn if it fits within a defined overflow ratio.
-
-    Args:
-        full_history: The list of message dictionaries (should exclude the
-                      absolute latest user query being processed by the pipe).
-        target_tokens: The desired approximate token count for the T0 slice.
-        tokenizer: A tokenizer instance with an .encode() method.
-        max_overflow_ratio: Maximum allowed token overflow factor
-                           (e.g., 1.15 allows up to 15% overflow to complete a turn).
-        fallback_turns: How many turns to take if tokenizer is unavailable.
-
-    Returns:
-        A list of selected message dictionaries for the T0 slice,
-        preserving original order.
+    assistant turn if it fits within a defined overflow ratio. Includes detailed debug logging.
     """
+    # Use specific logger for this function for targeted debugging
     func_logger = logging.getLogger(__name__ + '.select_turns_for_t0')
+    # Ensure logger level is appropriate (e.g., set to DEBUG in pipe)
+    is_debug_enabled = func_logger.isEnabledFor(logging.DEBUG)
 
     if not full_history:
-        func_logger.debug("Input history is empty, returning empty T0 slice.")
+        func_logger.debug("[T0 Select] Input history is empty, returning empty T0 slice.")
         return []
 
     # --- Fallback if no tokenizer ---
     if not tokenizer:
         func_logger.warning(
-            f"Tokenizer unavailable for T0 selection. Falling back to last {fallback_turns} turns."
+            f"[T0 Select] Tokenizer unavailable. Falling back to last {fallback_turns} turns."
         )
         start_idx = max(0, len(full_history) - fallback_turns)
         return full_history[start_idx:]
 
+    # --- Log Initial Parameters ---
+    if is_debug_enabled:
+        func_logger.debug(f"[T0 Select Init] Received {len(full_history)} history messages.")
+        func_logger.debug(f"[T0 Select Init] Target tokens: {target_tokens}")
+        func_logger.debug(f"[T0 Select Init] Max overflow ratio: {max_overflow_ratio}")
+        # Optionally log first/last message snippet of input history
+        if full_history:
+            first_msg_snippet = str(full_history[0].get('content', ''))[:50]
+            last_msg_snippet = str(full_history[-1].get('content', ''))[:50]
+            func_logger.debug(f"[T0 Select Init] Input History First Msg Snippet: '{first_msg_snippet}...'")
+            func_logger.debug(f"[T0 Select Init] Input History Last Msg Snippet: '{last_msg_snippet}...'")
+
     # --- Main selection loop (iterating backwards) ---
     selected_history: List[Dict] = []
     current_tokens: int = 0
-    earliest_selected_index: int = -1 # Track index in full_history
+    earliest_selected_index: int = -1
 
-    func_logger.debug(f"Selecting T0 turns from {len(full_history)} messages, target tokens: {target_tokens}")
+    if is_debug_enabled: func_logger.debug("[T0 Select Loop] Starting backward iteration...")
 
     for i in range(len(full_history) - 1, -1, -1):
         msg = full_history[i]
         msg_content = msg.get("content", "")
+        msg_role = msg.get("role", "unknown") # Get role for logging
+
         if not msg_content: # Skip messages with no content
+            if is_debug_enabled: func_logger.debug(f"[T0 Select Loop] Skipping index {i} (role: {msg_role}): Empty content.")
             continue
 
         msg_tokens = 0
         try:
-            msg_tokens = len(tokenizer.encode(msg_content))
+            # Use a temporary variable in case encode fails
+            encoded_tokens = tokenizer.encode(msg_content)
+            msg_tokens = len(encoded_tokens)
+            if is_debug_enabled: func_logger.debug(f"[T0 Select Loop] Index {i} (role: {msg_role}): Calculated tokens = {msg_tokens}")
         except Exception as e:
-            func_logger.error(f"Tokenizer error on msg index {i}: {e}. Skipping msg.")
+            func_logger.error(f"[T0 Select Loop] Tokenizer error on msg index {i} (role: {msg_role}): {e}. Skipping msg.", exc_info=False) # Less verbose traceback
             continue # Skip this message if tokenization fails
 
-        # Check if adding this message would exceed the target
-        if current_tokens + msg_tokens > target_tokens and selected_history:
-            # We've hit the token limit *before* adding this message.
-            # The loop stops here, selected_history contains messages up to index i+1
-            func_logger.debug(
-                f"Token limit {target_tokens} reached before adding msg index {i} "
-                f"(current: {current_tokens}, msg: {msg_tokens}). Stopping initial selection."
-            )
-            break
+        # Check token limit BEFORE adding the current message
+        # If selected_history is not empty AND adding this msg would exceed limit, break
+        if selected_history and (current_tokens + msg_tokens > target_tokens):
+            if is_debug_enabled:
+                func_logger.debug(
+                    f"[T0 Select Loop] Token limit {target_tokens} would be exceeded by adding msg index {i} "
+                    f"(current: {current_tokens}, msg: {msg_tokens}, total: {current_tokens + msg_tokens}). "
+                    f"Stopping initial selection BEFORE adding index {i}."
+                )
+            break # Stop BEFORE adding this message
 
         # Prepend the message to maintain order and update state
         selected_history.insert(0, msg)
         current_tokens += msg_tokens
         earliest_selected_index = i
-    else:
-        # Loop completed without breaking (all history fit or history was small)
-        func_logger.debug("Selected all messages as they fit within the token limit.")
-        earliest_selected_index = 0 # All messages selected
+        if is_debug_enabled: func_logger.debug(f"[T0 Select Loop] Added index {i}. New total tokens: {current_tokens}. Current slice length: {len(selected_history)}")
 
+    # --- Post-Loop Logging & Checks ---
     if not selected_history:
-         func_logger.warning("T0 selection resulted in an empty slice after initial token check.")
-         return []
+         func_logger.warning("[T0 Select PostLoop] Initial selection resulted in an empty slice.")
+         return [] # Return empty if nothing was selected
 
-    func_logger.debug(f"Initial T0 selection: {len(selected_history)} msgs, {current_tokens} tokens. Earliest index: {earliest_selected_index}")
+    if is_debug_enabled:
+        func_logger.debug(f"[T0 Select PostLoop] Initial selection finished.")
+        func_logger.debug(f"[T0 Select PostLoop] Selected {len(selected_history)} messages.")
+        func_logger.debug(f"[T0 Select PostLoop] Current tokens: {current_tokens}")
+        func_logger.debug(f"[T0 Select PostLoop] Earliest selected index in full history: {earliest_selected_index}")
+        # Log the content of the earliest selected message for context
+        if selected_history:
+            earliest_msg_role = selected_history[0].get('role', 'unknown')
+            earliest_msg_snippet = str(selected_history[0].get('content', ''))[:100]
+            func_logger.debug(f"[T0 Select PostLoop] Earliest selected message (role: {earliest_msg_role}): '{earliest_msg_snippet}...'")
 
     # --- Post-loop: Check for Turn Completion ---
     first_selected_msg = selected_history[0]
     first_selected_role = first_selected_msg.get("role")
 
-    # Only check if the earliest message selected is from the assistant
-    # and if it's not the very first message in the entire history
+    # Only check if the earliest message selected is 'assistant' and not the very first message overall
     if first_selected_role == "assistant" and earliest_selected_index > 0:
-        func_logger.debug("Earliest selected T0 msg is 'assistant', checking preceding 'user' turn.")
+        if is_debug_enabled: func_logger.debug("[T0 Turn Check] Earliest selected msg is 'assistant', checking preceding turn.")
         preceding_index = earliest_selected_index - 1
         preceding_msg = full_history[preceding_index]
         preceding_role = preceding_msg.get("role")
 
         if preceding_role == "user":
-            func_logger.debug(f"Found preceding 'user' message at index {preceding_index}.")
+            if is_debug_enabled: func_logger.debug(f"[T0 Turn Check] Found preceding 'user' message at index {preceding_index}.")
             preceding_content = preceding_msg.get("content", "")
             preceding_tokens = 0
             if preceding_content:
                 try:
                     preceding_tokens = len(tokenizer.encode(preceding_content))
                 except Exception as e:
-                    func_logger.error(f"Tokenizer error on preceding user msg index {preceding_index}: {e}")
+                    func_logger.error(f"[T0 Turn Check] Tokenizer error on preceding user msg index {preceding_index}: {e}", exc_info=False)
                     preceding_tokens = -1 # Indicate error
 
-            if preceding_tokens >= 0: # If tokenization didn't fail
+            if preceding_tokens >= 0:
                 overflow_limit = target_tokens * max_overflow_ratio
                 projected_tokens = current_tokens + preceding_tokens
 
-                func_logger.debug(
-                    f"Preceding user tokens: {preceding_tokens}. "
-                    f"Projected total: {projected_tokens}. Overflow limit: {overflow_limit:.0f}"
-                )
+                if is_debug_enabled:
+                    func_logger.debug(
+                        f"[T0 Turn Check] Preceding user tokens: {preceding_tokens}. "
+                        f"Current slice tokens: {current_tokens}. "
+                        f"Projected total: {projected_tokens}. "
+                        f"Overflow limit ({max_overflow_ratio:.2f}x): {overflow_limit:.0f}"
+                    )
 
                 if projected_tokens <= overflow_limit:
-                    func_logger.info(
-                        f"Including preceding 'user' turn (index {preceding_index}) as it fits within overflow limit."
+                    func_logger.info( # Log as INFO if we actually modify the list
+                        f"[T0 Turn Check] Including preceding 'user' turn (index {preceding_index}) as it fits within overflow limit."
                     )
                     selected_history.insert(0, preceding_msg)
-                    current_tokens = projected_tokens # Update token count
+                    current_tokens = projected_tokens
                 else:
-                    func_logger.debug(
-                        "Preceding 'user' turn excluded as it exceeds overflow limit."
-                    )
-            # else: tokenizer error already logged
+                    if is_debug_enabled: func_logger.debug("[T0 Turn Check] Preceding 'user' turn excluded as it exceeds overflow limit.")
+            else:
+                if is_debug_enabled: func_logger.debug("[T0 Turn Check] Preceding 'user' turn tokenization failed, cannot check overflow.")
         else:
-            func_logger.debug(f"Preceding message (index {preceding_index}) is not 'user' ({preceding_role}). No turn completion needed.")
+            if is_debug_enabled: func_logger.debug(f"[T0 Turn Check] Preceding message (index {preceding_index}) is not 'user' (role: {preceding_role}). No turn completion check needed.")
     elif first_selected_role != "assistant":
-        func_logger.debug("Earliest selected T0 msg is not 'assistant', no preceding turn check needed.")
+        if is_debug_enabled: func_logger.debug(f"[T0 Turn Check] Earliest selected msg is '{first_selected_role}', no preceding turn check needed.")
     else: # earliest_selected_index must be 0
-         func_logger.debug("Earliest selected T0 msg is the first message in history, no preceding turn check needed.")
+         if is_debug_enabled: func_logger.debug("[T0 Turn Check] Earliest selected T0 msg is the first message in history, no preceding turn check needed.")
 
 
+    # --- Final Logging and Return ---
     final_count = len(selected_history)
-    func_logger.info(f"Final T0 slice: {final_count} messages, approx {current_tokens} tokens.")
+    func_logger.info(f"Final T0 slice selected: {final_count} messages, approx {current_tokens} tokens.")
+    if is_debug_enabled and not selected_history:
+         func_logger.debug("[T0 Select Return] Returning EMPTY list.") # Explicit log if empty
+    elif is_debug_enabled:
+         # Log final selection summary
+         final_roles = [msg.get("role", "unk") for msg in selected_history]
+         func_logger.debug(f"[T0 Select Return] Final slice roles: {final_roles}")
+         # Optionally log full content if needed, but can be very verbose
+         # func_logger.debug(f"[T0 Select Return] Final slice content:\n{json.dumps(selected_history, indent=2)}")
+
     return selected_history
