@@ -11,10 +11,17 @@ from .history import (
     DIALOGUE_ROLES,
 )
 from .prompting import (
-    format_refiner_prompt, construct_final_llm_payload,
-    assemble_tagged_context, extract_tagged_context, clean_context_tags,
-    generate_rag_query, combine_background_context,
-    process_system_prompt # <-- Already here
+    # <<< ADD NEW FUNCTIONS HERE >>>
+    format_refiner_prompt,
+    refine_external_context,
+    # --- Existing prompting functions ---
+    construct_final_llm_payload,
+    assemble_tagged_context,
+    extract_tagged_context,
+    clean_context_tags,
+    generate_rag_query,
+    combine_background_context,
+    process_system_prompt
 )
 from .memory import manage_tier1_summarization
 
@@ -34,10 +41,14 @@ __all__ = [
     "get_dialogue_history", "select_turns_for_t0",
     "DIALOGUE_ROLES",
     # prompting
-    "format_refiner_prompt", "construct_final_llm_payload",
+    # <<< ADD NEW FUNCTIONS HERE >>>
+    "format_refiner_prompt",
+    "refine_external_context",
+    # --- Existing prompting functions ---
+    "construct_final_llm_payload",
     "assemble_tagged_context", "extract_tagged_context", "clean_context_tags",
     "generate_rag_query", "combine_background_context",
-    "process_system_prompt", # <-- Already here
+    "process_system_prompt",
     # memory
     "manage_tier1_summarization",
     # utils
