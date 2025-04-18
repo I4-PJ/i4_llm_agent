@@ -4,7 +4,7 @@ import logging
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Any, Callable, Coroutine, Tuple
+from typing import List, Dict, Optional, Any, Callable, Coroutine, Tuple, Union # <<< Union added here
 
 # --- Internal Dependencies & Constants ---
 try:
@@ -106,7 +106,7 @@ async def manage_tier1_summarization(
     t0_token_limit: int,
     t1_chunk_size_target: int,
     tokenizer: Any,
-    llm_call_func: Callable[..., Coroutine[Any, Any, Optional[str]]],
+    llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]], # <<< Corrected LLM call func type hint >>>
     llm_config: Dict[str, Any],
     add_t1_summary_func: Callable[..., Coroutine[Any, Any, bool]],
     session_id: str,
@@ -124,7 +124,7 @@ async def manage_tier1_summarization(
         t0_token_limit: Token limit for the T0 active window.
         t1_chunk_size_target: Target token size for chunks to summarize (T1).
         tokenizer: Tokenizer instance with .encode().
-        llm_call_func: Async function to call the summarizer LLM.
+        llm_call_func: Async function to call the summarizer LLM. Expects Tuple[bool, Union[str, Dict]] return.
         llm_config: Config dict for the summarizer LLM (url, key, temp, sys_prompt).
         add_t1_summary_func: Async callback function to save the generated summary.
         session_id: ID of the current session.
@@ -200,7 +200,11 @@ async def manage_tier1_summarization(
 
     # --- Check Trigger Condition (Based on Dialogue Tokens) ---
     summarization_trigger_threshold = t0_token_limit + t1_chunk_size_target
+    # --- ADDED DEBUG LOGGING FOR TRIGGER CHECK ---
+    func_logger.info(f"DEBUG TRIGGER CHECK: Dialogue Tokens = {total_unsummarized_dialogue_tokens}, Threshold ({t0_token_limit}+{t1_chunk_size_target}) = {summarization_trigger_threshold}")
     should_summarize = (total_unsummarized_dialogue_tokens > summarization_trigger_threshold)
+    func_logger.info(f"DEBUG TRIGGER CHECK: should_summarize = {should_summarize}")
+    # --- END ADDED DEBUG LOGGING ---
 
     if not should_summarize:
         func_logger.debug(f"Summarization not triggered (Dialogue tokens {total_unsummarized_dialogue_tokens} <= threshold {summarization_trigger_threshold}).")
@@ -222,6 +226,14 @@ async def manage_tier1_summarization(
         dialogue_only_roles=dialogue_only_roles # Pass roles just in case helper needs it
     )
 
+    # --- ADDED DEBUG LOGGING FOR T0 SLICE ---
+    func_logger.debug(f"DEBUG T0 SLICE: Identified {len(t0_dialogue_slice)} dialogue messages for T0 slice.")
+    if t0_dialogue_slice:
+        t0_first_role = t0_dialogue_slice[0].get('role','?')
+        t0_last_role = t0_dialogue_slice[-1].get('role','?')
+        func_logger.debug(f"DEBUG T0 SLICE: First role='{t0_first_role}', Last role='{t0_last_role}'.")
+    # --- END ADDED DEBUG LOGGING ---
+
     if not t0_dialogue_slice:
         # This might happen if the dialogue messages are fewer than target tokens,
         # but summarization was still triggered (e.g., large T1 target).
@@ -229,20 +241,30 @@ async def manage_tier1_summarization(
         func_logger.warning("Could not select T0 dialogue slice, but summarization was triggered. Proceeding to summarize potentially the whole unsummarized dialogue block.")
         # If T0 is empty, the T1 chunk becomes all the unsummarized dialogue
         t1_chunk_dialogue_messages = unsummarized_dialogue_messages
+        # --- ADDED DEBUG LOGGING ---
+        func_logger.debug(f"DEBUG T1 CHUNK: T0 slice empty. Setting T1 chunk to all {len(t1_chunk_dialogue_messages)} unsummarized dialogue messages.")
+        # --- END ADDED DEBUG LOGGING ---
     else:
         # Find the first message of the T0 slice within the unsummarized dialogue list
         first_t0_message = t0_dialogue_slice[0]
         try:
             # Find its index in the *dialogue-only* list
             t1_chunk_end_index_relative_dialogue = unsummarized_dialogue_messages.index(first_t0_message)
+            # --- ADDED DEBUG LOGGING ---
+            func_logger.debug(f"DEBUG T1 CHUNK: First message of T0 slice found at relative index {t1_chunk_end_index_relative_dialogue} within unsummarized dialogue messages.")
+            # --- END ADDED DEBUG LOGGING ---
 
             if t1_chunk_end_index_relative_dialogue > 0:
                  # The T1 chunk consists of dialogue messages *before* the T0 slice starts
                  t1_chunk_dialogue_messages = unsummarized_dialogue_messages[:t1_chunk_end_index_relative_dialogue]
-                 func_logger.info(f"Identified T1 chunk: {len(t1_chunk_dialogue_messages)} dialogue messages to summarize.")
+                 # --- MODIFIED LOGGING FOR CLARITY ---
+                 func_logger.info(f"Identified T1 chunk: {len(t1_chunk_dialogue_messages)} dialogue messages to summarize (indices 0 to {t1_chunk_end_index_relative_dialogue-1} relative to unsummarized dialogue).")
+                 # --- END MODIFIED LOGGING ---
             else:
                  # T0 slice started at the beginning of unsummarized dialogue. No separate T1 chunk.
-                 func_logger.info("T0 dialogue slice includes all unsummarized dialogue messages. No separate T1 chunk to summarize yet.")
+                 # --- MODIFIED LOGGING FOR CLARITY ---
+                 func_logger.info(f"T0 dialogue slice started at the beginning (relative index {t1_chunk_end_index_relative_dialogue}) of unsummarized dialogue messages. No separate T1 chunk to summarize yet.")
+                 # --- END MODIFIED LOGGING ---
                  return False, None, new_last_summary_index, -1, t0_end_index_at_summary # Not an error, just nothing to summarize *yet*
         except ValueError:
              # Should not happen if t0_dialogue_slice came from unsummarized_dialogue_messages
@@ -300,13 +322,15 @@ async def manage_tier1_summarization(
         # Prepare payload and call LLM
         summ_payload = {"contents": [{"parts": [{"text": prompt}]}]}
         func_logger.info("Calling Summarizer LLM via async llm_call_func...")
-        summary_result_text = await llm_call_func(
+        # Use the corrected signature from type hint
+        success, result_or_error = await llm_call_func(
              api_url=llm_config['url'], api_key=llm_config['key'], payload=summ_payload,
              temperature=llm_config['temp'], timeout=120, caller_info="i4_llm_agent_Summarizer",
         )
 
         # --- Process Summarization Result ---
-        if (isinstance(summary_result_text, str) and not summary_result_text.startswith("[Error:") and summary_result_text.strip()):
+        if success and isinstance(result_or_error, str) and result_or_error.strip():
+            summary_result_text = result_or_error
             func_logger.info("Summary generated successfully by LLM.")
             generated_summary = summary_result_text.strip() # Clean the summary
             summary_id = f"t1_sum_{uuid.uuid4()}"
@@ -340,12 +364,17 @@ async def manage_tier1_summarization(
                 func_logger.error(f"Failed to save T1 summary {summary_id} via callback. Last summary index not updated.")
                 # Do NOT update new_last_summary_index if save failed
 
-        elif isinstance(summary_result_text, str) and summary_result_text.startswith("[Error:"):
-            # Log specific error from LLM call
-            func_logger.error(f"Summarizer LLM call failed: {summary_result_text}")
+        elif success and (not isinstance(result_or_error, str) or not result_or_error.strip()):
+             # Handle cases where LLM call succeeded but returned empty or wrong type
+             func_logger.error(f"Summarization failed (LLM call succeeded but returned empty/invalid content). Result Type: {type(result_or_error)}")
+        elif not success and isinstance(result_or_error, dict):
+            # Log specific error dict from LLM call
+            error_type = result_or_error.get('error_type', 'Unknown')
+            error_msg = result_or_error.get('message', 'No details provided')
+            func_logger.error(f"Summarizer LLM call failed: Type='{error_type}', Message='{error_msg}'.")
         else:
-            # Log generic failure if result was None or empty
-            func_logger.error(f"Summarization failed (LLM returned None or empty content). Result: '{summary_result_text}'")
+            # Log generic failure if result was None or unexpected type
+            func_logger.error(f"Summarization failed (LLM call failed). Result: '{result_or_error}'")
 
     except Exception as e:
         func_logger.error(f"Unexpected error during manage_tier1_summarization execution block: {e}", exc_info=True)
