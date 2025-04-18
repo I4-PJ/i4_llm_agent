@@ -1,6 +1,7 @@
 pyproject.toml
 i4_llm_agent/__init__.py
 i4_llm_agent/api_client.py
+i4_llm_agent/cache.py
 i4_llm_agent/history.py
 i4_llm_agent/memory.py
 i4_llm_agent/prompting.py
