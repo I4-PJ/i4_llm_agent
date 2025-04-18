@@ -5,55 +5,56 @@
 
 ## Overview
 
-┌──────────────────────────────────────────────────────────────────┐
-│                        USER MESSAGE INPUT                        │
-└──────────────────────────────────────────────────────────────────┘
-                                 │
-                   ┌────────────┴─────────────┐
-                   │                          │
-       ┌───────────▼────────────┐   ┌─────────▼───────────┐
-       │   MEMORY PIPELINE      │   │   RAG PIPELINE      │
-       │  (T0 → T1 → T2 Flow)   │   │ (Query → Cache → LLM)│
-       └───────────┬────────────┘   └─────────┬───────────┘
-                   │                          │
-         ┌─────────▼──────────┐     ┌─────────▼────────────┐
-         │ TIER 0: Active Chat│     │ Generate RAG Query   │
-         │ (last N turns)     │     │ (based on T0 + input)│
-         └─────────┬──────────┘     └─────────┬────────────┘
-                   │                          │
-     ┌─────────────▼────────────┐   ┌─────────▼────────────┐
-     │ If T0 token limit hit →  │   │ Search ChromaDB (T2) │
-     │ summarize oldest block   │   │ vector docs          │
-     │ with external LLM        │   └─────────┬────────────┘
-     └─────────────┬────────────┘             │
-                   │                          ▼
-        ┌──────────▼────────────┐   ┌────────────────────────────┐
-        │ Save summary as TIER 1│   │ Step 1: Gemini Refines RAG │
-        │ block in SQLite       │   │   → Cached in SQLite       │
-        └──────────┬────────────┘   └─────────┬──────────────────┘
-                   │                          ▼
-        ┌──────────▼────────────┐   ┌────────────────────────────┐
-        │ If T1 queue is full → │   │ Step 2: Context Selector   │
-        │ push oldest to TIER 2 │   │ (filters cache for relevance)│
-        │ (ChromaDB vector)     │   └─────────┬──────────────────┘
-        └──────────┬────────────┘             ▼
-                   │                ┌────────────────────────────┐
-                   │                │ INJECTED CONTEXT OUTPUT    │
-                   └────────────────► (Refined + Compressed)     │
-                                    └─────────┬──────────────────┘
-                                              ▼
-                     ┌─────────────────────────────────────────────┐
-                     │  FINAL LLM PROMPT CONSTRUCTION              │
-                     │  - System prompt                            │
-                     │  - Active T0                                │
-                     │  - Selected memory context (from RAG)       │
-                     │  - Current user input                       │
-                     └────────────────┬────────────────────────────┘
-                                      ▼
-                          ┌─────────────────────────┐
-                          │ FINAL LLM RESPONSE      │
-                          │ (e.g. GPT-4 / Claude)   │
-                          └─────────────────────────┘
+<pre>
++------------------------------------------------------------+
+|                    USER MESSAGE INPUT                     |
++------------------------------------------------------------+
+                             |
+               +-------------+--------------+
+               |                            |
++--------------v-------------+  +-----------v-------------+
+|     MEMORY PIPELINE        |  |       RAG PIPELINE      |
+|   (T0 → T1 → T2 Process)   |  | (Query → Cache → Refine)|
++--------------+-------------+  +-----------+-------------+
+               |                            |
+   +-----------v------------+    +----------v------------+
+   | T0: Active Chat Window |    | Generate Query from   |
+   | (last N turns,         |    |   T0 + User Input     |
+   |     token-limited)     |    |                       |
+   +-----------+------------+    +----------+------------+
+               |                            |
+   +-----------v------------+    +----------v------------+
+   | If T0 > limit:         |    | RAG: Search ChromaDB  |
+   | Summarize oldest block |    | (vector store - T2)   |
+   | → via external LLM     |    +----------+------------+
+   +-----------+------------+               |
+               |                            |
+   +-----------v------------+    +----------v-------------+
+   | Store summary to T1 DB |    | Step 1: Gemini refines |
+   | (SQLite, fixed-length) |    |        → cache (SQLite)|
+   +-----------+------------+    +----------+-------------+
+               |                            |
+   +-----------v------------+    +----------v-------------+
+   | If T1 is full:         |    | Step 2: Select context |
+   | Push oldest summary to |    | relevant to current    |
+   | T2 (ChromaDB vector DB)|    | turn from refined cache|
+   +-----------+------------+    +----------+-------------+
+               |                            |
+               +-------------+--------------+
+                             |
+                +------------v------------+
+                |  PROMPT CONSTRUCTION    |
+                |  - System Prompt        |
+                |  - T0 History           |
+                |  - RAG Memory Slice     |
+                |  - User Message         |
+                +------------+------------+
+                             |
+                +------------v------------+
+                |   FINAL LLM GENERATION  |
+                |   (e.g., GPT-4, Claude) |
+                +-------------------------+
+</pre>
 
 
 PIPE orchestrates memory and retrieval around a **dual-path memory processing system**:
