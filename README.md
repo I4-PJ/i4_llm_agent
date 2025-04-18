@@ -5,6 +5,57 @@
 
 ## Overview
 
+┌──────────────────────────────────────────────────────────────────┐
+│                        USER MESSAGE INPUT                        │
+└──────────────────────────────────────────────────────────────────┘
+                                 │
+                   ┌────────────┴─────────────┐
+                   │                          │
+       ┌───────────▼────────────┐   ┌─────────▼───────────┐
+       │   MEMORY PIPELINE      │   │   RAG PIPELINE      │
+       │  (T0 → T1 → T2 Flow)   │   │ (Query → Cache → LLM)│
+       └───────────┬────────────┘   └─────────┬───────────┘
+                   │                          │
+         ┌─────────▼──────────┐     ┌─────────▼────────────┐
+         │ TIER 0: Active Chat│     │ Generate RAG Query   │
+         │ (last N turns)     │     │ (based on T0 + input)│
+         └─────────┬──────────┘     └─────────┬────────────┘
+                   │                          │
+     ┌─────────────▼────────────┐   ┌─────────▼────────────┐
+     │ If T0 token limit hit →  │   │ Search ChromaDB (T2) │
+     │ summarize oldest block   │   │ vector docs          │
+     │ with external LLM        │   └─────────┬────────────┘
+     └─────────────┬────────────┘             │
+                   │                          ▼
+        ┌──────────▼────────────┐   ┌────────────────────────────┐
+        │ Save summary as TIER 1│   │ Step 1: Gemini Refines RAG │
+        │ block in SQLite       │   │   → Cached in SQLite       │
+        └──────────┬────────────┘   └─────────┬──────────────────┘
+                   │                          ▼
+        ┌──────────▼────────────┐   ┌────────────────────────────┐
+        │ If T1 queue is full → │   │ Step 2: Context Selector   │
+        │ push oldest to TIER 2 │   │ (filters cache for relevance)│
+        │ (ChromaDB vector)     │   └─────────┬──────────────────┘
+        └──────────┬────────────┘             ▼
+                   │                ┌────────────────────────────┐
+                   │                │ INJECTED CONTEXT OUTPUT    │
+                   └────────────────► (Refined + Compressed)     │
+                                    └─────────┬──────────────────┘
+                                              ▼
+                     ┌─────────────────────────────────────────────┐
+                     │  FINAL LLM PROMPT CONSTRUCTION              │
+                     │  - System prompt                            │
+                     │  - Active T0                                │
+                     │  - Selected memory context (from RAG)       │
+                     │  - Current user input                       │
+                     └────────────────┬────────────────────────────┘
+                                      ▼
+                          ┌─────────────────────────┐
+                          │ FINAL LLM RESPONSE      │
+                          │ (e.g. GPT-4 / Claude)   │
+                          └─────────────────────────┘
+
+
 PIPE orchestrates memory and retrieval around a **dual-path memory processing system**:
 
 - **Memory Line (TIER 0 → TIER 1 → TIER 2)**
