@@ -5,58 +5,6 @@
 
 ## Overview
 
-<pre>
-+------------------------------------------------------------+
-|                    USER MESSAGE INPUT                      |
-+------------------------------------------------------------+
-                             |
-               +-------------+--------------+
-               |                            |
-+--------------v-------------+  +-----------v-------------+
-|     MEMORY PIPELINE        |  |       RAG PIPELINE      |
-|   (T0 → T1 → T2 Process)   |  | (Query → Cache → Refine)|
-+--------------+-------------+  +-----------+-------------+
-               |                            |
-   +-----------v------------+    +----------v------------+
-   | T0: Active Chat Window |    | Generate Query from   |
-   | (last N turns,         |    |   T0 + User Input     |
-   |     token-limited)     |    |                       |
-   +-----------+------------+    +----------+------------+
-               |                            |
-   +-----------v------------+    +----------v------------+
-   | If T0 > limit:         |    | RAG: Search ChromaDB  |
-   | Summarize oldest block |    | (vector store - T2)   |
-   | → via external LLM     |    +----------+------------+
-   +-----------+------------+               |
-               |                            |
-   +-----------v------------+    +----------v-------------+
-   | Store summary to T1 DB |    | Step 1: Gemini refines |
-   | (SQLite, fixed-length) |    |        → cache (SQLite)|
-   +-----------+------------+    +----------+-------------+
-               |                            |
-   +-----------v------------+    +----------v-------------+
-   | If T1 is full:         |    | Step 2: Select context |
-   | Push oldest summary to |    | relevant to current    |
-   | T2 (ChromaDB vector DB)|    | turn from refined cache|
-   +-----------+------------+    +----------+-------------+
-               |                            |
-               +-------------+--------------+
-                             |
-                +------------v------------+
-                |  PROMPT CONSTRUCTION    |
-                |  - System Prompt        |
-                |  - T0 History           |
-                |  - RAG Memory Slice     |
-                |  - User Message         |
-                +------------+------------+
-                             |
-                +------------v------------+
-                |   FINAL LLM GENERATION  |
-                |   (e.g., GPT-4, Claude) |
-                +-------------------------+
-</pre>
-
-
 PIPE orchestrates memory and retrieval around a **dual-path memory processing system**:
 
 - **Memory Line (TIER 0 → TIER 1 → TIER 2)**
