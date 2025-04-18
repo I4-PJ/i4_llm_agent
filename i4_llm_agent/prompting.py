@@ -7,11 +7,9 @@ import asyncio
 from typing import Tuple, Union, Optional, Dict, List, Any, Callable, Coroutine
 
 # --- Existing Imports from i4_llm_agent ---
-# Assume history utils are correctly imported
 try:
     from .history import get_recent_turns, format_history_for_llm, DIALOGUE_ROLES
 except ImportError:
-     # Add basic fallbacks or re-raise if critical
      DIALOGUE_ROLES = ["user", "assistant"]
      def get_recent_turns(*args, **kwargs): return []
      def format_history_for_llm(*args, **kwargs): return ""
@@ -33,94 +31,138 @@ TAG_LABELS = {
 }
 EMPTY_CONTEXT_PLACEHOLDER = "[No Background Information Available]"
 
-# --- Constants for Refiner ---
-REFINER_QUERY_PLACEHOLDER = "{query}" # Use standard format braces now
-REFINER_CONTEXT_PLACEHOLDER = "{external_context}"
-REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
+# --- Constants for Stateless Refiner ---
+STATELESS_REFINER_QUERY_PLACEHOLDER = "{query}"
+STATELESS_REFINER_CONTEXT_PLACEHOLDER = "{external_context}"
+STATELESS_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# <<< Default Refiner Template (for stateless OWI refinement - kept for compatibility) >>>
+# <<< Default Template for Stateless Refinement (Kept for compatibility) >>>
 DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
+[[SYSTEM DIRECTIVE]]
 **Role:** Roleplay Context Extractor
 **Task:** Analyze the provided CONTEXT DOCUMENTS (character backstories, relationship histories, past events, lore) and the RECENT CHAT HISTORY (dialogue, actions, emotional expressions).
 **Objective:** Based ONLY on this information, extract and describe the specific details, memories, relationship dynamics, stated feelings, significant past events, or relevant character traits that are **essential for understanding the full context** of and accurately answering the LATEST USER QUERY from a roleplaying perspective.
 **Instructions:**
-1.  **Identify the core subject** of the LATEST USER QUERY and any immediately related contextual elements.
-2.  **Extract Key Information:** Prioritize extracting verbatim sentences or short passages that **directly address** the core subject and related elements.
-3.  **Describe Key Dynamics:** For relationship queries, don't just state the status (e.g., \"complex\"); **extract specific details or events from the context that illustrate *why* it's complex** (e.g., foundational events, major conflicts, stated feelings, defining interactions).
-4.  **Include Foundational Context:** Extract specific details about significant past events or character history mentioned in the context that **directly led to or fundamentally define** the current situation or relationship relevant to the query.
-5.  **Incorporate Recent Developments:** Include details from the RECENT CHAT HISTORY that show the *current* state or recent evolution of the situation or relationship.
-6.  **Be Descriptive but Focused:** Capture the nuance and specific details present in the source material relevant to the query. Avoid overly generic summaries, especially regarding character relationships and motivations.
-7.  **Prioritize Relevance over Extreme Brevity:** While redundancy should be removed, ensure that key descriptive details illustrating relationships, motivations, or foundational events are included, even if it makes the summary slightly longer. Focus conciseness on removing truly irrelevant information.
-8.  **Ensure Accuracy:** Do not infer, assume, or add information not explicitly present in the provided CONTEXT DOCUMENTS or RECENT CHAT HISTORY.
-9.  **Output:** Present the extracted points clearly. If no relevant information is found, state clearly: \"No specific details relevant to the query were found in the provided context.\"
+1.  Identify the core subject of the LATEST USER QUERY and any immediately related contextual elements.
+2.  Extract Key Information: Prioritize extracting verbatim sentences or short passages that **directly address** the core subject and related elements.
+3.  Describe Key Dynamics: ...extract specific details or events... that illustrate *why* it's complex...
+4.  Include Foundational Context: Extract specific details... that **directly led to or fundamentally define** the current situation...
+5.  Incorporate Recent Developments: Include details from the RECENT CHAT HISTORY...
+6.  Be Descriptive but Focused: Capture the nuance... Avoid overly generic summaries...
+7.  Prioritize Relevance over Extreme Brevity: ...ensure that key descriptive details... are included...
+8.  Ensure Accuracy: Do not infer, assume, or add information not explicitly present...
+9.  Output: Present the extracted points clearly. If no relevant information is found, state clearly: \"No specific details relevant to the query were found in the provided context.\"
 
-**LATEST USER QUERY:** {REFINER_QUERY_PLACEHOLDER}
+**LATEST USER QUERY:** {STATELESS_REFINER_QUERY_PLACEHOLDER}
 **CONTEXT DOCUMENTS:**
 ---
-{REFINER_CONTEXT_PLACEHOLDER}
+{STATELESS_REFINER_CONTEXT_PLACEHOLDER}
 ---
 **RECENT CHAT HISTORY:**
 ---
-{REFINER_HISTORY_PLACEHOLDER}
+{STATELESS_REFINER_HISTORY_PLACEHOLDER}
 ---
 
 Concise Relevant Information (for final answer generation):
 """
 
-# --- NEW: Default RAG Cache Refiner Prompt Template ---
-# Define specific placeholders for the curated/cached refiner
-RAG_CACHE_REFINER_QUERY_PLACEHOLDER = "{query}"
-RAG_CACHE_REFINER_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
-RAG_CACHE_REFINER_CACHED_CONTEXT_PLACEHOLDER = "{cached_pipe_rag}"
-RAG_CACHE_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
+# --- NEW: Constants for Two-Step RAG Cache Refinement ---
 
-# <<< Default Template Text for the Stateful RAG Cache Refiner >>>
-DEFAULT_RAG_CACHE_REFINER_TEMPLATE_TEXT = f"""
-**Role:** Session Context Curator & Refiner
-**Task:** Analyze the inputs: LATEST USER QUERY, RECENT CHAT HISTORY, CURRENT OWI RETRIEVAL (fresh background info), and PREVIOUSLY REFINED CACHE (the curated background from the last turn). Synthesize these into an **updated, concise, and relevant context block** suitable for answering the query and serving as the cache for the *next* turn.
-**Objective:** Create the most accurate and focused background context possible by:
-    1.  Extracting information from CURRENT OWI RETRIEVAL and PREVIOUSLY REFINED CACHE that is **directly relevant** to the LATEST USER QUERY and RECENT CHAT HISTORY.
-    2.  **Actively filtering out and discarding** information from *both* sources that is **no longer relevant** given the dialogue's current focus and direction.
-    3.  Merging and prioritizing the relevant information, ensuring accuracy and preserving key roleplaying details (relationships, motivations, events).
-    4.  Producing a single, coherent text block that represents the best possible background context *for this moment in the conversation*.
+# Placeholders for Step 1 (Cache Update)
+CACHE_UPDATE_QUERY_PLACEHOLDER = "{query}"
+CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
+CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
+CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+
+# Default Template Text for Step 1 (Cache Update)
+DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Session Background Curator
+**Task:** Update the PREVIOUSLY REFINED CACHE by intelligently merging relevant new factual information AND synthesizing core character personality traits from the CURRENT OWI RETRIEVAL. Use the LATEST USER QUERY and RECENT CHAT HISTORY primarily for context, resolving contradictions, and noting significant shifts.
+**Objective:** Maintain an accurate and concise persistent cache containing both background information (lore, established character details, world facts) AND core personality profiles relevant to the ongoing session.
 
 **Instructions:**
-1.  **Identify Core Need:** Determine the specific background information (lore, character details, past events from documents) required to understand and answer the LATEST USER QUERY in the context of the RECENT CHAT HISTORY.
-2.  **Evaluate Relevance:** Assess *both* the CURRENT OWI RETRIEVAL and the PREVIOUSLY REFINED CACHE against the core need. Extract sentences or passages **containing only background information** that directly address it.
-3.  **Prioritize & Merge Background Info:**
-    *   If background information overlaps between sources, prefer the version that is more specific or detailed.
-    *   If CURRENT OWI RETRIEVAL contains *new relevant background info* missing from the cache, incorporate it.
-    *   If CURRENT OWI RETRIEVAL contradicts cached background info, use the RECENT CHAT HISTORY *only* to help decide which background version seems more applicable *now*, but do not include the history details themselves in the output.
-4.  **Filter Aggressively (Pruning Background Info):** Examine *all background information* initially deemed relevant (from both cache and new retrieval). **Discard any background details that are no longer pertinent** to the conversation's current focus. Aim to keep the output tightly focused on the relevant *background*.
-5.  **Preserve Relevant RP Nuance (Background Only):** Retain key descriptive background details illustrating character relationships, motivations, or foundational events *from the source documents/cache* if they remain relevant.
-6.  **Ensure Accuracy:** Do not infer or add information not present in the provided inputs. Ground the output strictly in the source background texts.
-7.  **Handle Empty Inputs:** (Keep as before)
-    *   If PREVIOUSLY REFINED CACHE is empty/error, focus solely on refining the CURRENT OWI RETRIEVAL.
-    *   If CURRENT OWI RETRIEVAL is empty, focus on refining/filtering the PREVIOUSLY REFINED CACHE.
-8.  **CRITICAL - Output Content:** **Your output MUST contain ONLY the relevant background information (lore, character details, relationship history, past events drawn from the CURRENT OWI RETRIEVAL and PREVIOUSLY REFINED CACHE). DO NOT summarize the RECENT CHAT HISTORY itself in your output.** The history is provided *only* to help you judge the relevance of the background information. If no relevant *background* information is found, state clearly: "[No relevant background context found for the current query]".
+
+1.  **Identify New Factual Information:** Scan CURRENT OWI RETRIEVAL for background *facts* (lore, character facts like lineage/status, established relationships, past events, location details) NOT already present or fully captured in the PREVIOUSLY REFINED CACHE.
+2.  **Extract & Synthesize Personality Traits:**
+    *   Scan CURRENT OWI RETRIEVAL (especially `character_profile` and `character_backstory` documents) for defining personality traits, core motivations, emotional patterns, strengths, and weaknesses for key characters involved in the session (e.g., Emily, Caldric, Julia).
+    *   Look for explicit lists (like bullet points in profiles) or consistent descriptive phrases.
+    *   **Synthesize** these traits into concise descriptions for each character within the cache. If a character's traits are already cached, update them *only if* the new information provides significant clarification or correction based on immutable profile sources.
+    *   Use RECENT CHAT HISTORY primarily to *confirm* established traits or to note *significant, lasting deviations* indicated by major events or consistent character development reflected in the dialogue. **Do not constantly overwrite core personality traits based on temporary actions or moods.**
+3.  **Evaluate Relevance (Facts):** Determine if the *new factual information* identified in Step 1 is potentially relevant to the broader session context, even if not directly tied to the LATEST USER QUERY. Prioritize adding foundational details.
+4.  **Merge & Update:**
+    *   Integrate the relevant new *factual information* (from Step 1 & 3) into the previous cache content. If new factual information contradicts or provides a more accurate/detailed version of existing cached facts, update the cache accordingly. Use RECENT CHAT HISTORY to help resolve factual conflicts if possible.
+    *   Ensure the synthesized *personality traits* (from Step 2) are present and updated within the cache content, ideally grouped per character for clarity (e.g., under a character's name heading).
+5.  **Prune Gently:** Review the *entire* combined information (facts and personality traits). Remove cached details that are *clearly* outdated, explicitly contradicted by recent events/canon sources, or confirmed irrelevant by the dialogue flow. **Avoid removing potentially useful foundational information (facts or core traits) just because it wasn't mentioned in the last few turns.**
+6.  **Focus on Background & Personality:** The output cache must contain *both* background information (lore, facts, established character states) *and* the concise, synthesized descriptions of core character personalities/traits. **DO NOT include summaries of the RECENT CHAT HISTORY itself in the cache output.**
+7.  **Output Format:** Produce a clean, coherent text block representing the updated background cache. Structure it logically (e.g., character sections, lore sections). If no changes are needed, output the PREVIOUSLY REFINED CACHE content. If the cache was empty and OWI retrieval provided nothing relevant (neither facts nor personality), output "[No relevant background context found]".
+
+**INPUTS:**
+
+**LATEST USER QUERY (for context):**
+{CACHE_UPDATE_QUERY_PLACEHOLDER}
+
+**CURRENT OWI RETRIEVAL (potential new info):**
+---
+{CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER}
+---
+
+**PREVIOUSLY REFINED CACHE (to be updated):**
+---
+{CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY (for context):**
+---
+{CACHE_UPDATE_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (Updated Background Cache Text):**
+"""
+
+# Placeholders for Step 2 (Final Context Selection)
+FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
+FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
+FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
+FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
+
+# Default Template Text for Step 2 (Final Context Selection)
+DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Query-Focused Context Selector
+**Task:** Analyze the UPDATED SESSION CACHE and the CURRENT OWI RETRIEVAL. Based on the LATEST USER QUERY and RECENT CHAT HISTORY, extract **only the specific background details** most relevant for understanding and answering the current query accurately.
+**Objective:** Provide a concise block of immediately relevant background information for the final response generation, filtering out anything not directly pertinent to the current conversational turn.
+**Instructions:**
+1.  **Analyze Query & History:** Understand the core subject and context of the LATEST USER QUERY and RECENT CHAT HISTORY.
+2.  **Scan Sources:** Examine *both* the UPDATED SESSION CACHE and the CURRENT OWI RETRIEVAL for sentences or short passages that directly address or provide essential context for the query.
+3.  **Select Aggressively:** Extract **only** the information snippets deemed highly relevant to the immediate task. Prioritize information that explains relationships, motivations, past events, or lore directly needed to answer the query or understand the current situation described in the history.
+4.  **Exclude Irrelevant Info:** Discard any background details from the sources that are not needed for the current turn, even if factually correct.
+5.  **Combine Snippets:** Present the extracted relevant snippets as a single, coherent text block.
+6.  **Output Content:** The output must contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant background snippets are found in either source, state clearly: "[No relevant background context found for the current query]".
 
 **INPUTS:**
 
 **LATEST USER QUERY:**
-{RAG_CACHE_REFINER_QUERY_PLACEHOLDER}
+{FINAL_SELECT_QUERY_PLACEHOLDER}
 
-**CURRENT OWI RETRIEVAL:**
+**UPDATED SESSION CACHE (Primary Source):**
 ---
-{RAG_CACHE_REFINER_CURRENT_OWI_PLACEHOLDER}
----
-
-**PREVIOUSLY REFINED CACHE:**
----
-{RAG_CACHE_REFINER_CACHED_CONTEXT_PLACEHOLDER}
+{FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY:**
+**CURRENT OWI RETRIEVAL (Secondary Source):**
 ---
-{RAG_CACHE_REFINER_HISTORY_PLACEHOLDER}
+{FINAL_SELECT_CURRENT_OWI_PLACEHOLDER}
 ---
 
-**OUTPUT (Updated & Filtered Relevant BACKGROUND Context ONLY):**
+**RECENT CHAT HISTORY (for relevance check):**
+---
+{FINAL_SELECT_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (Selected Relevant Background Snippets for This Turn):**
 """
+
 
 # --- Function: Clean Context Tags (Existing) ---
 def clean_context_tags(system_content: str) -> str:
@@ -140,196 +182,112 @@ def process_system_prompt(messages: List[Dict]) -> Tuple[str, Optional[str]]:
     original_system_prompt_content = ""
     extracted_owi_context = None
     base_system_prompt_text = "You are a helpful assistant."
-
-    if not isinstance(messages, list):
-         func_logger.warning("Input 'messages' is not a list. Cannot process system prompt.")
-         return base_system_prompt_text, None
-
+    if not isinstance(messages, list): func_logger.warning("Input 'messages' not a list."); return base_system_prompt_text, None
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "system":
-            original_system_prompt_content = msg.get("content", "")
-            func_logger.debug(f"Found system prompt content (length {len(original_system_prompt_content)}).")
-            break
-
-    if not original_system_prompt_content:
-        func_logger.debug("No system message found in input.")
-        return base_system_prompt_text, None
-
+            original_system_prompt_content = msg.get("content", ""); func_logger.debug(f"Found system prompt (len {len(original_system_prompt_content)})."); break
+    if not original_system_prompt_content: func_logger.debug("No system message found."); return base_system_prompt_text, None
     owi_match = re.search(r"<context>(.*?)</context>", original_system_prompt_content, re.DOTALL | re.IGNORECASE)
-    if owi_match:
-        extracted_owi_context = owi_match.group(1).strip()
-        func_logger.debug(f"Extracted OWI context tag content (length {len(extracted_owi_context)}).")
-
+    if owi_match: extracted_owi_context = owi_match.group(1).strip(); func_logger.debug(f"Extracted OWI context (len {len(extracted_owi_context)}).")
     cleaned_base_prompt = clean_context_tags(original_system_prompt_content)
-    if cleaned_base_prompt:
-        base_system_prompt_text = cleaned_base_prompt
-    else:
-        func_logger.warning("System prompt content was empty after cleaning known tags. Using default.")
-
+    if cleaned_base_prompt: base_system_prompt_text = cleaned_base_prompt
+    else: func_logger.warning("System prompt empty after cleaning tags. Using default.")
     return base_system_prompt_text, extracted_owi_context
 
-# --- Function: Format Refiner Prompt (for stateless refinement) ---
-def format_refiner_prompt(
-    external_context: str, # Renamed arg for clarity vs curated refiner
-    recent_history_str: str,
-    query: str,
-    template: Optional[str] = None # Template is now an argument
-) -> str:
-    """
-    Constructs the prompt for the STATELESS external refiner LLM using the provided template.
-    Uses placeholders {external_context}, {recent_history_str}, {query}.
-    """
-    func_logger = logging.getLogger(__name__ + '.format_refiner_prompt')
-    # Use provided template or the stateless default
+# --- Function: Format Stateless Refiner Prompt (Existing) ---
+def format_stateless_refiner_prompt(external_context: str, recent_history_str: str, query: str, template: Optional[str] = None) -> str:
+    # (Keep implementation as before, maybe rename placeholders to match new style)
+    func_logger = logging.getLogger(__name__ + '.format_stateless_refiner_prompt')
     prompt_template = template if template is not None else DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE
-    func_logger.debug(f"Using stateless refiner prompt template (length {len(prompt_template)}).")
-
-    # Basic sanitization (prevent breaking the prompt structure)
     safe_context = external_context.replace("---", "===") if isinstance(external_context, str) else ""
     safe_history = recent_history_str.replace("---", "===") if isinstance(recent_history_str, str) else ""
     safe_query = query.replace("---", "===") if isinstance(query, str) else ""
-
-    # Replace placeholders using .format()
     try:
-        formatted_prompt = prompt_template.format(
-            external_context=safe_context,
-            recent_history_str=safe_history,
-            query=safe_query
-        )
-        func_logger.debug(f"Formatted Stateless Refiner Prompt (Snippet): {formatted_prompt[:500]}...")
+        formatted_prompt = prompt_template.format(external_context=safe_context, recent_history_str=safe_history, query=safe_query)
         return formatted_prompt
-    except KeyError as e:
-         func_logger.error(f"Missing placeholder in stateless refiner prompt template: {e}. Template snippet: {prompt_template[:300]}...", exc_info=True)
-         return f"[Error: Missing placeholder '{e}' in template]"
-    except Exception as e:
-        func_logger.error(f"Error formatting stateless refiner prompt template: {e}", exc_info=True)
-        return f"[Error formatting template: {type(e).__name__}]"
+    except KeyError as e: func_logger.error(f"Missing placeholder in stateless refiner prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
+    except Exception as e: func_logger.error(f"Error formatting stateless refiner prompt: {e}"); return f"[Error formatting: {type(e).__name__}]"
 
-
-# --- Function: Refine External Context (Stateless OWI refinement) ---
-async def refine_external_context(
-    external_context: str,
-    history_messages: List[Dict],
-    latest_user_query: str,
-    llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]], # Expects async wrapper
-    refiner_llm_config: Dict[str, Any], # url, key, temp, prompt_template
-    skip_threshold: int,
-    history_count: int,
-    dialogue_only_roles: List[str] = DIALOGUE_ROLES,
-    caller_info: str = "i4_llm_agent_StatelessRefiner"
-) -> str:
-    """
-    Optionally refines the provided external RAG context using an LLM (STATELESS).
-    Uses the 'format_refiner_prompt' function and its associated template/placeholders.
-    """
-    func_logger = logging.getLogger(__name__ + '.refine_external_context')
-    func_logger.debug(f"[{caller_info}] Entered refine_external_context (stateless).")
-
-    # --- Input Validation (simplified, more checks in calling code) ---
-    if not external_context or not external_context.strip():
-        return external_context
-    if not latest_user_query or not latest_user_query.strip():
-        return external_context
+# --- Function: Refine External Context (Stateless - Existing) ---
+async def refine_external_context(external_context: str, history_messages: List[Dict], latest_user_query: str, llm_call_func: Callable, refiner_llm_config: Dict, skip_threshold: int, history_count: int, dialogue_only_roles: List[str] = DIALOGUE_ROLES, caller_info: str = "StatelessRefiner") -> str:
+    # (Keep implementation as before)
+    func_logger = logging.getLogger(__name__ + '.refine_external_context'); func_logger.debug(f"[{caller_info}] Entered refine_external_context (stateless).")
+    if not external_context or not external_context.strip(): return external_context
+    if not latest_user_query or not latest_user_query.strip(): return external_context
     if not llm_call_func: return external_context
-    required_keys = ['url', 'key', 'temp'] # Template is optional here
-    if not refiner_llm_config or not all(k in refiner_llm_config for k in required_keys):
-        return external_context
-    if not refiner_llm_config['url'] or not refiner_llm_config['key']:
-         return external_context
-
-    # --- Skip Threshold Check ---
+    required_keys = ['url', 'key', 'temp']; template = refiner_llm_config.get('prompt_template') # Template optional
+    if not refiner_llm_config or not all(k in refiner_llm_config for k in required_keys): return external_context
+    if not refiner_llm_config['url'] or not refiner_llm_config['key']: return external_context
     context_length = len(external_context)
-    if skip_threshold > 0 and context_length < skip_threshold:
-        func_logger.info(f"[{caller_info}] Skipping stateless refinement: Context length ({context_length}) < Threshold ({skip_threshold}).")
-        return external_context
-
-    func_logger.info(f"[{caller_info}] Proceeding with stateless refinement (Context length {context_length}).")
-
-    # --- Prepare Refiner Inputs ---
+    if skip_threshold > 0 and context_length < skip_threshold: func_logger.info(f"[{caller_info}] Skipping stateless refinement: Length ({context_length}) < Threshold ({skip_threshold})."); return external_context
+    func_logger.info(f"[{caller_info}] Proceeding with stateless refinement (Length {context_length}).")
     recent_history_list = get_recent_turns(history_messages, history_count, dialogue_only_roles, True)
     recent_chat_history_str = format_history_for_llm(recent_history_list) if recent_history_list else "[No Recent History]"
-
-    # Use the specific formatter for stateless refinement
-    refiner_prompt_text = format_refiner_prompt(
-        external_context=external_context,
-        recent_history_str=recent_chat_history_str,
-        query=latest_user_query,
-        template=refiner_llm_config.get('prompt_template') # Pass template from config
-    )
-
-    if not refiner_prompt_text or refiner_prompt_text.startswith("[Error:"):
-         func_logger.error(f"[{caller_info}] Failed to format stateless refiner prompt: {refiner_prompt_text}. Aborting refinement.")
-         return external_context
-
+    refiner_prompt_text = format_stateless_refiner_prompt(external_context=external_context, recent_history_str=recent_chat_history_str, query=latest_user_query, template=template)
+    if not refiner_prompt_text or refiner_prompt_text.startswith("[Error:"): func_logger.error(f"[{caller_info}] Failed format stateless prompt: {refiner_prompt_text}. Aborting."); return external_context
     refiner_payload = {"contents": [{"parts": [{"text": refiner_prompt_text}]}]}
-
-    # --- Call Refiner LLM ---
     func_logger.info(f"[{caller_info}] Calling Stateless Refiner LLM...")
-    try:
-        success, response_or_error = await llm_call_func(
-            api_url=refiner_llm_config['url'], api_key=refiner_llm_config['key'],
-            payload=refiner_payload, temperature=refiner_llm_config['temp'],
-            timeout=90, caller_info=caller_info,
-        )
-    except Exception as e_call:
-         func_logger.error(f"[{caller_info}] Exception during llm_call_func: {e_call}", exc_info=True)
-         success = False; response_or_error = "LLM Call Exception"
+    try: success, response_or_error = await llm_call_func(api_url=refiner_llm_config['url'], api_key=refiner_llm_config['key'], payload=refiner_payload, temperature=refiner_llm_config['temp'], timeout=90, caller_info=caller_info)
+    except Exception as e_call: func_logger.error(f"[{caller_info}] Exception during llm_call_func: {e_call}", exc_info=True); success = False; response_or_error = "LLM Call Exception"
+    if success and isinstance(response_or_error, str) and response_or_error.strip(): refined_context = response_or_error.strip(); func_logger.info(f"[{caller_info}] Stateless refinement successful (Length: {len(refined_context)})."); return refined_context
+    else: error_details = str(response_or_error); func_logger.warning(f"[{caller_info}] Stateless refinement failed. Error: '{error_details}'. Returning original."); return external_context
 
-    # --- Process Result ---
-    if success and isinstance(response_or_error, str) and response_or_error.strip():
-        refined_context = response_or_error.strip()
-        func_logger.info(f"[{caller_info}] Stateless refinement successful (Refined length: {len(refined_context)}).")
-        return refined_context
-    else:
-        error_details = str(response_or_error)
-        func_logger.warning(f"[{caller_info}] Stateless refinement failed or returned empty. Error: '{error_details}'. Returning original context.")
-        return external_context
-
-
-# --- NEW: Format Curated Refiner Prompt (for RAG Cache) ---
-def format_curated_refiner_prompt(
+# --- NEW: Format Cache Update Prompt ---
+def format_cache_update_prompt(
+    previous_cache: str,
     current_owi_rag: str,
-    cached_pipe_rag: str,
     recent_history_str: str,
     query: str,
-    template: str # Expecting the template string directly
+    template: str # Expecting the specific template for this step
 ) -> str:
-    """
-    Formats the prompt for the STATEFUL RAG Cache refiner LLM using its specific template.
-    Uses placeholders {current_owi_rag}, {cached_pipe_rag}, {recent_history_str}, {query}.
-    """
-    func_logger = logging.getLogger(__name__ + '.format_curated_refiner_prompt')
-
-    if not template or not isinstance(template, str):
-        func_logger.error("Missing or invalid template string for curated refiner prompt.")
-        return "[Error: Invalid Template Provided]"
-
-    # Basic sanitization (prevent breaking the prompt structure)
+    """Formats the prompt for Step 1 (Cache Update) LLM."""
+    func_logger = logging.getLogger(__name__ + '.format_cache_update_prompt')
+    if not template or not isinstance(template, str): return "[Error: Invalid Template for Cache Update]"
+    safe_prev_cache = previous_cache.replace("---", "===") if isinstance(previous_cache, str) else ""
     safe_current_owi = current_owi_rag.replace("---", "===") if isinstance(current_owi_rag, str) else ""
-    safe_cached_rag = cached_pipe_rag.replace("---", "===") if isinstance(cached_pipe_rag, str) else ""
     safe_history = recent_history_str.replace("---", "===") if isinstance(recent_history_str, str) else ""
     safe_query = query.replace("---", "===") if isinstance(query, str) else ""
-
-    # Replace placeholders using .format()
     try:
-        # Ensure the template uses the expected placeholder names
+        # Use the specific placeholders defined for this template
         formatted_prompt = template.format(
+            previous_cache=safe_prev_cache,
             current_owi_rag=safe_current_owi,
-            cached_pipe_rag=safe_cached_rag,
             recent_history_str=safe_history,
             query=safe_query
         )
-        # func_logger.debug(f"Formatted Curated Refiner Prompt (Snippet): {formatted_prompt[:500]}...")
         return formatted_prompt
-    except KeyError as e:
-         func_logger.error(f"Missing placeholder in curated refiner prompt template: {e}. Template snippet: {template[:300]}...", exc_info=True)
-         return f"[Error: Missing placeholder '{e}' in curated template]"
-    except Exception as e:
-        func_logger.error(f"Error formatting curated refiner prompt template: {e}", exc_info=True)
-        return f"[Error formatting curated template: {type(e).__name__}]"
+    except KeyError as e: func_logger.error(f"Missing placeholder in cache update prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
+    except Exception as e: func_logger.error(f"Error formatting cache update prompt: {e}"); return f"[Error formatting: {type(e).__name__}]"
 
+# --- NEW: Format Final Context Selection Prompt ---
+def format_final_context_selection_prompt(
+    updated_cache: str,
+    current_owi_rag: str, # Include current OWI for secondary check
+    recent_history_str: str,
+    query: str,
+    template: str # Expecting the specific template for this step
+) -> str:
+    """Formats the prompt for Step 2 (Final Context Selection) LLM."""
+    func_logger = logging.getLogger(__name__ + '.format_final_context_selection_prompt')
+    if not template or not isinstance(template, str): return "[Error: Invalid Template for Context Selection]"
+    safe_updated_cache = updated_cache.replace("---", "===") if isinstance(updated_cache, str) else ""
+    safe_current_owi = current_owi_rag.replace("---", "===") if isinstance(current_owi_rag, str) else ""
+    safe_history = recent_history_str.replace("---", "===") if isinstance(recent_history_str, str) else ""
+    safe_query = query.replace("---", "===") if isinstance(query, str) else ""
+    try:
+        # Use the specific placeholders defined for this template
+        formatted_prompt = template.format(
+            updated_cache=safe_updated_cache,
+            current_owi_rag=safe_current_owi, # Pass current OWI as well
+            recent_history_str=safe_history,
+            query=safe_query
+        )
+        return formatted_prompt
+    except KeyError as e: func_logger.error(f"Missing placeholder in final selection prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
+    except Exception as e: func_logger.error(f"Error formatting final selection prompt: {e}"); return f"[Error formatting: {type(e).__name__}]"
 
-# --- Function: Generate RAG Query (Existing - Ensure it uses async wrapper correctly) ---
+# --- Function: Generate RAG Query (Existing) ---
+# --- Function: Generate RAG Query (Corrected) ---
 async def generate_rag_query(
     latest_message_str: str,
     dialogue_context_str: str,
@@ -337,87 +295,97 @@ async def generate_rag_query(
     llm_config: Dict[str, Any],
     caller_info: str = "i4_llm_agent_RAGQueryGen",
 ) -> Optional[str]: # Returns string or None/Error string
-    # (Keep implementation as before, it correctly uses the wrapper)
     logger.debug(f"[{caller_info}] Generating RAG query...")
+
+    # --- Pre-checks ---
     if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func):
-        logger.error(f"[{caller_info}] Invalid llm_call_func."); return "[Error: Invalid LLM call func]"
+        logger.error(f"[{caller_info}] Invalid llm_call_func.")
+        return "[Error: Invalid LLM func]" # Exit early
+
     required_keys = ['url', 'key', 'temp', 'prompt']
-    if not llm_config or not all(k in llm_config for k in required_keys):
-        missing = [k for k in required_keys if k not in llm_config]; logger.error(f"[{caller_info}] Missing LLM config keys: {missing}"); return f"[Error: Missing RAGQ config: {missing}]"
-    if not llm_config['url'] or not llm_config['key']: logger.error(f"[{caller_info}] Missing RAGQ URL/Key."); return "[Error: Missing RAGQ URL/Key]"
-    if not llm_config['prompt'] or not isinstance(llm_config['prompt'], str): logger.error(f"[{caller_info}] Missing/Invalid RAGQ prompt."); return "[Error: Missing/Invalid RAGQ prompt]"
-    ragq_prompt_text = "[Error: Prompt Formatting Failed]"
+    template = llm_config.get('prompt') # Get template safely
+
+    if not llm_config or not all(k in llm_config for k in required_keys) or not template or not isinstance(template, str):
+        missing = [k for k in required_keys if k not in llm_config] if isinstance(llm_config, dict) else required_keys
+        if not template or not isinstance(template, str): missing.append('prompt (invalid/missing)')
+        logger.error(f"[{caller_info}] Missing/Invalid RAGQ config/prompt. Missing: {missing}")
+        return f"[Error: Invalid RAGQ config]" # Exit early
+
+    if not llm_config.get('url') or not llm_config.get('key'):
+        logger.error(f"[{caller_info}] Missing RAGQ URL/Key.")
+        return "[Error: Missing RAGQ URL/Key]" # Exit early
+
+    # --- Format Prompt ---
+    ragq_prompt_text = None # Initialize to None (or an error indicator)
+    formatting_error = None # Flag for errors
+
     try:
-        template = llm_config['prompt']
-        # Using .format() for consistency, expecting {latest_message} and {dialogue_context}
-        ragq_prompt_text = template.format(latest_message=latest_message_str or "[No user message]", dialogue_context=dialogue_context_str or "[No dialogue context]")
-    except KeyError as e: logger.error(f"[{caller_info}] RAGQ prompt key error: {e}."); return f"[Error: RAGQ prompt key error: {e}]"
-    except Exception as e_fmt: logger.error(f"[{caller_info}] Failed format RAGQ prompt: {e_fmt}", exc_info=True); return f"[Error: RAGQ prompt format failed - {type(e_fmt).__name__}]"
+        # Attempt formatting
+        ragq_prompt_text = template.format(
+            latest_message=latest_message_str or "[No message]",
+            dialogue_context=dialogue_context_str or "[No history]"
+        )
+        if not ragq_prompt_text or not ragq_prompt_text.strip():
+             # Handle case where formatting results in empty string
+             formatting_error = "[Error: Formatted prompt is empty]"
+             logger.error(f"[{caller_info}] RAGQ prompt formatting resulted in empty string.")
+
+    except KeyError as e:
+        formatting_error = f"[Error: RAGQ key error: {e}]"
+        logger.error(f"[{caller_info}] RAGQ prompt key error: {e}.")
+    except Exception as e_fmt:
+        formatting_error = f"[Error: RAGQ format failed ({type(e_fmt).__name__})]"
+        logger.error(f"[{caller_info}] Failed format RAGQ prompt: {e_fmt}", exc_info=True) # Log full traceback here
+
+    # --- Check if formatting failed ---
+    if formatting_error:
+        return formatting_error # Return the specific formatting error
+
+    # --- Formatting Succeeded - Proceed to LLM Call ---
+    # Now this code is reachable only if formatting was successful
     ragq_payload = {"contents": [{"parts": [{"text": ragq_prompt_text}]}]}
     logger.info(f"[{caller_info}] Calling LLM for RAG query generation...")
-    # Call wrapper which returns Tuple[bool, Union[str, Dict]]
+
     try:
         success, response_or_error = await llm_call_func(
-            api_url=llm_config['url'], api_key=llm_config['key'], payload=ragq_payload,
-            temperature=llm_config['temp'], timeout=45, caller_info=caller_info,
+            api_url=llm_config['url'], api_key=llm_config['key'],
+            payload=ragq_payload, temperature=llm_config['temp'],
+            timeout=45, caller_info=caller_info,
         )
     except Exception as e_call:
         logger.error(f"[{caller_info}] Exception calling LLM wrapper for RAGQ: {e_call}", exc_info=True)
         success = False
         response_or_error = f"[Error: LLM Call Exception {type(e_call).__name__}]"
 
-    # Process the result based on the tuple
+    # --- Process LLM Result ---
     if success and isinstance(response_or_error, str):
         final_query = response_or_error.strip()
-        if final_query: logger.info(f"[{caller_info}] Generated RAG query: '{final_query}'"); return final_query
-        else: logger.warning(f"[{caller_info}] RAGQ LLM returned empty string."); return "[Error: RAGQ generation returned empty]"
-    else: # Failure or unexpected type
-        error_msg = str(response_or_error) if not success else f"Unexpected success type: {type(response_or_error)}"
-        logger.error(f"[{caller_info}] RAGQ failed: {error_msg}");
-        # Return a consistent error string format if possible
-        if isinstance(response_or_error, dict):
-            return f"[Error: {response_or_error.get('error_type', 'RAGQ Error')} - {response_or_error.get('message', 'Unknown')}]"
+        if final_query:
+            logger.info(f"[{caller_info}] Generated RAG query: '{final_query}'")
+            return final_query
         else:
-            return f"[Error: RAGQ Failed - {error_msg[:100]}]"
-
-# --- Function: Combine Background Context (Existing) ---
-def combine_background_context(
-    owi_context: Optional[str] = None, # This will now receive the *refined* context
-    t1_summaries: Optional[List[str]] = None,
-    t2_rag_results: Optional[List[str]] = None,
-    separator: str = "\n---\n",
-    block_separator: str = "\n\n",
-) -> str:
-    # (Keep implementation as before - it just combines whatever strings it receives)
-    context_parts = []
-    # Use a more generic label now, as it might be refined OWI or cached context
-    if owi_context and isinstance(owi_context, str) and owi_context.strip() and owi_context != EMPTY_CONTEXT_PLACEHOLDER:
-        context_parts.append(f"--- Relevant Background Context ---\n{owi_context.strip()}")
-    if t1_summaries and isinstance(t1_summaries, list):
-        valid_t1 = [s for s in t1_summaries if isinstance(s, str) and s.strip()]
-        if valid_t1: context_parts.append(f"--- Recent Summaries (T1) ---\n{separator.join(valid_t1)}")
-    if t2_rag_results and isinstance(t2_rag_results, list):
-        valid_t2 = [s for s in t2_rag_results if isinstance(s, str) and s.strip()]
-        if valid_t2: context_parts.append(f"--- Related Summaries (T2 RAG) ---\n{separator.join(valid_t2)}")
-    if not context_parts: return EMPTY_CONTEXT_PLACEHOLDER
-    combined_context_string = block_separator.join(context_parts).strip()
-    return combined_context_string
-
+            logger.warning(f"[{caller_info}] RAGQ LLM returned empty string.")
+            return "[Error: RAGQ empty]" # Return error if LLM response is empty
+    else:
+        # Handle LLM call failure or unexpected success type
+        error_msg = str(response_or_error)
+        logger.error(f"[{caller_info}] RAGQ failed: {error_msg}")
+        if isinstance(response_or_error, dict):
+             # Try to extract details from error dict
+             err_type = response_or_error.get('error_type', 'RAGQ Err')
+             err_msg_detail = response_or_error.get('message', 'Unknown')
+             return f"[Error: {err_type} - {err_msg_detail}]"
+        else:
+             # Generic failure message
+             return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
 # --- Function: Construct Final LLM Payload (Existing) ---
-def construct_final_llm_payload(
-    system_prompt: str,
-    history: List[Dict],
-    context: Optional[str], # Receives output from combine_background_context
-    query: str,
-    strategy: str = 'standard',
-    include_ack_turns: bool = True
-) -> Dict[str, Any]:
+def construct_final_llm_payload(system_prompt: str, history: List[Dict], context: Optional[str], query: str, strategy: str = 'standard', include_ack_turns: bool = True) -> Dict[str, Any]:
     # (Keep implementation as before)
     logger.debug(f"Constructing final LLM payload. Strategy: {strategy}, ACKs: {include_ack_turns}")
     gemini_contents = []
     system_prompt_text = system_prompt or "You are a helpful assistant."
-    gemini_contents.append({"role": "user", "parts": [{"text": f"System Instructions:\n{system_prompt_text}"}]})
+    gemini_contents.append({"role": "user", "parts": [{"text": f"System Instructions:\\n{system_prompt_text}"}]})
     if include_ack_turns: gemini_contents.append({"role": "model", "parts": [{"text": "Understood. I will follow these instructions."}]})
     history_turns = []
     for msg in history:
@@ -427,54 +395,81 @@ def construct_final_llm_payload(
     context_turn = None; ack_turn = None
     has_real_context = bool(context and context.strip() and context.strip() != EMPTY_CONTEXT_PLACEHOLDER)
     if has_real_context:
-        context_injection_text = f"Background Information (Use this to inform your response):\n{context}"
+        context_injection_text = f"Background Information (Use this to inform your response):\\n{context}"
         context_turn = {"role": "user", "parts": [{"text": context_injection_text}]}
         if include_ack_turns: ack_turn = {"role": "model", "parts": [{"text": "Understood. I have reviewed the background information."}]}
     safe_query = query.strip().replace("---", "===") if query and query.strip() else "[User query not provided]"
     final_query_turn = {"role": "user", "parts": [{"text": safe_query}]}
-    if strategy == 'advanced': # Sys -> [Ctx] -> Hist -> Query
-        if context_turn: gemini_contents.append(context_turn)
-        if ack_turn: gemini_contents.append(ack_turn)
-        gemini_contents.extend(history_turns); gemini_contents.append(final_query_turn)
-    elif strategy == 'standard': # Sys -> Hist -> [Ctx] -> Query
+    if strategy == 'standard': # Sys -> Hist -> [Ctx] -> Query
         gemini_contents.extend(history_turns)
         if context_turn: gemini_contents.append(context_turn)
         if ack_turn: gemini_contents.append(ack_turn)
         gemini_contents.append(final_query_turn)
-    else: return {"error": f"Unknown construction strategy: {strategy}"}
+    elif strategy == 'advanced': # Sys -> [Ctx] -> Hist -> Query
+        if context_turn: gemini_contents.append(context_turn)
+        if ack_turn: gemini_contents.append(ack_turn)
+        gemini_contents.extend(history_turns); gemini_contents.append(final_query_turn)
+    else: logger.error(f"Unknown payload construction strategy: {strategy}"); return {"error": f"Unknown strategy: {strategy}"}
     final_payload = {"contents": gemini_contents}
     logger.debug(f"Final payload constructed with {len(gemini_contents)} turns.")
     return final_payload
 
-# --- Function: Assemble Tagged Context (Existing - Less relevant now) ---
-def assemble_tagged_context(base_prompt: str, contexts: Dict[str, Union[str, List[str]]]) -> str:
-    # (Keep implementation as before)
-    cleaned_prompt = clean_context_tags(base_prompt) if base_prompt else ""
-    parts = [cleaned_prompt]
-    for key, (start_tag, end_tag) in KNOWN_CONTEXT_TAGS.items():
-        context_data = contexts.get(key)
-        if context_data:
-            content_str = ""
-            if isinstance(context_data, list):
-                filtered_list = [item for item in context_data if isinstance(item, str) and item.strip()]
-                if filtered_list: content_str = "\\n---\\n".join(filtered_list)
-            elif isinstance(context_data, str): content_str = context_data
-            else: logger.warning(f"Context data '{key}' unexpected type: {type(context_data)}."); continue
-            if content_str.strip(): parts.append(f"\\n\\n{start_tag}\\n{content_str.strip()}\\n{end_tag}")
-    final_prompt = "\\n".join(parts).strip()
-    return final_prompt
+def combine_background_context(
+    final_selected_context: Optional[str],
+    t1_summaries: Optional[List[str]],
+    t2_rag_results: Optional[List[str]],
+    labels: Dict[str, str] = TAG_LABELS # Use existing labels
+) -> str:
+    """
+    Combines various background context sources into a single formatted string
+    suitable for injection into the final LLM prompt.
 
-# --- Function: Extract Tagged Context (Existing - Less relevant now) ---
-def extract_tagged_context(system_content: str) -> str:
-    # (Keep implementation as before)
-    if not system_content or not isinstance(system_content, str): return ""
-    context_parts = []; found_any = False
-    for key, (start_tag, end_tag) in KNOWN_CONTEXT_TAGS.items():
-         pattern = re.escape(start_tag) + r"(.*?)" + re.escape(end_tag)
-         matches = re.findall(pattern, system_content, re.DOTALL | re.IGNORECASE)
-         for content in matches:
-             content = content.strip()
-             if content: label = TAG_LABELS.get(key, key.upper()); context_parts.append(f"--- Context: {label} ---\\n{content}"); found_any = True
-    if not found_any: return ""
-    combined = "\\n\\n".join(context_parts)
-    return combined
+    Args:
+        final_selected_context: The refined context string (output from Step 2 RAG Cache
+                                 or Stateless Refinement, or original OWI context if no refinement).
+        t1_summaries: A list of recent T1 summary strings.
+        t2_rag_results: A list of relevant T2 RAG result strings (older summaries/docs).
+        labels: Dictionary mapping context type ('owi', 't1', 't2_rag') to display labels.
+
+    Returns:
+        A single string containing the combined and labeled context, or a placeholder
+        if all sources are empty.
+    """
+    func_logger = logging.getLogger(__name__ + '.combine_background_context')
+    context_parts = []
+
+    # 1. Add Final Selected Context (Refined OWI/Cache or Raw OWI)
+    # Use a more generic label since it could be from different sources
+    selected_context_label = "Selected Background Context"
+    if final_selected_context and final_selected_context.strip() and final_selected_context.strip() != EMPTY_CONTEXT_PLACEHOLDER:
+        func_logger.debug(f"Adding selected context (len: {len(final_selected_context)}).")
+        context_parts.append(f"--- {selected_context_label} ---\n{final_selected_context.strip()}")
+
+    # 2. Add T1 Summaries
+    t1_label = labels.get("t1", "Recent Summaries (T1)")
+    if t1_summaries:
+        combined_t1 = "\n---\n".join(s.strip() for s in t1_summaries if s and s.strip())
+        if combined_t1:
+            func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries.")
+            context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
+
+    # 3. Add T2 RAG Results
+    t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
+    if t2_rag_results:
+        combined_t2 = "\n---\n".join(s.strip() for s in t2_rag_results if s and s.strip())
+        if combined_t2:
+            func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results.")
+            context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
+
+    # 4. Combine parts or return placeholder
+    if context_parts:
+        full_context_string = "\n\n".join(context_parts)
+        func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
+        return full_context_string
+    else:
+        func_logger.info("No background context available from any source.")
+        return EMPTY_CONTEXT_PLACEHOLDER
+
+# --- Less Relevant Functions (Keep for potential internal use/completeness) ---
+def assemble_tagged_context(base_prompt: str, contexts: Dict[str, Union[str, List[str]]]) -> str: return base_prompt # Simplified stub if not used
+def extract_tagged_context(system_content: str) -> str: return "" # Simplified stub if not used
