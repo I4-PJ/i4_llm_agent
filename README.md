@@ -1,5 +1,7 @@
 
 > **Purpose**: The PIPE system is designed to manage long-form, character-driven roleplay sessions by combining memory summarization, RAG-based lore retrieval, and LLM prompt construction while controlling context bloat and optimizing cost.
+>
+> Open webUI script is in the file OpenWebUI_MemorySession_SCRIPT.py
 
 ## Overview
 
