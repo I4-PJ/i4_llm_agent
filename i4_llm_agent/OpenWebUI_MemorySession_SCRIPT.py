@@ -1619,7 +1619,7 @@ class Pipe:
         owi_embed_func: Optional[OwiEmbeddingFunction] = None
         tier2_collection: Optional[Collection] = None
         output_body = body.copy() if isinstance(body, dict) else {}
-        status_message = "MemProc: Initializing..."
+        status_message = "Status: Initializing..."
         # Flags & Metrics
         cache_update_performed = False
         cache_update_skipped = False  # NEW flag
@@ -1671,7 +1671,7 @@ class Pipe:
             # //////////////////////////////////////////////////////////////////////
             # (Implementation unchanged)
             self.logger.debug("PIPE_DEBUG: [1] Base Setup")
-            await emit_status("MemProc: Validating input...")
+            await emit_status("Status: Validating input...")
             if not isinstance(body, dict):
                 await emit_status("ERROR: Invalid input type.", done=True)
                 return {"error": "Invalid input body type.", "status_code": 400}
@@ -1720,7 +1720,7 @@ class Pipe:
             # //////////////////////////////////////////////////////////////////////
             # (Implementation unchanged)
             self.logger.debug(f"[{session_id}] PIPE_DEBUG: [2] Tier 2 Setup")
-            await emit_status("MemProc: Setting up vector store...")
+            await emit_status("Status: Setting up vector store...")
             chroma_embed_wrapper = None
             tier2_collection = None
             if self._chroma_client and __request__:
@@ -1772,7 +1772,7 @@ class Pipe:
             # //////////////////////////////////////////////////////////////////////
             # (Implementation unchanged)
             self.logger.debug(f"[{session_id}] PIPE_DEBUG: [3] Update Active History")
-            await emit_status("MemProc: Updating history...")
+            await emit_status("Status: Updating history...")
             current_active_history = session_state.setdefault("active_history", [])
             current_len = len(current_active_history)
             new_messages_appended_count = 0
@@ -1822,7 +1822,7 @@ class Pipe:
             self.logger.debug(
                 f"[{session_id}] PIPE_DEBUG: [4] Tier 1 Summarization Check"
             )
-            await emit_status("MemProc: Checking summarization...")
+            await emit_status("Status: Checking summarization...")
             summarization_performed_successfully = False
             new_t1_summary_text = None
             summarization_prompt_tokens = -1
@@ -1885,7 +1885,7 @@ class Pipe:
                         self.logger.info(
                             f"[{session_id}] T1 summary generated/saved. NewIdx: {session_state.get('last_summary_turn_index', 'N/A')}. SumIN: {summarization_prompt_tokens}. SumOUT: {summarization_output_tokens}. TrigIdx: {t0_end_idx}."
                         )
-                        await emit_status("MemProc: Summary generated.", done=False)
+                        await emit_status("Status: Summary generated.", done=False)
                     else:
                         self.logger.debug(f"[{session_id}] T1 criteria not met.")
                 except Exception as e_manage:
@@ -1906,7 +1906,7 @@ class Pipe:
             self.logger.debug(
                 f"[{session_id}] PIPE_DEBUG: [5] T1 -> T2 Transition Check"
             )
-            await emit_status("MemProc: Checking long-term memory capacity...")
+            await emit_status("Status: Checking long-term memory capacity...")
             can_transition = all(
                 [
                     summarization_performed_successfully,
@@ -1927,7 +1927,7 @@ class Pipe:
                     self.logger.info(
                         f"[{session_id}] T1 limit ({max_t1_blocks}) exceeded ({current_tier1_count}). Transitioning T1->T2..."
                     )
-                    await emit_status("MemProc: Archiving oldest summary...")
+                    await emit_status("Status: Archiving oldest summary...")
                     oldest_summary_data = await self._get_oldest_tier1_summary(
                         session_id
                     )
@@ -2000,7 +2000,7 @@ class Pipe:
                                 )
                                 if deleted_from_t1:
                                     await emit_status(
-                                        "MemProc: Summary archive complete.", done=False
+                                        "Status: Summary archive complete.", done=False
                                     )
                                 else:
                                     self.logger.warning(
@@ -2045,7 +2045,7 @@ class Pipe:
             # //////////////////////////////////////////////////////////////////////
             # (Implementation unchanged)
             self.logger.debug(f"[{session_id}] PIPE_DEBUG: [6] Tier 2 RAG Lookup")
-            await emit_status("MemProc: Searching long-term memory...")
+            await emit_status("Status: Searching long-term memory...")
             retrieved_rag_summaries: List[str] = []
             t2_retrieved_count = 0
             can_rag = all(
@@ -2084,7 +2084,7 @@ class Pipe:
                 query_embedding = None
                 query_embedding_successful = False
                 try:
-                    await emit_status("MemProc: Generating search query...")
+                    await emit_status("Status: Generating search query...")
                     self.logger.debug(f"[{session_id}] Generating RAG query for T2...")
                     context_messages_for_ragq = HISTORY_GET_RECENT_FUNC(
                         current_active_history,
@@ -2131,7 +2131,7 @@ class Pipe:
                         )
                         rag_query = None
                     if rag_query:
-                        await emit_status("MemProc: Embedding search query...")
+                        await emit_status("Status: Embedding search query...")
                         self.logger.debug(
                             f"[{session_id}] Embedding generated RAG query: '{rag_query}'"
                         )
@@ -2173,7 +2173,7 @@ class Pipe:
                             f"[{session_id}] Querying T2 collection '{tier2_collection.name}' with embedded query for {n_results} results..."
                         )
                         await emit_status(
-                            f"MemProc: Searching vector store (top {n_results})..."
+                            f"Status: Searching vector store (top {n_results})..."
                         )
                         try:
                             rag_results_dict = await asyncio.to_thread(
@@ -2236,7 +2236,7 @@ class Pipe:
             self.logger.debug(
                 f"[{session_id}] PIPE_DEBUG: [7] Prepare Context & Refinement"
             )
-            await emit_status("MemProc: Preparing context...")
+            await emit_status("Status: Preparing context...")
 
             # --- 7a: Retrieve T1 Summaries ---
             recent_t1_summaries = []
@@ -2434,7 +2434,7 @@ class Pipe:
                 else:
                     # --- Execute Step 1 OR Use Previous Cache ---
                     if not skip_step1:
-                        await emit_status("MemProc: Updating background cache...")
+                        await emit_status("Status: Updating background cache...")
                         updated_cache_text = await CACHE_UPDATE_FUNC(
                             session_id=session_id,
                             current_owi_context=extracted_owi_context,
@@ -2450,7 +2450,7 @@ class Pipe:
                         cache_update_performed = True
                     else:
                         await emit_status(
-                            "MemProc: Skipping cache update (redundant OWI)."
+                            "Status: Skipping cache update (redundant OWI)."
                         )
                         updated_cache_text = previous_cache_text  # Use the already retrieved previous cache
                         self.logger.debug(
@@ -2459,7 +2459,7 @@ class Pipe:
                         cache_update_performed = False
 
                     # --- Execute Step 2: Select Final Context (Always runs if RAG Cache enabled) ---
-                    await emit_status("MemProc: Selecting relevant context...")
+                    await emit_status("Status: Selecting relevant context...")
                     final_selected_context = await FINAL_CONTEXT_SELECT_FUNC(
                         updated_cache_text=updated_cache_text,
                         current_owi_context=extracted_owi_context,
@@ -2491,9 +2491,7 @@ class Pipe:
                             self.logger.error(
                                 f"[{session_id}] Error calculating final selected tokens: {e_tok_cache}"
                             )
-                    await emit_status(
-                        "MemProc: Context selection complete.", done=False
-                    )
+                    await emit_status("Status: Context selection complete.", done=False)
 
             # --- ELSE IF: Stateless Refinement ---
             elif self.valves.enable_stateless_refinement and STATELESS_REFINE_FUNC:
@@ -2501,7 +2499,7 @@ class Pipe:
                 self.logger.info(
                     f"[{session_id}] Stateless Refinement ENABLED (RAG Cache disabled). Proceeding..."
                 )
-                await emit_status("MemProc: Refining OWI context (stateless)...")
+                await emit_status("Status: Refining OWI context (stateless)...")
                 if not extracted_owi_context:
                     self.logger.debug(
                         f"[{session_id}] Skipping stateless: No OWI context."
@@ -2557,7 +2555,7 @@ class Pipe:
                                     except Exception as e_tok_stateless:
                                         refined_context_tokens = -1
                                 await emit_status(
-                                    "MemProc: OWI context refined (stateless).",
+                                    "Status: OWI context refined (stateless).",
                                     done=False,
                                 )
                             else:
@@ -2651,7 +2649,7 @@ class Pipe:
             self.logger.debug(
                 f"[{session_id}] PIPE_DEBUG: [8] Construct Final LLM Payload"
             )
-            await emit_status("MemProc: Constructing final request...")
+            await emit_status("Status: Constructing final request...")
             final_llm_payload_contents: Optional[List[Dict]] = None
             final_payload_tokens: int = -1
             if PROMPT_PAYLOAD_CONSTRUCT_FUNC:
@@ -2835,7 +2833,7 @@ class Pipe:
                 token_parts.append(f"Hist={t0_dialogue_tokens}")
             if final_payload_tokens >= 0:
                 token_parts.append(f"FinalIN={final_payload_tokens}")
-            status_message = "MemProc: " + ", ".join(status_parts)
+            status_message = "Status: " + ", ".join(status_parts)
             if token_parts:
                 status_message += " | Tokens: " + ", ".join(token_parts)
             await emit_status(status_message, done=False)
@@ -2861,7 +2859,7 @@ class Pipe:
             )
             if final_llm_triggered:
                 self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED.")
-                await emit_status("MemProc: Executing final LLM Call...")
+                await emit_status("Status: Executing final LLM Call...")
                 if not final_llm_payload_contents:
                     self.logger.error(
                         f"[{session_id}] Cannot execute Final LLM Call: Payload construction failed."
