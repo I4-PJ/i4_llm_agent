@@ -1,3 +1,4 @@
+# [[START MODIFIED api_client.py]]
 # i4_llm_agent/api_client.py
 
 import requests
@@ -286,7 +287,7 @@ def call_openai_compatible_api(
     temperature: float, # Already set in payload by converter/dispatcher
     timeout: int = 90,
     caller_info: str = "LLM_OpenAI_Compat"
-) -> Tuple[bool, Dict]: # Returns raw JSON dict on success
+) -> Tuple[bool, Dict]: # Returns raw JSON dict on success OR error dict on failure
     """Calls an OpenAI-compatible API endpoint (like OpenRouter). Returns raw success dict."""
     logger.info(f"Attempting to call {caller_info} (OpenAI-Compatible Format) URL: {api_url[:80]}...")
     if not api_url or not api_key:
@@ -316,7 +317,8 @@ def call_openai_compatible_api(
     payload["temperature"] = float(temperature)
 
     logger.debug(f"[{caller_info}] Calling OpenAI-compatible API: URL={api_url}, Model={payload.get('model')}")
-    # logger.debug(f"[{caller_info}] OpenAI Payload: {json.dumps(payload)}") # Uncomment for deep debug
+    # Keep this uncommented for debugging potential payload issues
+    logger.debug(f"[{caller_info}] OpenAI Payload: {json.dumps(payload)}")
 
     response = None # Initialize response variable
     try:
@@ -325,15 +327,38 @@ def call_openai_compatible_api(
         response_text_snippet = response.text[:500] if response.text else "[EMPTY RESPONSE BODY]"
         logger.debug(f"[{caller_info}] Response Body Snippet: {response_text_snippet}...")
 
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        # --- Check for HTTP Errors FIRST ---
+        try:
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        except requests.exceptions.HTTPError as e:
+            # Re-raise to be caught by the outer HTTPError handler block below
+            # This keeps HTTP error handling consistent
+            raise e
 
-        # Successfully received 2xx response, try to parse JSON
+        # --- Process 2xx Response (Success Status Code) ---
         # logger.debug(f"[{caller_info}] Raw OK response text: >>>{response.text}<<<") # Keep commented out
         try:
             result = response.json()
-            logger.info(f"[{caller_info}] Parsed JSON response successfully.")
+            logger.debug(f"[{caller_info}] Parsed JSON response successfully.")
+
+            # [[[ MODIFICATION START ]]]
+            # Check if the successful response body actually contains an error structure
+            if "error" in result and isinstance(result.get("error"), dict):
+                error_obj = result["error"]
+                error_message = error_obj.get("message", "API returned error structure in 2xx response")
+                error_type = error_obj.get("type", "APIErrorInSuccess")
+                error_code = error_obj.get("code")
+                logger.error(f"[{caller_info}] API returned 2xx status ({response.status_code}) but body contains error: Type='{error_type}', Code='{error_code}', Msg='{error_message}'")
+                # Return False and the structured error dictionary
+                # Add status_code from the response as it was technically successful HTTP-wise
+                return False, {"error_type": error_type, "message": error_message, "status_code": response.status_code, "error_code": error_code, "response_body": result, "source": "openai_client"}
+            # [[[ MODIFICATION END ]]]
+
+            # If no "error" key found, proceed assuming it's a valid success response
+            logger.info(f"[{caller_info}] Valid success response structure received.")
             # SUCCESS: Return True and the raw JSON dictionary
             return True, result
+
         except json.JSONDecodeError as e_json:
             logger.error(f"[{caller_info}] Failed JSON decode for successful response (Status {response.status_code}): {e_json}", exc_info=False)
             logger.error(f"[{caller_info}] RAW Body causing JSONDecodeError: >>>{response.text}<<<")
@@ -349,6 +374,7 @@ def call_openai_compatible_api(
         logger.error(f"[{caller_info}] Timeout after {timeout}s: {e}", exc_info=False)
         return False, {"error_type": "TimeoutError", "message": f"{caller_info}: API request timed out after {timeout}s", "source": "openai_client"}
     except requests.exceptions.HTTPError as e:
+        # This block now handles only genuine 4xx/5xx errors raised by raise_for_status()
         status_code = e.response.status_code
         response_body_text = e.response.text
         logger.error(f"[{caller_info}] HTTPError {status_code}: {e}", exc_info=False)
@@ -526,7 +552,8 @@ def call_google_llm_api(
                         return False, {"error_type": "ParsingError", "message": f"{caller_info}: OpenAI response missing/invalid 'content'", "finish_reason": finish_reason, "response_body": raw_response_or_error_dict, "source": "dispatcher"}
                 else:
                     # Response has no 'choices' array or it's empty
-                    logger.error(f"[{caller_info}] OpenAI response missing/empty 'choices' array.")
+                    # Keep the enhanced logging here from previous step
+                    logger.error(f"[{caller_info}] OpenAI response missing/empty 'choices' array. Full Response: {json.dumps(raw_response_or_error_dict)}")
                     return False, {"error_type": "ParsingError", "message": f"{caller_info}: OpenAI response missing/empty 'choices'", "response_body": raw_response_or_error_dict, "source": "dispatcher"}
             except Exception as e_parse:
                  # Error during the parsing of the successful JSON response
@@ -534,6 +561,7 @@ def call_google_llm_api(
                  return False, {"error_type": "ParsingError", "message": "Error parsing successful OpenAI response structure", "response_body": raw_response_or_error_dict, "source": "dispatcher"}
         else:
             # The call_openai_compatible_api function failed and returned an error dictionary
+            # This now correctly includes the case where the API returned 2xx + error body
             logger.error(f"[{caller_info}] OpenAI-compatible API call failed. Returning error dict from client.")
             # raw_response_or_error_dict is already the error dictionary
             return False, raw_response_or_error_dict # FAILURE: Return the error dictionary
@@ -542,3 +570,5 @@ def call_google_llm_api(
         # Should be unreachable if URL check logic is correct
         logger.critical(f"[{caller_info}] Dispatcher logic failed to identify API type after checks. This indicates an internal bug.")
         return False, {"error_type": "InternalError", "message": "Dispatcher logic failed to select API path", "source": "dispatcher"}
+
+# [[END MODIFIED api_client.py]]
