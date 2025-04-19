@@ -2835,7 +2835,7 @@ class Pipe:
                 token_parts.append(f"FinalIN={final_payload_tokens}")
             status_message = "Status: " + ", ".join(status_parts)
             if token_parts:
-                status_message += " | Tokens: " + ", ".join(token_parts)
+                status_message += " | ".join(token_parts)
             await emit_status(status_message, done=False)
 
             # //////////////////////////////////////////////////////////////////////
@@ -2897,7 +2897,7 @@ class Pipe:
                         self.logger.info(
                             f"[{session_id}] Final LLM Call successful. Length: {len(final_response_text)}."
                         )
-                        final_status = f"{status_message} | FinalLLM=OK"
+                        final_status = status_message
                         await emit_status(final_status, done=True)
                         pipe_exit_time = datetime.now(timezone.utc).isoformat()
                         self.logger.info(
