@@ -40,18 +40,72 @@ from typing import (
 # /////////////////////////////////////////
 # /// 2.2: Core & OWI Imports           ///
 # /////////////////////////////////////////
-try:
-    from pydantic import BaseModel, Field
-except ImportError:
 
-    class BaseModel:
+
+# --- Define Fallback BaseModel and Field FIRST ---
+# This ensures 'BaseModel' and 'Field' always exist, even if pydantic fails import.
+class BaseModel:
+    """Fallback BaseModel if pydantic is not available."""
+
+    def __init__(self, **kwargs):
+        # Basic assignment for compatibility if needed, though often not critical
+        # for the pipe's direct usage if validation isn't the primary goal.
+        # You might not need this __init__ if only structure is required.
+        for key, value in kwargs.items():
+            # Simple assignment without validation
+            setattr(self, key, value)
+
+    def model_post_init(self, __context: Any) -> None:
+        """Dummy post-init hook."""
+        # Does nothing in the fallback
         pass
 
-    def Field(*args, **kwargs):
-        return kwargs.get("default")
+    def model_dump(self) -> Dict:
+        """Dummy dump method."""
+        # Return attributes as a dict, simplistic version
+        # Note: This won't handle complex types or aliases like pydantic's dump
+        try:
+            # Filter out methods and private attributes if desired
+            return {
+                k: v
+                for k, v in self.__dict__.items()
+                if not k.startswith("_") and not callable(v)
+            }
+        except Exception:
+            return {}  # Return empty dict on error
 
-    logging.warning("pydantic not found. Valve validation might be limited.")
 
+def Field(*args, **kwargs):
+    """Fallback Field function."""
+    # Returns the default value provided, mimicking basic Field behavior
+    return kwargs.get("default")
+
+
+# --- End Fallback Definitions ---
+
+# --- Attempt to import real pydantic ---
+try:
+    from pydantic import BaseModel as PydanticBaseModel, Field as PydanticField
+
+    # If import succeeds, overwrite the fallbacks with the real ones
+    BaseModel = PydanticBaseModel
+    Field = PydanticField
+    logging.getLogger("SessionMemoryPipe_startup").info(
+        "Successfully imported pydantic. Using real BaseModel and Field."
+    )
+except ImportError:
+    # This means pydantic is definitely not installed
+    logging.getLogger("SessionMemoryPipe_startup").warning(
+        "pydantic not found. Using fallback BaseModel and Field. Valve validation will be limited."
+    )
+except Exception as e:
+    # Catch any other error during pydantic import
+    logging.getLogger("SessionMemoryPipe_startup").error(
+        f"Error during pydantic import (using fallback): {e}", exc_info=True
+    )
+    # Fallback BaseModel and Field are already defined, so we just log the error.
+
+# --- Continue with other imports ---
 from fastapi import Request
 
 # /////////////////////////////////////////
@@ -375,7 +429,7 @@ class ChromaDBCompatibleEmbedder:
 
 # === SECTION 5: PIPE CLASS DEFINITION ===
 class Pipe:
-    version = "0.18.0"  # Version updated
+    version = "0.18.1"  # Version updated for similarity check
 
     # === SECTION 5.1: VALVES DEFINITION ===
     class Valves(BaseModel):
@@ -478,7 +532,7 @@ class Pipe:
             default=int(os.getenv(ENV_VAR_FINAL_LLM_TIMEOUT, DEFAULT_FINAL_LLM_TIMEOUT))
         )
 
-        # NEW: RAG Cache Enable Valve
+        # RAG Cache Enable Valve
         enable_rag_cache: bool = Field(
             default=str(
                 os.getenv(ENV_VAR_ENABLE_RAG_CACHE, str(DEFAULT_ENABLE_RAG_CACHE))
@@ -486,7 +540,7 @@ class Pipe:
             == "true"
         )
 
-        # Existing Stateless Refinement Enable Valve
+        # Stateless Refinement Enable Valve
         enable_stateless_refinement: bool = Field(
             default=str(
                 os.getenv(
@@ -515,8 +569,7 @@ class Pipe:
             )
         )
 
-        # NEW: RAG Cache Specific Prompt Template Valves
-        # Uses imported default text if env var not set
+        # RAG Cache Specific Prompt Template Valves
         cache_update_prompt_template: str = Field(
             default=os.getenv(
                 ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE, DEFAULT_CACHE_UPDATE_PROMPT
@@ -528,8 +581,17 @@ class Pipe:
             )
         )
 
+        # --- NEW: RAG Cache Step 1 Skip Valves ---
+        CACHE_UPDATE_SKIP_OWI_THRESHOLD: int = Field(
+            default=int(os.getenv("SM_CACHE_UPDATE_SKIP_OWI_THRESHOLD", 50)),
+            description="Skip Step 1 LLM call if OWI context char length is below this.",
+        )
+        CACHE_UPDATE_SIMILARITY_THRESHOLD: float = Field(
+            default=float(os.getenv("SM_CACHE_UPDATE_SIMILARITY_THRESHOLD", 0.9)),
+            description="Skip Step 1 LLM call if OWI context similarity to previous cache is above this (0.0-1.0).",
+        )
+
         # Stateless Refiner Specific Prompt Template Valve
-        # Defaults to None -> uses library default text
         stateless_refiner_prompt_template: Optional[str] = Field(
             default=os.getenv(ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE, None)
         )
@@ -543,7 +605,7 @@ class Pipe:
             )
         )
 
-        # Other Valves (Keep as before)
+        # Other Valves
         include_ack_turns: bool = Field(
             default=str(
                 os.getenv(ENV_VAR_INCLUDE_ACK_TURNS, str(DEFAULT_INCLUDE_ACK_TURNS))
@@ -574,7 +636,7 @@ class Pipe:
 
         # Post Init Validation
         def model_post_init(self, __context: Any) -> None:
-            # Existing checks
+            # Existing checks...
             if self.t0_active_history_token_limit <= 0:
                 self.t0_active_history_token_limit = (
                     DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT
@@ -603,15 +665,12 @@ class Pipe:
             if self.final_llm_timeout <= 0:
                 self.final_llm_timeout = DEFAULT_FINAL_LLM_TIMEOUT
                 logger.warning("Reset final_llm_timeout.")
-            # Refiner temp applies to both now
             if not (0.0 <= self.refiner_llm_temperature <= 2.0):
                 self.refiner_llm_temperature = DEFAULT_REFINER_TEMPERATURE
                 logger.warning("Reset refiner_llm_temp.")
-            # History count applies to both
             if self.refiner_history_count < 0:
                 self.refiner_history_count = DEFAULT_REFINER_HISTORY_COUNT
                 logger.warning("Reset refiner_history_count.")
-            # Stateless specific checks
             if self.stateless_refiner_skip_threshold < 0:
                 self.stateless_refiner_skip_threshold = (
                     DEFAULT_STATELESS_REFINER_SKIP_THRESHOLD
@@ -625,7 +684,6 @@ class Pipe:
                 logger.warning(
                     "Reset stateless_refiner_prompt_template to None (was empty)."
                 )
-            # NEW Checks for RAG Cache templates
             if (
                 not self.cache_update_prompt_template
                 or not self.cache_update_prompt_template.strip()
@@ -645,19 +703,41 @@ class Pipe:
                     "Reset final_context_selection_prompt_template to library default (was empty/missing)."
                 )
 
+            # NEW: Validate skip thresholds
+            if self.CACHE_UPDATE_SKIP_OWI_THRESHOLD < 0:
+                self.CACHE_UPDATE_SKIP_OWI_THRESHOLD = 50
+                logger.warning(
+                    "Reset CACHE_UPDATE_SKIP_OWI_THRESHOLD to default (was < 0)."
+                )
+            if not (0.0 <= self.CACHE_UPDATE_SIMILARITY_THRESHOLD <= 1.0):
+                self.CACHE_UPDATE_SIMILARITY_THRESHOLD = 0.9
+                logger.warning(
+                    "Reset CACHE_UPDATE_SIMILARITY_THRESHOLD to default (was not 0.0-1.0)."
+                )
+
     # === SECTION 5.2: INITIALIZATION METHOD ===
     def __init__(self):
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version}) - Two-Step RAG Cache"  # Updated name
+        self.name = f"SESSION_MEMORY PIPE (v{self.version}) - Two-Step Cache w/ Skip"  # Updated name
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
             raise ImportError(f"i4_llm_agent failed import: {IMPORT_ERROR_DETAILS}")
+        # Import string similarity util alias if available
+        if "calculate_string_similarity" in globals():
+            self.UTIL_CALC_SIMILARITY_FUNC = calculate_string_similarity
+            self.logger.info("String similarity function available.")
+        else:
+            self.UTIL_CALC_SIMILARITY_FUNC = None
+            self.logger.warning(
+                "String similarity function unavailable in i4_llm_agent. Skip logic limited."
+            )
+
         # Log availability of functions
-        if (
-            not CACHE_UPDATE_FUNC
-            or not FINAL_CONTEXT_SELECT_FUNC
-            or not INIT_RAG_CACHE_TABLE_FUNC
+        if not (
+            CACHE_UPDATE_FUNC
+            and FINAL_CONTEXT_SELECT_FUNC
+            and INIT_RAG_CACHE_TABLE_FUNC
         ):
             self.logger.warning("RAG Cache functions unavailable. Feature disabled.")
         if not STATELESS_REFINE_FUNC:
@@ -681,7 +761,7 @@ class Pipe:
                 k: v
                 for k, v in self.valves.model_dump().items()
                 if "api_key" not in k and "prompt" not in k
-            }  # Exclude prompts too now
+            }
             log_valves["cache_update_prompt_set"] = bool(
                 self.valves.cache_update_prompt_template != DEFAULT_CACHE_UPDATE_PROMPT
             )
@@ -692,7 +772,9 @@ class Pipe:
             log_valves["stateless_prompt_set"] = bool(
                 self.valves.stateless_refiner_prompt_template is not None
             )
-            self.logger.info(f"Valves loaded: {log_valves}")
+            self.logger.info(
+                f"Valves loaded: {log_valves}"
+            )  # Includes new skip thresholds
             # Check API keys
             if not self.valves.summarizer_api_key:
                 self.logger.warning("Summarizer API Key MISSING.")
@@ -772,17 +854,28 @@ class Pipe:
                 "CREATE INDEX IF NOT EXISTS idx_session_ts ON tier1_text_summaries (session_id, timestamp_utc)"
             )
             self.logger.info("SQLite T1 Summary table initialized.")
-            # NEW: Initialize RAG Cache Table
+            # Initialize RAG Cache Table
             if INIT_RAG_CACHE_TABLE_FUNC:
-                from i4_llm_agent.cache import (
-                    _sync_initialize_rag_cache_table,
-                )  # Import sync helper
+                try:
+                    # Import the specific sync helper function directly from the library
+                    from i4_llm_agent.cache import _sync_initialize_rag_cache_table
 
-                init_success = _sync_initialize_rag_cache_table(self._sqlite_cursor)
-                if init_success:
-                    self.logger.info("SQLite RAG Cache table initialized.")
-                else:
-                    self.logger.error("Failed to initialize SQLite RAG Cache table!")
+                    init_success = _sync_initialize_rag_cache_table(self._sqlite_cursor)
+                    if init_success:
+                        self.logger.info("SQLite RAG Cache table initialized.")
+                    else:
+                        self.logger.error(
+                            "Failed to initialize SQLite RAG Cache table!"
+                        )
+                except ImportError:
+                    self.logger.error(
+                        "Cannot initialize RAG Cache table: _sync_initialize_rag_cache_table not found in library."
+                    )
+                except Exception as e_init_cache:
+                    self.logger.error(
+                        f"Error initializing RAG Cache table: {e_init_cache}",
+                        exc_info=True,
+                    )
             else:
                 self.logger.error(
                     "Cannot initialize RAG Cache table: function unavailable."
@@ -879,7 +972,6 @@ class Pipe:
                 )
         else:
             self.logger.warning("SQLite not available on startup.")
-
         if self._chroma_client:
             try:
                 version = await asyncio.to_thread(self._chroma_client.heartbeat)
@@ -918,10 +1010,9 @@ class Pipe:
                 )  # Use print as logger might be closed
         self.logger.info(f"'{self.name}' shutdown complete.")
 
-    # --- CORRECTED on_valves_updated ---
     async def on_valves_updated(self):
         self.logger.info(f"on_valves_updated: Reloading settings for '{self.name}'...")
-        # Store old settings for comparison
+        # Store old settings
         old_log_path = getattr(self.valves, "log_file_path", None)
         old_log_level = getattr(self.valves, "log_level", None)
         old_tokenizer_encoding = getattr(self.valves, "tokenizer_encoding_name", None)
@@ -932,11 +1023,16 @@ class Pipe:
             self.valves, "enable_stateless_refinement", None
         )
         old_final_llm_url = getattr(self.valves, "final_llm_api_url", None)
+        old_skip_owi_thresh = getattr(
+            self.valves, "CACHE_UPDATE_SKIP_OWI_THRESHOLD", None
+        )
+        old_skip_sim_thresh = getattr(
+            self.valves, "CACHE_UPDATE_SIMILARITY_THRESHOLD", None
+        )
 
         # Re-initialize valves
         try:
             self.valves = self.Valves()  # Reload valves
-            # Log relevant valve settings
             log_valves = {
                 k: v
                 for k, v in self.valves.model_dump().items()
@@ -952,8 +1048,9 @@ class Pipe:
             log_valves["stateless_prompt_set"] = bool(
                 self.valves.stateless_refiner_prompt_template is not None
             )
-            self.logger.info(f"Valves re-initialized: {log_valves}")
-
+            self.logger.info(
+                f"Valves re-initialized: {log_valves}"
+            )  # Includes new skip thresholds
             # Log refinement status changes
             if self.valves.enable_rag_cache != old_rag_cache_enabled:
                 self.logger.info(
@@ -966,43 +1063,37 @@ class Pipe:
                 self.logger.info(
                     f"Stateless Refinement Feature now ENABLED: {self.valves.enable_stateless_refinement}"
                 )
-
-            # Check refiner key if any refinement is enabled
+            # Check refiner key
             if (
                 self.valves.enable_rag_cache or self.valves.enable_stateless_refinement
             ) and not self.valves.refiner_llm_api_key:
                 self.logger.warning(
                     "A refinement feature is ENABLED but Refiner Key MISSING after update!"
                 )
-
         except Exception as e:
             self.logger.error(
                 f"Error re-initializing valves: {e}. Pipe may use old settings.",
                 exc_info=True,
             )
-            # Potentially return or raise here if valves are critical
 
-        # --- Reconfigure logger if settings changed ---
+        # Reconfigure logger if settings changed
         new_log_path = getattr(self.valves, "log_file_path", None)
         new_log_level = getattr(self.valves, "log_level", None)
         if old_log_path != new_log_path or old_log_level != new_log_level:
             self.logger.info("Log settings changed. Reconfiguring logger...")
-            # Split the try-except block for configure_logger
             try:
                 self.configure_logger()
-                self.logger.info(
-                    "Logger reconfigured successfully."
-                )  # Now on a separate line
+                self.logger.info("Logger reconfigured successfully.")
             except Exception as e:
                 self.logger.error(
                     f"Error during logger reconfiguration: {e}", exc_info=True
                 )
 
-        # --- Clear embedding cache ---
+        # Clear embedding cache
         self.logger.info("Clearing OWI embedding function cache.")
         self._owi_embedding_func_cache = None
 
-        # --- Re-init tokenizer if changed ---
+        # Re-init tokenizer if changed
         new_tokenizer_encoding = getattr(self.valves, "tokenizer_encoding_name", None)
         if (
             TIKTOKEN_AVAILABLE
@@ -1012,7 +1103,7 @@ class Pipe:
             self.logger.info(
                 f"Tokenizer encoding changed to '{new_tokenizer_encoding}'. Re-initializing..."
             )
-            self._tokenizer = None  # Clear old tokenizer first
+            self._tokenizer = None
             try:
                 self._tokenizer = tiktoken.get_encoding(new_tokenizer_encoding)
                 self.logger.info("Tokenizer re-initialized successfully.")
@@ -1021,21 +1112,36 @@ class Pipe:
                     f"Failed to re-initialize tokenizer: {e}. Token counting may fail.",
                     exc_info=True,
                 )
-                self._tokenizer = None  # Ensure it's None on failure
+                self._tokenizer = None
 
-        # --- Warn about DB path changes ---
+        # Log changes in skip thresholds
+        new_skip_owi_thresh = getattr(
+            self.valves, "CACHE_UPDATE_SKIP_OWI_THRESHOLD", None
+        )
+        new_skip_sim_thresh = getattr(
+            self.valves, "CACHE_UPDATE_SIMILARITY_THRESHOLD", None
+        )
+        if old_skip_owi_thresh != new_skip_owi_thresh:
+            self.logger.info(
+                f"Cache Update Skip OWI Threshold changed to: {new_skip_owi_thresh}"
+            )
+        if old_skip_sim_thresh != new_skip_sim_thresh:
+            self.logger.info(
+                f"Cache Update Similarity Threshold changed to: {new_skip_sim_thresh}"
+            )
+
+        # Warn about DB path changes
         new_sqlite_path = getattr(self.valves, "sqlite_db_path", None)
         if old_sqlite_path != new_sqlite_path:
             self.logger.warning(
-                f"SQLite DB path changed from '{old_sqlite_path}' to '{new_sqlite_path}'. Pipe restart might be required for changes to fully apply."
+                f"SQLite DB path changed from '{old_sqlite_path}' to '{new_sqlite_path}'. Pipe restart might be required."
             )
         new_chromadb_path = getattr(self.valves, "chromadb_path", None)
         if old_chromadb_path != new_chromadb_path:
             self.logger.warning(
-                f"ChromaDB path changed from '{old_chromadb_path}' to '{new_chromadb_path}'. Pipe restart might be required for changes to fully apply."
+                f"ChromaDB path changed from '{old_chromadb_path}' to '{new_chromadb_path}'. Pipe restart might be required."
             )
-
-        # --- Log final LLM URL change ---
+        # Log final LLM URL change
         new_final_llm_url = getattr(self.valves, "final_llm_api_url", None)
         if old_final_llm_url != new_final_llm_url:
             self.logger.info(f"Final LLM API URL changed to: '{new_final_llm_url}'.")
@@ -1208,7 +1314,6 @@ class Pipe:
                     metadata.get("t0_end_index_at_summary"),
                 ),
             )
-            # self.logger.debug(f"Added T1 summary {summary_id} for session {session_id}.") # Too verbose for default
             return True
         except sqlite3.IntegrityError as e:
             logger.error(
@@ -1459,7 +1564,7 @@ class Pipe:
             }
             with open(debug_log_path, "a", encoding="utf-8") as f:
                 json.dump(log_entry, f)
-                f.write("\\n")  # Compact JSON
+                f.write("\n")  # Compact JSON
         except Exception as e:
             logger.error(
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
@@ -1482,7 +1587,7 @@ class Pipe:
             }
             with open(debug_log_path, "a", encoding="utf-8") as f:
                 json.dump(log_entry, f)
-                f.write("\\n")  # Compact JSON
+                f.write("\n")  # Compact JSON
         except Exception as e:
             logger.error(
                 f"[{session_id}] Failed write debug final payload log: {e}",
@@ -1517,8 +1622,9 @@ class Pipe:
         status_message = "MemProc: Initializing..."
         # Flags & Metrics
         cache_update_performed = False
+        cache_update_skipped = False  # NEW flag
         final_context_selection_performed = False
-        stateless_refinement_performed = False  # Separate flags now
+        stateless_refinement_performed = False
         summarization_performed_successfully = False
         summ_prompt_tokens = -1
         summ_output_tokens = -1
@@ -1527,7 +1633,7 @@ class Pipe:
         t1_retrieved_count = 0
         t2_retrieved_count = 0
         initial_owi_context_tokens = -1
-        refined_context_tokens = -1  # Represents final selected context tokens
+        refined_context_tokens = -1
         t0_raw_history_slice: List[Dict] = []
         final_llm_payload_contents: Optional[List[Dict]] = None
 
@@ -1550,7 +1656,6 @@ class Pipe:
                             },
                         }
                     )
-                    # self.logger.debug(f"[{log_session_id}] Status emitted: '{description}' (Done: {done})") # Debug level now
                 except Exception as e_emit:
                     self.logger.warning(
                         f"[{log_session_id}] Failed emit status: {e_emit}"
@@ -1576,6 +1681,7 @@ class Pipe:
                 user_id = __user__["id"]
             else:
                 self.logger.warning("User info missing. Using 'default_user'.")
+                user_id = "default_user"
             chat_id = __chat_id__
             if not chat_id or not isinstance(chat_id, str) or len(chat_id.strip()) == 0:
                 await emit_status(
@@ -1672,7 +1778,6 @@ class Pipe:
             new_messages_appended_count = 0
             if len(incoming_messages) > current_len:
                 num_to_add = len(incoming_messages) - current_len
-                # self.logger.debug(f"[{session_id}] Appending {num_to_add} new messages.")
                 for i in range(current_len, len(incoming_messages)):
                     msg_to_add = incoming_messages[i]
                     if (
@@ -1797,12 +1902,11 @@ class Pipe:
             # //////////////////////////////////////////////////////////////////////
             # /// 5.11.5: Tier 1 -> T2 Transition Check                          ///
             # //////////////////////////////////////////////////////////////////////
+            # (Implementation unchanged)
             self.logger.debug(
                 f"[{session_id}] PIPE_DEBUG: [5] T1 -> T2 Transition Check"
             )
             await emit_status("MemProc: Checking long-term memory capacity...")
-
-            # Check prerequisites for transition
             can_transition = all(
                 [
                     summarization_performed_successfully,
@@ -1812,11 +1916,9 @@ class Pipe:
                     self.valves.max_stored_summary_blocks > 0,
                 ]
             )
-
             if can_transition:
                 max_t1_blocks = self.valves.max_stored_summary_blocks
                 current_tier1_count = await self._get_tier1_summary_count(session_id)
-
                 if current_tier1_count == -1:
                     self.logger.error(
                         f"[{session_id}] Failed get T1 count. Skipping T1->T2 check."
@@ -1826,27 +1928,20 @@ class Pipe:
                         f"[{session_id}] T1 limit ({max_t1_blocks}) exceeded ({current_tier1_count}). Transitioning T1->T2..."
                     )
                     await emit_status("MemProc: Archiving oldest summary...")
-
                     oldest_summary_data = await self._get_oldest_tier1_summary(
                         session_id
                     )
-
                     if oldest_summary_data:
                         oldest_id, oldest_text, oldest_metadata = oldest_summary_data
                         self.logger.debug(
                             f"[{session_id}] Retrieved oldest T1 ({oldest_id}) for transition."
                         )
-
                         embedding_vector = None
-                        embedding_successful = False  # Flag to track success
-
+                        embedding_successful = False
                         try:
-                            # Embed the oldest summary text
                             embedding_list = await asyncio.to_thread(
                                 chroma_embed_wrapper, [oldest_text]
                             )
-
-                            # --- Simplified Validation Logic ---
                             is_valid_structure = False
                             if (
                                 isinstance(embedding_list, list)
@@ -1854,11 +1949,8 @@ class Pipe:
                             ):
                                 first_item = embedding_list[0]
                                 if isinstance(first_item, list) and len(first_item) > 0:
-                                    # Structure is valid [[float, float, ...]]
                                     is_valid_structure = True
-                                    # Assign on a separate line
                                     embedding_vector = first_item
-
                             if is_valid_structure and embedding_vector:
                                 embedding_successful = True
                                 self.logger.debug(
@@ -1868,18 +1960,13 @@ class Pipe:
                                 self.logger.error(
                                     f"[{session_id}] Embedding T1 {oldest_id} returned invalid structure: {embedding_list}"
                                 )
-                                embedding_successful = False  # Ensure flag is False
-
+                                embedding_successful = False
                         except Exception as embed_e:
                             self.logger.error(
                                 f"[{session_id}] EXCEPTION embedding T1->T2 {oldest_id}: {embed_e}",
                                 exc_info=True,
                             )
-                            embedding_successful = (
-                                False  # Ensure flag is False on exception
-                            )
-
-                        # Proceed only if embedding was successful
+                            embedding_successful = False
                         if embedding_successful and embedding_vector:
                             chroma_metadata = oldest_metadata.copy()
                             chroma_metadata["transitioned_from_t1"] = True
@@ -1940,19 +2027,15 @@ class Pipe:
                             self.logger.error(
                                 f"[{session_id}] Skipping T2 add/T1 delete for {oldest_id}: embedding failed or vector invalid."
                             )
-                            # Optionally emit status here if needed
-
                     else:
                         self.logger.warning(
                             f"[{session_id}] T1 count ({current_tier1_count}) exceeded limit ({max_t1_blocks}), but couldn't retrieve oldest summary."
                         )
                 else:
-                    # T1 count is within the limit
                     self.logger.debug(
                         f"[{session_id}] T1 count ({current_tier1_count}) within limit ({max_t1_blocks}). No transition needed."
                     )
             else:
-                # Log why transition was skipped if prerequisites weren't met
                 self.logger.debug(
                     f"[{session_id}] Skipping T1->T2 transition check: Prerequisites not met."
                 )
@@ -1960,12 +2043,11 @@ class Pipe:
             # //////////////////////////////////////////////////////////////////////
             # /// 5.11.6: Tier 2 RAG Lookup                                      ///
             # //////////////////////////////////////////////////////////////////////
+            # (Implementation unchanged)
             self.logger.debug(f"[{session_id}] PIPE_DEBUG: [6] Tier 2 RAG Lookup")
             await emit_status("MemProc: Searching long-term memory...")
             retrieved_rag_summaries: List[str] = []
             t2_retrieved_count = 0
-
-            # Check prerequisites (unchanged)
             can_rag = all(
                 [
                     tier2_collection,
@@ -1979,13 +2061,11 @@ class Pipe:
                     self.valves.rag_summary_results_count > 0,
                 ]
             )
-
             if not can_rag:
                 self.logger.info(
                     f"[{session_id}] Skipping T2 RAG: Prerequisites not met."
                 )
             else:
-                # Check if collection is empty (unchanged)
                 try:
                     t2_doc_count = await asyncio.to_thread(tier2_collection.count)
                     can_rag = t2_doc_count > 0
@@ -1999,15 +2079,11 @@ class Pipe:
                     self.logger.info(
                         f"[{session_id}] Skipping T2 RAG: Collection '{tier2_collection.name}' is empty."
                     )
-
-            # Proceed with RAG if checks passed
             if can_rag:
                 rag_query = None
-                query_embedding = None  # Initialize embedding variable
-                query_embedding_successful = False  # Flag for success
-
+                query_embedding = None
+                query_embedding_successful = False
                 try:
-                    # --- Generate RAG Query (unchanged) ---
                     await emit_status("MemProc: Generating search query...")
                     self.logger.debug(f"[{session_id}] Generating RAG query for T2...")
                     context_messages_for_ragq = HISTORY_GET_RECENT_FUNC(
@@ -2053,9 +2129,7 @@ class Pipe:
                         self.logger.error(
                             f"[{session_id}] RAG Query Generation failed: {rag_query_result}. Skipping RAG lookup."
                         )
-                        rag_query = None  # Ensure it's None on failure
-
-                    # --- Embed RAG Query (if generated successfully) ---
+                        rag_query = None
                     if rag_query:
                         await emit_status("MemProc: Embedding search query...")
                         self.logger.debug(
@@ -2068,8 +2142,6 @@ class Pipe:
                                 prefix=RAG_EMBEDDING_QUERY_PREFIX,
                                 user=__user__,
                             )
-
-                            # --- Simplified Validation Logic ---
                             is_valid_structure = False
                             if (
                                 isinstance(query_embedding_list, list)
@@ -2078,9 +2150,7 @@ class Pipe:
                                 first_item = query_embedding_list[0]
                                 if isinstance(first_item, list) and len(first_item) > 0:
                                     is_valid_structure = True
-                                    # Assign on separate line
                                     query_embedding = first_item
-
                             if is_valid_structure and query_embedding:
                                 query_embedding_successful = True
                                 self.logger.debug(
@@ -2091,15 +2161,12 @@ class Pipe:
                                     f"[{session_id}] RAG query embedding returned invalid structure: {query_embedding_list}. Skipping RAG query."
                                 )
                                 query_embedding_successful = False
-
                         except Exception as embed_e:
                             self.logger.error(
                                 f"[{session_id}] EXCEPTION during RAG query embedding: {embed_e}",
                                 exc_info=True,
                             )
                             query_embedding_successful = False
-
-                    # --- Query ChromaDB (if embedding was successful) ---
                     if query_embedding_successful and query_embedding:
                         n_results = self.valves.rag_summary_results_count
                         self.logger.debug(
@@ -2115,7 +2182,6 @@ class Pipe:
                                 n_results=n_results,
                                 include=["documents", "distances", "metadatas"],
                             )
-                            # Process results (unchanged logic)
                             if (
                                 rag_results_dict
                                 and isinstance(rag_results_dict.get("documents"), list)
@@ -2146,7 +2212,7 @@ class Pipe:
                                 )
                         except InvalidDimensionException as ide_query:
                             self.logger.error(
-                                f"[{session_id}] T2 ChromaDB DIMENSION ERROR during query: {ide_query}. Ensure query embedding dimension matches collection.",
+                                f"[{session_id}] T2 ChromaDB DIMENSION ERROR during query: {ide_query}.",
                                 exc_info=True,
                             )
                         except Exception as e_query:
@@ -2154,12 +2220,10 @@ class Pipe:
                                 f"[{session_id}] T2 ChromaDB query EXCEPTION: {e_query}",
                                 exc_info=True,
                             )
-                    # --- End of ChromaDB Query block ---
-                    elif rag_query:  # Log if embedding failed but query existed
+                    elif rag_query:
                         self.logger.error(
                             f"[{session_id}] Skipping T2 ChromaDB query because query embedding failed."
                         )
-
                 except Exception as e_rag_outer:
                     self.logger.error(
                         f"[{session_id}] Unexpected error during outer T2 RAG processing block: {e_rag_outer}",
@@ -2202,7 +2266,6 @@ class Pipe:
                     base_system_prompt_text, extracted_owi_context = (
                         PROMPT_PROCESS_SYSTEM_PROMPT_FUNC(current_output_messages)
                     )
-                    # self.logger.debug(f"[{session_id}] Processed system prompt. Base: {len(base_system_prompt_text)}, OWI: {len(extracted_owi_context or '')}")
                     if (
                         extracted_owi_context
                         and UTIL_COUNT_TOKENS_FUNC
@@ -2235,13 +2298,17 @@ class Pipe:
                 self.logger.error(f"[{session_id}] process_system_prompt unavailable.")
 
             # --- 7c: Context Refinement (RAG Cache OR Stateless OR None) ---
-            context_for_prompt = extracted_owi_context  # Start with extracted context
-            refined_context_tokens = -1  # Reset refined token count
+            context_for_prompt = extracted_owi_context  # Start with OWI
+            refined_context_tokens = -1
             cache_update_performed = False
+            cache_update_skipped = False
             final_context_selection_performed = False
-            stateless_refinement_performed = False  # Reset flags
+            stateless_refinement_performed = False
             latest_user_query_str = (
                 latest_user_message.get("content", "") if latest_user_message else ""
+            )
+            updated_cache_text = (
+                "[Cache not initialized or updated]"  # Default for Step 2 input
             )
 
             # --- Two-Step RAG Cache Refinement ---
@@ -2252,22 +2319,101 @@ class Pipe:
                 and self._sqlite_cursor
             ):
                 self.logger.info(
-                    f"[{session_id}] RAG Cache Feature ENABLED. Running two-step refinement..."
+                    f"[{session_id}] RAG Cache Feature ENABLED. Checking Step 1 skip conditions..."
                 )
+
+                # Get previous cache needed for similarity check and potential skip
+                previous_cache_text: Optional[str] = None
+                try:
+                    # Import the specific sync helper function directly from the library
+                    from i4_llm_agent.cache import _sync_get_rag_cache
+
+                    previous_cache_text = _sync_get_rag_cache(
+                        session_id, self._sqlite_cursor
+                    )
+                    if previous_cache_text is not None:
+                        self.logger.debug(
+                            f"[{session_id}] Retrieved previous cache for similarity check (Length: {len(previous_cache_text)})."
+                        )
+                    else:
+                        self.logger.debug(
+                            f"[{session_id}] No previous cache found for similarity check."
+                        )
+                        previous_cache_text = ""  # Use empty string if None for checks
+                except ImportError:
+                    self.logger.error(
+                        f"[{session_id}] Cannot retrieve previous cache: _sync_get_rag_cache not found."
+                    )
+                    previous_cache_text = ""  # Assume empty on import error
+                except Exception as e_get_cache:
+                    self.logger.error(
+                        f"[{session_id}] Error retrieving previous cache: {e_get_cache}",
+                        exc_info=True,
+                    )
+                    previous_cache_text = ""  # Assume empty on retrieval error
+
+                # --- Check Skip Conditions ---
+                skip_step1_length = False
+                skip_step1_similarity = False
+                owi_content_for_check = extracted_owi_context or ""
+                owi_len = len(owi_content_for_check.strip())
+                length_threshold = self.valves.CACHE_UPDATE_SKIP_OWI_THRESHOLD
+
+                if owi_len < length_threshold:
+                    skip_step1_length = True
+                    self.logger.info(
+                        f"[{session_id}] Cache Step 1 Skip Reason: OWI context length ({owi_len}) < threshold ({length_threshold})."
+                    )
+                else:
+                    # Only check similarity if length threshold passed and we have the utility function
+                    if self.UTIL_CALC_SIMILARITY_FUNC and previous_cache_text:
+                        similarity_threshold = (
+                            self.valves.CACHE_UPDATE_SIMILARITY_THRESHOLD
+                        )
+                        try:
+                            similarity_score = self.UTIL_CALC_SIMILARITY_FUNC(
+                                owi_content_for_check, previous_cache_text
+                            )
+                            self.logger.debug(
+                                f"[{session_id}] OWI vs Cache Similarity Score: {similarity_score:.4f} (Threshold: {similarity_threshold})"
+                            )
+                            if similarity_score > similarity_threshold:
+                                skip_step1_similarity = True
+                                self.logger.info(
+                                    f"[{session_id}] Cache Step 1 Skip Reason: Similarity ({similarity_score:.4f}) > threshold ({similarity_threshold})."
+                                )
+                        except Exception as e_sim:
+                            self.logger.error(
+                                f"[{session_id}] Error calculating string similarity: {e_sim}",
+                                exc_info=False,
+                            )  # Don't need full trace here
+                    elif not self.UTIL_CALC_SIMILARITY_FUNC:
+                        self.logger.warning(
+                            f"[{session_id}] Cannot check similarity: Utility function unavailable."
+                        )
+                    elif not previous_cache_text:
+                        self.logger.debug(
+                            f"[{session_id}] Cannot check similarity: Previous cache empty."
+                        )
+
+                skip_step1 = skip_step1_length or skip_step1_similarity
+                cache_update_skipped = skip_step1  # Set the overall skip flag
+
+                # --- Prepare LLM Configs ---
                 cache_update_llm_config = {
                     "url": self.valves.refiner_llm_api_url,
                     "key": self.valves.refiner_llm_api_key,
-                    "temp": self.valves.refiner_llm_temperature,  # Using shared temp for now
+                    "temp": self.valves.refiner_llm_temperature,
                     "prompt_template": self.valves.cache_update_prompt_template,
                 }
                 final_select_llm_config = {
                     "url": self.valves.refiner_llm_api_url,
                     "key": self.valves.refiner_llm_api_key,
-                    "temp": self.valves.refiner_llm_temperature,  # Using shared temp for now
+                    "temp": self.valves.refiner_llm_temperature,
                     "prompt_template": self.valves.final_context_selection_prompt_template,
                 }
 
-                # Check necessary configs
+                # Check necessary configs (even if skipping)
                 if not (
                     cache_update_llm_config["url"]
                     and cache_update_llm_config["key"]
@@ -2277,68 +2423,68 @@ class Pipe:
                     and final_select_llm_config["prompt_template"]
                 ):
                     self.logger.error(
-                        f"[{session_id}] Skipping RAG Cache: Refiner URL/Key/Prompts missing."
+                        f"[{session_id}] Cannot proceed with RAG Cache: Refiner URL/Key/Prompts missing."
                     )
                     await emit_status(
                         "ERROR: RAG Cache Refiner config incomplete.", done=False
                     )
-                    # Fallback: context_for_prompt remains original extracted_owi_context
-                elif not latest_user_query_str:
-                    self.logger.warning(
-                        f"[{session_id}] Skipping RAG Cache: Latest user query empty."
+                    updated_cache_text = (
+                        previous_cache_text  # Fallback to previous cache
                     )
-                    await emit_status(
-                        "WARN: Skipping RAG Cache (no query).", done=False
-                    )
-                    # Fallback: context_for_prompt remains original extracted_owi_context
                 else:
-                    # --- Execute Step 1: Update Cache ---
-                    await emit_status("MemProc: Updating background cache...")
-                    updated_cache_text = await CACHE_UPDATE_FUNC(
-                        session_id=session_id,
+                    # --- Execute Step 1 OR Use Previous Cache ---
+                    if not skip_step1:
+                        await emit_status("MemProc: Updating background cache...")
+                        updated_cache_text = await CACHE_UPDATE_FUNC(
+                            session_id=session_id,
+                            current_owi_context=extracted_owi_context,
+                            history_messages=current_active_history,
+                            latest_user_query=latest_user_query_str,
+                            llm_call_func=self._async_llm_call_wrapper,
+                            sqlite_cursor=self._sqlite_cursor,
+                            cache_update_llm_config=cache_update_llm_config,
+                            history_count=self.valves.refiner_history_count,
+                            dialogue_only_roles=DIALOGUE_ROLES_LIST,
+                            caller_info=f"SMP_CacheUpdate_{session_id}",
+                        )
+                        cache_update_performed = True
+                    else:
+                        await emit_status(
+                            "MemProc: Skipping cache update (redundant OWI)."
+                        )
+                        updated_cache_text = previous_cache_text  # Use the already retrieved previous cache
+                        self.logger.debug(
+                            f"[{session_id}] Using previous cache (Length: {len(updated_cache_text)}) for Step 2 due to skip."
+                        )
+                        cache_update_performed = False
+
+                    # --- Execute Step 2: Select Final Context (Always runs if RAG Cache enabled) ---
+                    await emit_status("MemProc: Selecting relevant context...")
+                    final_selected_context = await FINAL_CONTEXT_SELECT_FUNC(
+                        updated_cache_text=updated_cache_text,
                         current_owi_context=extracted_owi_context,
                         history_messages=current_active_history,
                         latest_user_query=latest_user_query_str,
                         llm_call_func=self._async_llm_call_wrapper,
-                        sqlite_cursor=self._sqlite_cursor,
-                        cache_update_llm_config=cache_update_llm_config,
-                        history_count=self.valves.refiner_history_count,  # Use shared history count
-                        dialogue_only_roles=DIALOGUE_ROLES_LIST,
-                        caller_info=f"SMP_CacheUpdate_{session_id}",
-                    )
-                    cache_update_performed = True  # Mark step 1 as attempted/run
-
-                    # --- Execute Step 2: Select Final Context ---
-                    await emit_status("MemProc: Selecting relevant context...")
-                    final_selected_context = await FINAL_CONTEXT_SELECT_FUNC(
-                        updated_cache_text=updated_cache_text,  # Use result from step 1
-                        current_owi_context=extracted_owi_context,  # Also pass current OWI
-                        history_messages=current_active_history,
-                        latest_user_query=latest_user_query_str,
-                        llm_call_func=self._async_llm_call_wrapper,
                         context_selection_llm_config=final_select_llm_config,
-                        history_count=self.valves.refiner_history_count,  # Use shared history count
+                        history_count=self.valves.refiner_history_count,
                         dialogue_only_roles=DIALOGUE_ROLES_LIST,
                         caller_info=f"SMP_CtxSelect_{session_id}",
                     )
-                    final_context_selection_performed = (
-                        True  # Mark step 2 as attempted/run
-                    )
+                    final_context_selection_performed = True
 
-                    # Use the output of Step 2 as the context for the final prompt
-                    context_for_prompt = final_selected_context
+                    context_for_prompt = final_selected_context  # Use Step 2 output
                     self.logger.info(
-                        f"[{session_id}] Two-Step RAG Cache refinement complete. Using selected context (length: {len(context_for_prompt)})."
+                        f"[{session_id}] RAG Cache Step 2 complete. Using selected context (length: {len(context_for_prompt)}). Step 1 Skipped: {skip_step1}"
                     )
 
-                    # Calculate tokens for the final selected context
                     if UTIL_COUNT_TOKENS_FUNC and self._tokenizer:
                         try:
                             refined_context_tokens = UTIL_COUNT_TOKENS_FUNC(
                                 context_for_prompt, self._tokenizer
                             )
                             self.logger.debug(
-                                f"[{session_id}] Refined context tokens (FinalSelectOUT): {refined_context_tokens}"
+                                f"[{session_id}] Final selected context tokens (RAGCacheOUT): {refined_context_tokens}"
                             )
                         except Exception as e_tok_cache:
                             refined_context_tokens = -1
@@ -2349,8 +2495,9 @@ class Pipe:
                         "MemProc: Context selection complete.", done=False
                     )
 
-            # --- ELSE IF: Stateless Refinement (Only if RAG Cache is disabled) ---
+            # --- ELSE IF: Stateless Refinement ---
             elif self.valves.enable_stateless_refinement and STATELESS_REFINE_FUNC:
+                # (Stateless logic remains the same as before)
                 self.logger.info(
                     f"[{session_id}] Stateless Refinement ENABLED (RAG Cache disabled). Proceeding..."
                 )
@@ -2368,7 +2515,7 @@ class Pipe:
                         "url": self.valves.refiner_llm_api_url,
                         "key": self.valves.refiner_llm_api_key,
                         "temp": self.valves.refiner_llm_temperature,
-                        "prompt_template": self.valves.stateless_refiner_prompt_template,  # Use specific valve
+                        "prompt_template": self.valves.stateless_refiner_prompt_template,
                     }
                     if (
                         not stateless_refiner_config["url"]
@@ -2394,16 +2541,11 @@ class Pipe:
                                 caller_info=f"SMP_StatelessRef_{session_id}",
                             )
                             if refined_stateless_context != extracted_owi_context:
-                                context_for_prompt = (
-                                    refined_stateless_context  # Update context
-                                )
-                                stateless_refinement_performed = (
-                                    True  # Mark step as run
-                                )
+                                context_for_prompt = refined_stateless_context
+                                stateless_refinement_performed = True
                                 self.logger.info(
                                     f"[{session_id}] Stateless refinement successful. Length: {len(context_for_prompt)}"
                                 )
-                                # Calculate tokens
                                 if UTIL_COUNT_TOKENS_FUNC and self._tokenizer:
                                     try:
                                         refined_context_tokens = UTIL_COUNT_TOKENS_FUNC(
@@ -2434,14 +2576,13 @@ class Pipe:
 
             # --- Log if no refinement performed ---
             if (
-                not cache_update_performed
-                and not final_context_selection_performed
+                not final_context_selection_performed
                 and not stateless_refinement_performed
             ):
                 self.logger.debug(
-                    f"[{session_id}] No refinement performed. Using original OWI context."
+                    f"[{session_id}] No refinement performed. Using original OWI context (if any)."
                 )
-                refined_context_tokens = -1  # Indicate no refinement value
+                refined_context_tokens = -1  # Indicate no refinement output
 
             # --- 7d: Select T0 Dialogue History Slice ---
             # (Implementation unchanged)
@@ -2474,7 +2615,7 @@ class Pipe:
                 )
 
             # --- 7e: Combine Context Sources ---
-            # (Implementation unchanged, now uses context_for_prompt)
+            # (Uses context_for_prompt which is result of refinement or original OWI)
             combined_context_string = "[Error combining context]"
             if PROMPT_CONTEXT_COMBINE_FUNC:
                 try:
@@ -2500,23 +2641,21 @@ class Pipe:
 
             # --- 7g: Prepare Final System Prompt ---
             # (Implementation unchanged)
-            memory_guidance = "\\n\\n--- Memory Guidance ---\\nUse dialogue history and background info for context."
+            memory_guidance = "\n\n--- Memory Guidance ---\nUse dialogue history and background info for context."
             enhanced_system_prompt = base_system_prompt_text.strip() + memory_guidance
 
             # //////////////////////////////////////////////////////////////////////
             # /// 5.11.8: Construct Final LLM Payload                            ///
             # //////////////////////////////////////////////////////////////////////
+            # (Implementation unchanged)
             self.logger.debug(
                 f"[{session_id}] PIPE_DEBUG: [8] Construct Final LLM Payload"
             )
             await emit_status("MemProc: Constructing final request...")
-            final_llm_payload_contents: Optional[List[Dict]] = None  # Explicit typing
-            final_payload_tokens: int = -1  # Explicit typing and init
-
-            # Check if the payload construction function is available
+            final_llm_payload_contents: Optional[List[Dict]] = None
+            final_payload_tokens: int = -1
             if PROMPT_PAYLOAD_CONSTRUCT_FUNC:
                 try:
-                    # Call the function to get the payload dictionary
                     payload_dict = PROMPT_PAYLOAD_CONSTRUCT_FUNC(
                         system_prompt=enhanced_system_prompt,
                         history=t0_raw_history_slice,
@@ -2525,26 +2664,18 @@ class Pipe:
                         strategy="standard",
                         include_ack_turns=self.valves.include_ack_turns,
                     )
-
-                    # Validate the returned dictionary
                     if isinstance(payload_dict, dict):
                         if "error" in payload_dict:
-                            # Log error if indicated by the constructor
                             self.logger.error(
                                 f"[{session_id}] Error constructing final payload: {payload_dict['error']}"
                             )
-                            # Keep final_llm_payload_contents as None
                         elif "contents" in payload_dict and isinstance(
                             payload_dict.get("contents"), list
                         ):
-                            # Success: Assign the contents
                             final_llm_payload_contents = payload_dict["contents"]
                             self.logger.info(
                                 f"[{session_id}] Constructed final payload ({len(final_llm_payload_contents)} turns)."
                             )
-
-                            # --- Token Calculation Block ---
-                            # Check if we can calculate tokens
                             if (
                                 UTIL_COUNT_TOKENS_FUNC
                                 and self._tokenizer
@@ -2552,21 +2683,14 @@ class Pipe:
                             ):
                                 try:
                                     total_tok = 0
-                                    # Explicitly iterate over the assigned list
                                     loop_target_list = final_llm_payload_contents
-                                    for (
-                                        turn
-                                    ) in (
-                                        loop_target_list
-                                    ):  # <<< Loop target explicitly defined
+                                    for turn in loop_target_list:
                                         if (
                                             isinstance(turn, dict)
                                             and "parts" in turn
                                             and isinstance(turn.get("parts"), list)
                                         ):
-                                            turn_parts = turn[
-                                                "parts"
-                                            ]  # Assign parts to a variable
+                                            turn_parts = turn["parts"]
                                             for part in turn_parts:
                                                 if (
                                                     isinstance(part, dict)
@@ -2575,10 +2699,7 @@ class Pipe:
                                                         part.get("text"), str
                                                     )
                                                 ):
-                                                    part_text = part[
-                                                        "text"
-                                                    ]  # Assign text to a variable
-                                                    # Ensure text is not empty before counting
+                                                    part_text = part["text"]
                                                     if part_text:
                                                         total_tok += (
                                                             UTIL_COUNT_TOKENS_FUNC(
@@ -2586,7 +2707,6 @@ class Pipe:
                                                                 self._tokenizer,
                                                             )
                                                         )
-                                    # Assign final count after loop completes
                                     final_payload_tokens = total_tok
                                     self.logger.debug(
                                         f"[{session_id}] Calculated final payload tokens (FinalIN): {final_payload_tokens}"
@@ -2596,49 +2716,37 @@ class Pipe:
                                         f"[{session_id}] Error calculating final payload tokens: {e_tok_final}",
                                         exc_info=False,
                                     )
-                                    final_payload_tokens = -1  # Indicate failure
+                                    final_payload_tokens = -1
                             elif not final_llm_payload_contents:
-                                # If contents list is empty after construction
                                 self.logger.debug(
                                     f"[{session_id}] Final payload contents empty. Tokens = 0."
                                 )
                                 final_payload_tokens = 0
                             else:
-                                # Tokenizer/counter unavailable
                                 self.logger.warning(
                                     f"[{session_id}] Skipping final token calculation: Tokenizer unavailable."
                                 )
                                 final_payload_tokens = -1
-                            # --- End Token Calculation Block ---
-
                         else:
-                            # Invalid structure if 'contents' key is missing or not a list
                             self.logger.error(
                                 f"[{session_id}] Payload constructor returned invalid structure: {payload_dict}"
                             )
-                            # Keep final_llm_payload_contents as None
                     else:
-                        # If the constructor didn't return a dictionary
                         self.logger.error(
                             f"[{session_id}] Payload constructor did not return a dictionary: {type(payload_dict)}"
                         )
-                        # Keep final_llm_payload_contents as None
-
                 except Exception as e_payload:
-                    # Catch errors during the call to PROMPT_PAYLOAD_CONSTRUCT_FUNC itself
                     self.logger.error(
                         f"[{session_id}] EXCEPTION during payload construction call: {e_payload}",
                         exc_info=True,
                     )
-                    final_llm_payload_contents = None  # Ensure None on exception
+                    final_llm_payload_contents = None
                     final_payload_tokens = -1
-
             else:
-                # If the function itself wasn't imported/available
                 self.logger.error(
                     f"[{session_id}] Cannot construct final payload: Function unavailable."
                 )
-                final_llm_payload_contents = None  # Ensure None if function missing
+                final_llm_payload_contents = None
                 final_payload_tokens = -1
 
             # //////////////////////////////////////////////////////////////////////
@@ -2702,11 +2810,13 @@ class Pipe:
 
             # Assemble Status with new refinement logic
             refinement_status = "Refined=N"
-            if cache_update_performed and final_context_selection_performed:
-                refinement_status = "Refined=Cache"
+            if (
+                final_context_selection_performed
+            ):  # Check if Step 2 ran (implies RAG Cache was enabled)
+                refinement_status = f"Refined=Cache(S1Skip={cache_update_skipped})"
             elif stateless_refinement_performed:
                 refinement_status = "Refined=Stateless"
-            # Include specific step flags if needed for debug: Refined=Cache(U+,S+)
+
             status_parts = [
                 f"T1={t1_retrieved_count}",
                 f"T2={t2_retrieved_count}",
@@ -2716,9 +2826,7 @@ class Pipe:
             if initial_owi_context_tokens >= 0:
                 token_parts.append(f"OWI_IN={initial_owi_context_tokens}")
             if refined_context_tokens >= 0:
-                token_parts.append(
-                    f"RefOUT={refined_context_tokens}"
-                )  # Represents final selected context tokens
+                token_parts.append(f"RefOUT={refined_context_tokens}")
             if summarization_prompt_tokens >= 0:
                 token_parts.append(f"SumIN={summarization_prompt_tokens}")
             if summarization_output_tokens >= 0:
@@ -2744,17 +2852,16 @@ class Pipe:
             # //////////////////////////////////////////////////////////////////////
             # /// 5.11.12: Optional Final LLM Call                               ///
             # //////////////////////////////////////////////////////////////////////
+            # (Implementation unchanged)
             self.logger.debug(
                 f"[{session_id}] PIPE_DEBUG: [12] Optional Final LLM Call"
             )
             final_llm_triggered = bool(
                 self.valves.final_llm_api_url and self.valves.final_llm_api_key
             )
-
             if final_llm_triggered:
                 self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED.")
                 await emit_status("MemProc: Executing final LLM Call...")
-
                 if not final_llm_payload_contents:
                     self.logger.error(
                         f"[{session_id}] Cannot execute Final LLM Call: Payload construction failed."
@@ -2773,8 +2880,6 @@ class Pipe:
                     self.logger.info(
                         f"[{session_id}] Calling Final LLM: URL='{self.valves.final_llm_api_url[:40]}...', Temp={self.valves.final_llm_temperature}, Timeout={self.valves.final_llm_timeout}s"
                     )
-
-                    # Call the LLM using the async wrapper
                     success, final_response_or_error = (
                         await self._async_llm_call_wrapper(
                             api_url=self.valves.final_llm_api_url,
@@ -2782,20 +2887,15 @@ class Pipe:
                             payload=final_call_payload,
                             temperature=self.valves.final_llm_temperature,
                             timeout=self.valves.final_llm_timeout,
-                            caller_info="SMP_FinalLLM",  # Shortened caller info
+                            caller_info="SMP_FinalLLM",
                         )
                     )
-
-                    # --- Process the result ---
                     if (
                         success
                         and isinstance(final_response_or_error, str)
                         and final_response_or_error.strip()
                     ):
-                        # Successful LLM call returning non-empty text
-                        final_response_text = (
-                            final_response_or_error.strip()
-                        )  # Ensure stripped
+                        final_response_text = final_response_or_error.strip()
                         self.logger.info(
                             f"[{session_id}] Final LLM Call successful. Length: {len(final_response_text)}."
                         )
@@ -2805,53 +2905,39 @@ class Pipe:
                         self.logger.info(
                             f"pipe [{session_id}]: Finished at {pipe_exit_time} (Final LLM OK)."
                         )
-                        return final_response_text  # Return the successful response
+                        return final_response_text
                     else:
-                        # --- Handle LLM call failure or empty/invalid response ---
-                        error_info_str = "Unknown error"  # Default error message
-
-                        # Determine the specific error string based on the response
+                        error_info_str = "Unknown error"
                         if not success and isinstance(final_response_or_error, dict):
-                            # Extract details from error dictionary
                             err_type = final_response_or_error.get(
                                 "error_type", "UnknownType"
                             )
                             err_msg = final_response_or_error.get("message", "N/A")
                             error_info_str = f"Type: {err_type}, Msg: {err_msg}"
                         elif not success:
-                            # Failure, but not a dictionary - convert to string
                             error_info_str = str(final_response_or_error)
                         elif (
                             success
                             and isinstance(final_response_or_error, str)
                             and not final_response_or_error.strip()
                         ):
-                            # Success, but empty string response
                             error_info_str = "LLM returned empty response"
                         elif success:
-                            # Success, but unexpected response type
                             error_info_str = f"LLM returned unexpected type: {type(final_response_or_error).__name__}"
-
-                        # Log the detailed error
                         self.logger.error(
                             f"[{session_id}] Final LLM Call via Pipe failed. Error: '{error_info_str}'."
                         )
-
-                        # Prepare user-facing message and status
                         user_error_message = f"Apologies, the final processing step failed. Details: {error_info_str}"
-                        error_status_desc = f"ERROR: Final LLM Failed ({error_info_str[:50]}...)"  # Truncate for status
-
-                        # Emit final status and log exit
+                        error_status_desc = (
+                            f"ERROR: Final LLM Failed ({error_info_str[:50]}...)"
+                        )
                         await emit_status(error_status_desc, done=True)
                         pipe_exit_time = datetime.now(timezone.utc).isoformat()
                         self.logger.info(
                             f"pipe [{session_id}]: Finished at {pipe_exit_time} (Final LLM error)."
                         )
-
-                        # Return the user-facing error message
                         return user_error_message
             else:
-                # Final LLM call is disabled via valves
                 self.logger.debug(
                     f"[{session_id}] Skipping Final LLM Call via Pipe (disabled by valves)."
                 )
