@@ -2426,12 +2426,14 @@ class Pipe:
                 self.logger.error(f"[{session_id}] process_system_prompt unavailable.")
 
             # --- 7c.1: Apply session valve override for OWI processing ---
-            if not session_process_owi_rag:  # Check the session-specific flag
+            # Check the session-specific flag read earlier
+            if not session_process_owi_rag:
+                # If the flag is False, bypass using the extracted OWI context
                 self.logger.info(
                     f"[{session_id}] Session valve 'process_owi_rag' is FALSE. Discarding OWI context before refinement."
                 )
-                extracted_owi_context = None  # Discard context if session valve is off
-                initial_owi_context_tokens = 0  # Set tokens to 0 if discarded
+                extracted_owi_context = None  # Set context to None
+                initial_owi_context_tokens = 0  # Reset token count accordingly
 
             # --- 7c.2: Context Refinement (RAG Cache OR Stateless OR None) ---
             context_for_prompt = (
