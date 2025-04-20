@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 i4_llm_agent/OpenWebUI_MemorySession_SCRIPT.py
+i4_llm_agent/OpenWebUI_ParameterInspectorPipe_SCRIPT.py
 i4_llm_agent/__init__.py
 i4_llm_agent/api_client.py
 i4_llm_agent/cache.py
