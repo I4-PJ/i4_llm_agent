@@ -713,6 +713,12 @@ class Pipe:
             default=True,
             description="Enable/disable processing of the RAG context provided by OpenWebUI for the current turn. If disabled, OWI context is ignored, and RAG cache Step 1 is skipped (cache remains untouched by OWI input).",
         )
+
+        text_block_to_remove: str = Field(
+            default="",
+            description="Specify an exact block of text to remove from the system prompt before the final LLM call. Useful for removing conflicting instructions (e.g., default OWI RAG guidance). Leave empty to disable.",
+        )
+
         pass
 
     # === SECTION 5.2: INITIALIZATION METHOD ===
@@ -1638,6 +1644,7 @@ class Pipe:
         # --- Session-specific settings (defaults initially) ---
         session_long_term_goal = ""  # Read from UserValves
         session_process_owi_rag = True  # Read from UserValves (Default ON)
+        session_text_block_to_remove = ""  # Default for removal valve
 
         async def emit_status(description: str, done: bool = False):
             log_session_id = (
@@ -1679,11 +1686,8 @@ class Pipe:
             if not __request__:
                 self.logger.warning("__request__ missing.")
 
-            # --- [[ START REVISED UserValves Handling ]] ---
             # --- User and Session Valve Handling ---
-            # Initialize defaults
-            session_long_term_goal = ""
-            session_process_owi_rag = True
+            # Initialize defaults (already done above)
             user_id = "default_user"  # Default user ID
 
             if isinstance(__user__, dict) and "id" in __user__:
@@ -1704,12 +1708,20 @@ class Pipe:
                         rag_from_attr = getattr(
                             session_valves_obj, "process_owi_rag", True
                         )
+                        # --- NEW: Read text_block_to_remove ---
+                        remove_block_from_attr = getattr(
+                            session_valves_obj, "text_block_to_remove", ""
+                        )
 
                         # Assign and perform type checking
                         session_long_term_goal = str(goal_from_attr)  # Ensure string
                         session_process_owi_rag = (
                             rag_from_attr if isinstance(rag_from_attr, bool) else True
                         )  # Ensure bool, default true if wrong type
+                        # --- NEW: Assign text_block_to_remove ---
+                        session_text_block_to_remove = str(
+                            remove_block_from_attr
+                        )  # Ensure string
 
                         self.logger.debug(
                             f"[{session_id}] Attempted read session valves via getattr."
@@ -1732,6 +1744,10 @@ class Pipe:
                                 process_owi_rag_val
                                 if isinstance(process_owi_rag_val, bool)
                                 else True
+                            )
+                            # --- NEW: Read text_block_to_remove via dict.get ---
+                            session_text_block_to_remove = str(
+                                session_valves_obj.get("text_block_to_remove", "")
                             )
                             self.logger.debug(
                                 f"[{session_id}] Read session valves via dict.get (getattr failed)."
@@ -1756,13 +1772,18 @@ class Pipe:
                 self.logger.warning(
                     f"User info/ID missing in __user__ ('{__user__}'). Using defaults for session valves and 'default_user' ID."
                 )
-                # user_id remains 'default_user', goal/rag remain defaults
+                # user_id remains 'default_user', goal/rag/remove_block remain defaults
 
             # Log the final applied values after attempting to read them
             self.logger.info(
-                f"[{session_id}] Session Valves Applied -> Goal: '{session_long_term_goal[:30]}...', Process OWI RAG: {session_process_owi_rag}"
+                f"[{session_id}] Session Valves Applied -> Goal: '{session_long_term_goal[:30]}...', "
+                f"Process OWI RAG: {session_process_owi_rag}, "
+                f"Remove Block Set: {bool(session_text_block_to_remove)}"  # Log if removal block is set
             )
-            # --- [[ END REVISED UserValves Handling ]] ---
+            if session_text_block_to_remove:
+                self.logger.debug(
+                    f"[{session_id}] Remove Block Content Starts: '{session_text_block_to_remove[:50]}...'"
+                )
 
             chat_id = __chat_id__
             if not chat_id or not isinstance(chat_id, str) or len(chat_id.strip()) == 0:
@@ -2358,6 +2379,7 @@ class Pipe:
                         exc_info=True,
                     )
 
+            # === START OF SECTION 5.11.7: Prepare Final Payload Inputs & Context Refinement (REVISED) ===
             # //////////////////////////////////////////////////////////////////////
             # /// 5.11.7: Prepare Final Payload Inputs & Context Refinement      ///
             # //////////////////////////////////////////////////////////////////////
@@ -2367,6 +2389,7 @@ class Pipe:
             await emit_status("Status: Preparing context...")
 
             # --- 7a: Retrieve T1 Summaries ---
+            # (No changes here)
             recent_t1_summaries = []
             t1_retrieved_count = 0
             if self._sqlite_conn and self.valves.max_stored_summary_blocks > 0:
@@ -2385,6 +2408,7 @@ class Pipe:
                 )
 
             # --- 7b: Process System Prompt & Extract Initial OWI Context ---
+            # (No changes here)
             base_system_prompt_text = "You are helpful."
             extracted_owi_context = None
             initial_owi_context_tokens = -1
@@ -2424,6 +2448,34 @@ class Pipe:
                     extracted_owi_context = None
             else:
                 self.logger.error(f"[{session_id}] process_system_prompt unavailable.")
+
+            # --- NEW: 7b.1 Remove Specified Text Block (if valve is set) ---
+            if session_text_block_to_remove:
+                self.logger.info(
+                    f"[{session_id}] Attempting to remove specified text block from base system prompt..."
+                )
+                # Use a temporary variable to avoid modifying the original if the block isn't found
+                original_length = len(base_system_prompt_text)
+                temp_prompt = base_system_prompt_text.replace(
+                    session_text_block_to_remove, ""
+                )
+                removed_length = len(temp_prompt)
+                chars_removed = original_length - removed_length
+
+                if chars_removed > 0:
+                    base_system_prompt_text = temp_prompt  # Apply the change
+                    self.logger.info(
+                        f"[{session_id}] Successfully removed specified text block ({chars_removed} chars removed)."
+                    )
+                else:
+                    self.logger.warning(
+                        f"[{session_id}] Specified text block for removal was NOT FOUND in the base system prompt. Prompt unchanged."
+                    )
+            else:
+                self.logger.debug(
+                    f"[{session_id}] No text block specified for removal (session valve empty)."
+                )
+            # --- END NEW ---
 
             # --- 7c.1: Apply session valve override for OWI processing ---
             # Check the session-specific flag read earlier
