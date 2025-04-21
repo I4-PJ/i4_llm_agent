@@ -721,10 +721,11 @@ class Pipe:
 
         pass
 
-    # === SECTION 5.2: INITIALIZATION METHOD ===
+    # === START OF SECTION 5.2: INITIALIZATION METHOD (REVISED AGAIN) ===
     def __init__(self):
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version})"
+        # Update version if needed when merging
+        self.name = f"SESSION_MEMORY PIPE (v0.18.4)"  # Suggested version bump
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
@@ -742,7 +743,7 @@ class Pipe:
             CACHE_UPDATE_FUNC
             and FINAL_CONTEXT_SELECT_FUNC
             and INIT_RAG_CACHE_TABLE_FUNC
-            and SYNC_GET_RAG_CACHE_FUNC
+            and SYNC_GET_RAG_CACHE_FUNC  # This is the async getter alias
         ):
             self.logger.warning("RAG Cache functions unavailable. Feature disabled.")
         if not STATELESS_REFINE_FUNC:
@@ -842,6 +843,7 @@ class Pipe:
             )
             self._sqlite_conn.execute("PRAGMA journal_mode=WAL;")
             self._sqlite_cursor = self._sqlite_conn.cursor()
+
             # Initialize T1 Summary Table
             self._sqlite_cursor.execute(
                 """CREATE TABLE IF NOT EXISTS tier1_text_summaries (
@@ -855,34 +857,69 @@ class Pipe:
                 "CREATE INDEX IF NOT EXISTS idx_session_ts ON tier1_text_summaries (session_id, timestamp_utc)"
             )
             self.logger.info("SQLite T1 Summary table initialized.")
-            # Initialize RAG Cache Table
-            if INIT_RAG_CACHE_TABLE_FUNC:
+
+            # --- RAG Cache Table Initialization (FIXED AGAIN) ---
+            if INIT_RAG_CACHE_TABLE_FUNC and self._sqlite_cursor:
                 try:
-                    init_success = (
-                        INIT_RAG_CACHE_TABLE_FUNC._sync_initialize_rag_cache_table(
-                            self._sqlite_cursor
-                        )
+                    self.logger.debug(
+                        "Attempting to run async RAG Cache table init using existing loop..."
                     )
-                    if init_success:
-                        self.logger.info("SQLite RAG Cache table initialized.")
-                    else:
-                        self.logger.error(
-                            "Failed to initialize SQLite RAG Cache table!"
+                    # Get the currently running event loop
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Run the async function within the existing loop
+                        # Pass the cursor directly
+                        init_success = loop.run_until_complete(
+                            INIT_RAG_CACHE_TABLE_FUNC(self._sqlite_cursor)
                         )
-                except AttributeError:
+                        if init_success:
+                            self.logger.info(
+                                "SQLite RAG Cache table initialized successfully."
+                            )
+                        else:
+                            self.logger.error(
+                                "SQLite RAG Cache table initialization failed (returned False)."
+                            )
+                    else:
+                        # Fallback if no loop is running (less likely here, but safe)
+                        self.logger.warning(
+                            "No running event loop found in __init__. Falling back to asyncio.run() for RAG cache init."
+                        )
+                        init_success = asyncio.run(
+                            INIT_RAG_CACHE_TABLE_FUNC(self._sqlite_cursor)
+                        )
+                        if init_success:
+                            self.logger.info(
+                                "SQLite RAG Cache table initialized successfully via asyncio.run()."
+                            )
+                        else:
+                            self.logger.error(
+                                "SQLite RAG Cache table initialization failed via asyncio.run() (returned False)."
+                            )
+
+                except RuntimeError as e_loop:
+                    # Catch potential errors getting the loop or if run_until_complete is called incorrectly
                     self.logger.error(
-                        "INIT_RAG_CACHE_TABLE_FUNC._sync_initialize_rag_cache_table not found. Cannot init cache table."
+                        f"RuntimeError during async RAG Cache init (loop issue?): {e_loop}",
+                        exc_info=True,
                     )
                 except Exception as e_init_cache:
                     self.logger.error(
-                        f"Error initializing RAG Cache table: {e_init_cache}",
+                        f"Unexpected exception during async RAG Cache table initialization: {e_init_cache}",
                         exc_info=True,
                     )
-            else:
+            elif not INIT_RAG_CACHE_TABLE_FUNC:
                 self.logger.error(
-                    "Cannot initialize RAG Cache table: function unavailable."
+                    "Cannot initialize RAG Cache table: INIT_RAG_CACHE_TABLE_FUNC unavailable."
                 )
+            elif not self._sqlite_cursor:
+                self.logger.error(
+                    "Cannot initialize RAG Cache table: SQLite cursor unavailable."
+                )
+            # --- End RAG Cache Fix ---
+
             self.logger.info(f"SQLite DB initialized at '{sqlite_db_path}'.")
+
         except Exception as e:
             self.logger.error(f"SQLite init error: {e}", exc_info=True)
             if self._sqlite_conn:
@@ -912,6 +949,8 @@ class Pipe:
         self._owi_embedding_func_cache: Optional[OwiEmbeddingFunction] = None
         self._current_event_emitter = None
         self.logger.info(f"'{self.name}' initialization complete.")
+
+    # === END OF SECTION 5.2 (REVISED AGAIN) ===
 
     # === SECTION 5.3: LOGGER CONFIGURATION ===
     def configure_logger(self):
@@ -1133,18 +1172,26 @@ class Pipe:
             self.logger.info(f"Final LLM API URL changed to: '{new_final_llm_url}'.")
         self.logger.info("on_valves_updated: Reload finished.")
 
-    # === SECTION 5.5: HELPERS - SESSION STATE ===
+    # === START OF SECTION 5.5: HELPERS - SESSION STATE (REVISED) ===
     def _get_or_create_session(self, session_id: str) -> Dict:
-        # (Implementation unchanged)
+        # Ensures the session exists and has the required keys.
         if session_id not in self.sessions:
             self.logger.info(f"Creating new session state for ID: {session_id}")
             self.sessions[session_id] = {
-                "active_history": [],
-                "last_summary_turn_index": -1,
+                "active_history": [],  # Stores the full message history as last seen
+                "last_summary_turn_index": -1,  # Index in active_history of last summarized msg
+                "previous_input_messages": None,  # Stores the 'body.messages' from the previous call
             }
-        self.sessions[session_id].setdefault("active_history", [])
-        self.sessions[session_id].setdefault("last_summary_turn_index", -1)
+        else:
+            # Ensure keys exist even if session was created before this code change
+            self.sessions[session_id].setdefault("active_history", [])
+            self.sessions[session_id].setdefault("last_summary_turn_index", -1)
+            self.sessions[session_id].setdefault("previous_input_messages", None)
+
+        # Return the session state dictionary
         return self.sessions[session_id]
+
+    # === END OF SECTION 5.5 (REVISED) ===
 
     # === SECTION 5.6: HELPER - TIER 2 CHROMA DB COLLECTION ===
     def _get_or_create_tier2_collection(
@@ -1598,7 +1645,7 @@ class Pipe:
                 exc_info=True,
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD ===
+    # === START OF SECTION 5.11: MAIN PIPE METHOD (REVISED STARTUP & HISTORY HANDLING - FINAL) ===
     async def pipe(
         self,
         body: dict,
@@ -1615,16 +1662,18 @@ class Pipe:
         # /// 5.11.0: Initialization & Setup                                ///
         # //////////////////////////////////////////////////////////////////////
         pipe_entry_time = datetime.now(timezone.utc).isoformat()
-        self.logger.info(f"pipe: Entered v{self.version} at {pipe_entry_time}")
+        # Update version if needed when merging
+        self.logger.info(f"pipe: Entered v0.18.4 at {pipe_entry_time}")
         self._current_event_emitter = __event_emitter__
         session_id = "uninitialized_session"
         user_id = "default_user"
         session_state: Optional[Dict] = None
         owi_embed_func: Optional[OwiEmbeddingFunction] = None
-        tier2_collection: Optional[Any] = None  # Use Optional[Any] for collection
+        tier2_collection: Optional[Any] = None
         output_body = body.copy() if isinstance(body, dict) else {}
         status_message = "Status: Initializing..."
         # Flags & Metrics
+        is_regeneration_heuristic = False
         cache_update_performed = False
         cache_update_skipped = False
         final_context_selection_performed = False
@@ -1640,11 +1689,14 @@ class Pipe:
         refined_context_tokens = -1
         t0_raw_history_slice: List[Dict] = []
         final_llm_payload_contents: Optional[List[Dict]] = None
+        effective_user_message: Optional[Dict] = None
+        history_for_processing: List[Dict] = []
+        latest_user_query_str: str = ""  # Initialize here
 
         # --- Session-specific settings (defaults initially) ---
-        session_long_term_goal = ""  # Read from UserValves
-        session_process_owi_rag = True  # Read from UserValves (Default ON)
-        session_text_block_to_remove = ""  # Default for removal valve
+        session_long_term_goal = ""
+        session_process_owi_rag = True
+        session_text_block_to_remove = ""
 
         async def emit_status(description: str, done: bool = False):
             log_session_id = (
@@ -1687,52 +1739,34 @@ class Pipe:
                 self.logger.warning("__request__ missing.")
 
             # --- User and Session Valve Handling ---
-            # Initialize defaults (already done above)
-            user_id = "default_user"  # Default user ID
-
+            # (Code for reading valves remains the same as previous version)
+            user_id = "default_user"
             if isinstance(__user__, dict) and "id" in __user__:
-                user_id = __user__["id"]  # Get actual user ID if available
-                session_valves_obj = __user__.get(
-                    "valves"
-                )  # Get whatever OWI provides for valves
-
-                if (
-                    session_valves_obj
-                ):  # Check if the 'valves' key exists and is not None
+                user_id = __user__["id"]
+                session_valves_obj = __user__.get("valves")
+                if session_valves_obj:
                     try:
-                        # Attempt direct attribute access first (like the example suggests)
-                        # Use getattr with defaults to handle missing attributes gracefully
                         goal_from_attr = getattr(
                             session_valves_obj, "long_term_goal", ""
                         )
                         rag_from_attr = getattr(
                             session_valves_obj, "process_owi_rag", True
                         )
-                        # --- NEW: Read text_block_to_remove ---
                         remove_block_from_attr = getattr(
                             session_valves_obj, "text_block_to_remove", ""
                         )
-
-                        # Assign and perform type checking
-                        session_long_term_goal = str(goal_from_attr)  # Ensure string
+                        session_long_term_goal = str(goal_from_attr)
                         session_process_owi_rag = (
                             rag_from_attr if isinstance(rag_from_attr, bool) else True
-                        )  # Ensure bool, default true if wrong type
-                        # --- NEW: Assign text_block_to_remove ---
-                        session_text_block_to_remove = str(
-                            remove_block_from_attr
-                        )  # Ensure string
-
+                        )
+                        session_text_block_to_remove = str(remove_block_from_attr)
                         self.logger.debug(
                             f"[{session_id}] Attempted read session valves via getattr."
                         )
-
                     except TypeError as e_type:
-                        # This might happen if session_valves_obj is not suitable for getattr (e.g., list)
                         self.logger.warning(
                             f"[{session_id}] TypeError reading UserValves via getattr ({e_type}). Trying dict access."
                         )
-                        # Fallback to dictionary access
                         if isinstance(session_valves_obj, dict):
                             session_long_term_goal = str(
                                 session_valves_obj.get("long_term_goal", "")
@@ -1745,7 +1779,6 @@ class Pipe:
                                 if isinstance(process_owi_rag_val, bool)
                                 else True
                             )
-                            # --- NEW: Read text_block_to_remove via dict.get ---
                             session_text_block_to_remove = str(
                                 session_valves_obj.get("text_block_to_remove", "")
                             )
@@ -1757,33 +1790,28 @@ class Pipe:
                                 f"[{session_id}] __user__['valves'] exists but is not an object with attributes or a dict. Using defaults."
                             )
                     except Exception as e_get_uv:
-                        # Catch any other unexpected errors during valve reading
                         self.logger.error(
                             f"[{session_id}] Error reading UserValves from __user__: {e_get_uv}. Using defaults.",
                             exc_info=True,
                         )
                 else:
-                    # Log if the 'valves' key itself is missing or None
                     self.logger.warning(
                         f"[{session_id}] __user__['valves'] not found or is None. Using defaults."
                     )
             else:
-                # Log if __user__ structure is completely unexpected or missing ID
                 self.logger.warning(
                     f"User info/ID missing in __user__ ('{__user__}'). Using defaults for session valves and 'default_user' ID."
                 )
-                # user_id remains 'default_user', goal/rag/remove_block remain defaults
-
-            # Log the final applied values after attempting to read them
             self.logger.info(
                 f"[{session_id}] Session Valves Applied -> Goal: '{session_long_term_goal[:30]}...', "
                 f"Process OWI RAG: {session_process_owi_rag}, "
-                f"Remove Block Set: {bool(session_text_block_to_remove)}"  # Log if removal block is set
+                f"Remove Block Set: {bool(session_text_block_to_remove)}"
             )
             if session_text_block_to_remove:
                 self.logger.debug(
                     f"[{session_id}] Remove Block Content Starts: '{session_text_block_to_remove[:50]}...'"
                 )
+            # --- End Valve Handling ---
 
             chat_id = __chat_id__
             if not chat_id or not isinstance(chat_id, str) or len(chat_id.strip()) == 0:
@@ -1791,15 +1819,128 @@ class Pipe:
                     "ERROR: Cannot isolate session (missing chat_id).", True
                 )
                 return {"error": "Pipe needs valid chat_id.", "status_code": 500}
-            # Ensure session_id is constructed *after* user_id is determined
             safe_chat_id_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", chat_id)
             session_id = f"user_{user_id}_chat_{safe_chat_id_part}"
-            self.logger.info(f"Session ID: {session_id}")  # Log the final session ID
+            self.logger.info(f"Session ID: {session_id}")
 
-            session_state = self._get_or_create_session(session_id)
+            # --- Get Session State & Handle History / Regeneration ---
+            session_state = self._get_or_create_session(
+                session_id
+            )  # Ensures keys exist
             if not isinstance(session_state, dict):
                 await emit_status(f"ERROR: Internal session state error.", done=True)
                 return {"error": f"Internal session state error.", "status_code": 500}
+
+            incoming_messages = body.get("messages", [])
+            if not isinstance(incoming_messages, list):
+                incoming_messages = []
+            previous_input_messages = session_state.get("previous_input_messages")
+
+            # *** Regeneration Heuristic Check ***
+            is_regeneration_heuristic = False
+            if (
+                previous_input_messages is not None
+                and incoming_messages == previous_input_messages
+                and len(incoming_messages) > 0
+            ):
+                is_regeneration_heuristic = True
+                self.logger.info(
+                    f"[{session_id}] Identical input detected. Assuming regeneration heuristic."
+                )
+                await emit_status("Status: Regeneration detected (heuristic)...")
+            # *** End Regeneration Check ***
+
+            # Store current incoming messages for the *next* call's comparison
+            session_state["previous_input_messages"] = incoming_messages.copy()
+
+            # Update active history in session state (always reflects the latest full input)
+            current_active_history = session_state.get("active_history", [])
+            if len(incoming_messages) < len(current_active_history):
+                self.logger.warning(
+                    f"[{session_id}] Incoming history shorter than stored. Resetting active history & summary index."
+                )
+                session_state["active_history"] = incoming_messages.copy()
+                session_state["last_summary_turn_index"] = -1
+            else:
+                session_state["active_history"] = incoming_messages.copy()
+            current_active_history = session_state[
+                "active_history"
+            ]  # Use the updated history
+            self.logger.debug(
+                f"[{session_id}] Active history length set to {len(current_active_history)}."
+            )
+
+            # --- Identify Effective User Message & History for *This* Processing Cycle ---
+            user_message_indices = [
+                i
+                for i, msg in enumerate(current_active_history)
+                if isinstance(msg, dict) and msg.get("role") == "user"
+            ]
+
+            if not user_message_indices:
+                self.logger.error(
+                    f"[{session_id}] No user messages found in history. Cannot proceed."
+                )
+                await emit_status("ERROR: No user messages found.", done=True)
+                return {
+                    "error": "Cannot process request without user messages.",
+                    "status_code": 400,
+                }
+
+            effective_user_message_index = -1
+            if is_regeneration_heuristic:
+                if len(user_message_indices) >= 2:
+                    effective_user_message_index = user_message_indices[-2]
+                    self.logger.info(
+                        f"[{session_id}] Regeneration: Using user message at index {effective_user_message_index} as effective query."
+                    )
+                else:
+                    effective_user_message_index = user_message_indices[-1]
+                    self.logger.warning(
+                        f"[{session_id}] Regeneration heuristic active, but only one user message found. Using last user message at index {effective_user_message_index}."
+                    )
+            else:
+                effective_user_message_index = user_message_indices[-1]
+                self.logger.debug(
+                    f"[{session_id}] Normal processing: Using last user message at index {effective_user_message_index} as query."
+                )
+
+            if effective_user_message_index >= 0:
+                effective_user_message = current_active_history[
+                    effective_user_message_index
+                ]
+                history_for_processing = current_active_history[
+                    :effective_user_message_index
+                ]
+                self.logger.debug(
+                    f"[{session_id}] Effective query set. History for processing contains {len(history_for_processing)} messages."
+                )
+            else:
+                self.logger.error(
+                    f"[{session_id}] Failed to determine effective user message index. Aborting."
+                )
+                await emit_status("ERROR: Failed to identify query message.", done=True)
+                return {
+                    "error": "Internal error identifying query message.",
+                    "status_code": 500,
+                }
+
+            # --- Assign latest_user_query_str FROM effective_user_message ---
+            # This variable will be used by subsequent steps (RAG-Q, Refinement, Payload Construction)
+            latest_user_query_str = (
+                effective_user_message.get("content", "")
+                if effective_user_message
+                else ""
+            )
+            if not latest_user_query_str:
+                self.logger.warning(
+                    f"[{session_id}] Effective user query content is empty!"
+                )
+            else:
+                self.logger.debug(
+                    f"[{session_id}] Effective query string set (len: {len(latest_user_query_str)})."
+                )
+            # --- End Effective Query/History Identification ---
 
             # Log raw input and check core components
             self._log_debug_raw_input(session_id, body)
@@ -1811,23 +1952,10 @@ class Pipe:
             if not self._sqlite_conn or not self._sqlite_cursor:
                 self.logger.error(f"[{session_id}] SQLite unavailable.")
 
-            # Get incoming messages and latest user message
-            incoming_messages = body.get("messages", [])
-            if not isinstance(incoming_messages, list):
-                incoming_messages = []
-            latest_user_message = next(
-                (
-                    msg
-                    for msg in reversed(incoming_messages)
-                    if isinstance(msg, dict) and msg.get("role") == "user"
-                ),
-                None,
-            )
-
             # //////////////////////////////////////////////////////////////////////
             # /// 5.11.2: Tier 2 Setup (Chroma/Emb)                              ///
             # //////////////////////////////////////////////////////////////////////
-            # (Implementation unchanged)
+            # (Code remains the same)
             self.logger.debug(f"[{session_id}] PIPE_DEBUG: [2] Tier 2 Setup")
             await emit_status("Status: Setting up vector store...")
             chroma_embed_wrapper = None
@@ -1877,10 +2005,11 @@ class Pipe:
                 )
 
             # //////////////////////////////////////////////////////////////////////
-            # /// 5.11.3: Update Active History in Session State                 ///
+            # /// 5.11.3: (History Update & Regen Handling now covered above)    ///
             # //////////////////////////////////////////////////////////////////////
-            # (Implementation unchanged)
-            self.logger.debug(f"[{session_id}] PIPE_DEBUG: [3] Update Active History")
+            self.logger.debug(
+                f"[{session_id}] PIPE_DEBUG: [3] History Updated (incl. regen check)"
+            )
             await emit_status("Status: Updating history...")
             current_active_history = session_state.setdefault("active_history", [])
             current_len = len(current_active_history)
@@ -2389,7 +2518,6 @@ class Pipe:
             await emit_status("Status: Preparing context...")
 
             # --- 7a: Retrieve T1 Summaries ---
-            # (No changes here)
             recent_t1_summaries = []
             t1_retrieved_count = 0
             if self._sqlite_conn and self.valves.max_stored_summary_blocks > 0:
@@ -2408,7 +2536,6 @@ class Pipe:
                 )
 
             # --- 7b: Process System Prompt & Extract Initial OWI Context ---
-            # (No changes here)
             base_system_prompt_text = "You are helpful."
             extracted_owi_context = None
             initial_owi_context_tokens = -1
@@ -2449,12 +2576,11 @@ class Pipe:
             else:
                 self.logger.error(f"[{session_id}] process_system_prompt unavailable.")
 
-            # --- NEW: 7b.1 Remove Specified Text Block (if valve is set) ---
+            # --- 7b.1 Remove Specified Text Block (if valve is set) ---
             if session_text_block_to_remove:
                 self.logger.info(
                     f"[{session_id}] Attempting to remove specified text block from base system prompt..."
                 )
-                # Use a temporary variable to avoid modifying the original if the block isn't found
                 original_length = len(base_system_prompt_text)
                 temp_prompt = base_system_prompt_text.replace(
                     session_text_block_to_remove, ""
@@ -2475,22 +2601,17 @@ class Pipe:
                 self.logger.debug(
                     f"[{session_id}] No text block specified for removal (session valve empty)."
                 )
-            # --- END NEW ---
 
             # --- 7c.1: Apply session valve override for OWI processing ---
-            # Check the session-specific flag read earlier
             if not session_process_owi_rag:
-                # If the flag is False, bypass using the extracted OWI context
                 self.logger.info(
                     f"[{session_id}] Session valve 'process_owi_rag' is FALSE. Discarding OWI context before refinement."
                 )
-                extracted_owi_context = None  # Set context to None
-                initial_owi_context_tokens = 0  # Reset token count accordingly
+                extracted_owi_context = None
+                initial_owi_context_tokens = 0
 
             # --- 7c.2: Context Refinement (RAG Cache OR Stateless OR None) ---
-            context_for_prompt = (
-                extracted_owi_context  # Start with potentially modified OWI context
-            )
+            context_for_prompt = extracted_owi_context  # Start with OWI context (potentially None if overridden or not present)
             refined_context_tokens = -1
             cache_update_performed = False
             cache_update_skipped = False
@@ -2502,12 +2623,13 @@ class Pipe:
             updated_cache_text = "[Cache not initialized or updated]"
 
             # --- Two-Step RAG Cache Refinement ---
+            # Check if RAG Cache is globally enabled AND core functions are available
             if (
                 self.valves.enable_rag_cache
                 and CACHE_UPDATE_FUNC
                 and FINAL_CONTEXT_SELECT_FUNC
-                and SYNC_GET_RAG_CACHE_FUNC
-                and self._sqlite_cursor
+                and SYNC_GET_RAG_CACHE_FUNC  # Check the async getter alias
+                and self._sqlite_cursor  # Check cursor is available
             ):
                 self.logger.info(
                     f"[{session_id}] Global RAG Cache Feature ENABLED. Checking steps..."
@@ -2519,19 +2641,22 @@ class Pipe:
                     None  # Define here for broader scope
                 )
 
+                # --- Previous Cache Retrieval Block (FIXED) ---
                 if not session_process_owi_rag:  # Check session flag first
                     # If session valve disables OWI processing, skip Step 1 entirely
                     self.logger.info(
                         f"[{session_id}] Skipping RAG Cache Step 1 due to session valve 'process_owi_rag=False'."
                     )
-                    cache_update_skipped = True  # Mark as skipped
+                    cache_update_skipped = True
                     run_step1 = False
-                    # Retrieve previous cache to pass to Step 2
+                    # Attempt to retrieve previous cache to pass to Step 2
                     try:
-                        previous_cache_text = (
-                            SYNC_GET_RAG_CACHE_FUNC._sync_get_rag_cache(
-                                session_id, self._sqlite_cursor
-                            )
+                        # Correctly await the async function alias
+                        self.logger.debug(
+                            f"[{session_id}] Retrieving previous cache (Step 1 skipped by valve)..."
+                        )
+                        previous_cache_text = await SYNC_GET_RAG_CACHE_FUNC(
+                            session_id, self._sqlite_cursor
                         )
                         updated_cache_text = (
                             previous_cache_text
@@ -2539,47 +2664,53 @@ class Pipe:
                             else ""
                         )
                         self.logger.debug(
-                            f"[{session_id}] Retrieved previous cache (len {len(updated_cache_text)}) for Step 2 as Step 1 was skipped by session valve."
+                            f"[{session_id}] Retrieved previous cache (len {len(updated_cache_text)}) for Step 2."
                         )
-                    except AttributeError:
-                        self.logger.error(
-                            "SYNC_GET_RAG_CACHE_FUNC._sync_get_rag_cache not found. Cannot get previous cache."
-                        )
-                        updated_cache_text = "[Error retrieving cache]"
                     except Exception as e_get_cache:
                         self.logger.error(
-                            f"[{session_id}] Error retrieving previous cache: {e_get_cache}",
+                            f"[{session_id}] Error retrieving previous cache (Step 1 skipped): {e_get_cache}",
                             exc_info=True,
                         )
-                        updated_cache_text = "[Error retrieving cache]"
+                        updated_cache_text = (
+                            "[Error retrieving cache]"  # Ensure fallback on error
+                        )
+                        previous_cache_text = (
+                            None  # Ensure None on error for later checks
+                        )
                 else:
                     # Session valve allows OWI processing, proceed with similarity/length checks
                     self.logger.debug(
                         f"[{session_id}] Session allows OWI processing. Checking Step 1 similarity/length skip..."
                     )
                     try:
-                        previous_cache_text = (
-                            SYNC_GET_RAG_CACHE_FUNC._sync_get_rag_cache(
-                                session_id, self._sqlite_cursor
-                            )
+                        # Correctly await the async function alias
+                        self.logger.debug(
+                            f"[{session_id}] Retrieving previous cache for skip checks..."
+                        )
+                        previous_cache_text = await SYNC_GET_RAG_CACHE_FUNC(
+                            session_id, self._sqlite_cursor
                         )
                         if previous_cache_text is None:
-                            previous_cache_text = ""
-                    except AttributeError:
-                        self.logger.error(
-                            "SYNC_GET_RAG_CACHE_FUNC._sync_get_rag_cache not found. Cannot get previous cache for skip checks."
-                        )
-                        previous_cache_text = ""
+                            self.logger.debug(
+                                f"[{session_id}] No previous RAG cache found in DB."
+                            )
+                            previous_cache_text = (
+                                ""  # Treat no cache found as empty string for checks
+                            )
+                        else:
+                            self.logger.debug(
+                                f"[{session_id}] Retrieved previous cache (len {len(previous_cache_text)}) for skip checks."
+                            )
                     except Exception as e_get_cache:
                         self.logger.error(
                             f"[{session_id}] Error retrieving previous cache for skip checks: {e_get_cache}",
                             exc_info=True,
                         )
-                        previous_cache_text = ""
+                        previous_cache_text = ""  # Fallback to empty on error
 
+                    # --- Similarity/Length Skip Logic (Uses previous_cache_text from above) ---
                     skip_step1_length = False
                     skip_step1_similarity = False
-                    # Use extracted_owi_context here, which *might* be None if the system prompt had no context, even if session_process_owi_rag is True
                     owi_content_for_check = extracted_owi_context or ""
                     owi_len = len(owi_content_for_check.strip())
                     length_threshold = self.valves.CACHE_UPDATE_SKIP_OWI_THRESHOLD
@@ -2589,6 +2720,7 @@ class Pipe:
                         self.logger.info(
                             f"[{session_id}] Cache Step 1 Skip Reason: OWI context length ({owi_len}) < threshold ({length_threshold})."
                         )
+                    # Only check similarity if previous cache is not empty AND util func available
                     elif self.UTIL_CALC_SIMILARITY_FUNC and previous_cache_text:
                         similarity_threshold = (
                             self.valves.CACHE_UPDATE_SIMILARITY_THRESHOLD
@@ -2616,27 +2748,25 @@ class Pipe:
                         )
                     elif not previous_cache_text:
                         self.logger.debug(
-                            f"[{session_id}] Cannot check similarity: Previous cache empty."
+                            f"[{session_id}] Cannot check similarity: Previous cache empty (or failed retrieval)."
                         )
+                    # --- End Similarity/Length Skip Logic ---
 
                     skip_step1_auto = skip_step1_length or skip_step1_similarity
-                    cache_update_skipped = (
-                        skip_step1_auto  # Set flag based on auto-checks
-                    )
-                    run_step1 = (
-                        not skip_step1_auto
-                    )  # Only run if not skipped automatically
+                    cache_update_skipped = skip_step1_auto
+                    run_step1 = not skip_step1_auto
 
                     if skip_step1_auto:
                         await emit_status(
                             "Status: Skipping cache update (redundant OWI)."
                         )
                         updated_cache_text = (
-                            previous_cache_text  # Use the already retrieved cache
+                            previous_cache_text  # Use the retrieved cache
                         )
                         self.logger.debug(
                             f"[{session_id}] Using previous cache (Length: {len(updated_cache_text)}) for Step 2 due to auto skip."
                         )
+                # --- End Previous Cache Retrieval Block (FIXED) ---
 
                 # --- Prepare LLM Configs (Needed for Step 1 or 2) ---
                 cache_update_llm_config = {
@@ -2652,7 +2782,7 @@ class Pipe:
                     "prompt_template": self.valves.final_context_selection_prompt_template,
                 }
 
-                # Check necessary configs
+                # Check necessary configs before proceeding
                 if not (
                     cache_update_llm_config["url"]
                     and cache_update_llm_config["key"]
@@ -2669,15 +2799,17 @@ class Pipe:
                     )
                     # Ensure previous_cache_text is defined before using it as fallback
                     if previous_cache_text is None:
-                        previous_cache_text = ""
-                    updated_cache_text = previous_cache_text  # Fallback
+                        previous_cache_text = ""  # Ensure it's a string
+                    updated_cache_text = (
+                        previous_cache_text  # Fallback to potentially empty string
+                    )
                 else:
                     # --- Execute Step 1 (if not skipped) ---
                     if run_step1:
                         await emit_status("Status: Updating background cache...")
+                        # Ensure we pass the potentially None extracted_owi_context
                         updated_cache_text = await CACHE_UPDATE_FUNC(
                             session_id=session_id,
-                            # Pass extracted_owi_context which might be None if system prompt lacked it, but session_process_owi_rag was True
                             current_owi_context=extracted_owi_context,
                             history_messages=current_active_history,
                             latest_user_query=latest_user_query_str,
@@ -2692,10 +2824,14 @@ class Pipe:
 
                     # --- Execute Step 2: Select Final Context ---
                     await emit_status("Status: Selecting relevant context...")
+                    # Ensure updated_cache_text is a string before passing
                     final_selected_context = await FINAL_CONTEXT_SELECT_FUNC(
-                        updated_cache_text=updated_cache_text,  # Use Step 1 output or carried-over cache
-                        # Pass current OWI context (might be None if session valve was off OR if system prompt lacked it)
-                        current_owi_context=extracted_owi_context,
+                        updated_cache_text=(
+                            updated_cache_text
+                            if isinstance(updated_cache_text, str)
+                            else ""
+                        ),
+                        current_owi_context=extracted_owi_context,  # Pass potentially None context
                         history_messages=current_active_history,
                         latest_user_query=latest_user_query_str,
                         llm_call_func=self._async_llm_call_wrapper,
@@ -2716,6 +2852,7 @@ class Pipe:
                         f"[{session_id}] RAG Cache Step 2 complete. Using selected context (length: {len(context_for_prompt)}). Step 1 Status: {log_step1_status}"
                     )
 
+                    # Calculate tokens for the final selected context
                     if UTIL_COUNT_TOKENS_FUNC and self._tokenizer:
                         try:
                             refined_context_tokens = UTIL_COUNT_TOKENS_FUNC(
@@ -2733,14 +2870,14 @@ class Pipe:
 
             # --- ELSE IF: Stateless Refinement ---
             elif self.valves.enable_stateless_refinement and STATELESS_REFINE_FUNC:
-                # Stateless logic respects session_process_owi_rag implicitly via extracted_owi_context check
+                # (Stateless refinement logic remains unchanged from previous version)
                 self.logger.info(
                     f"[{session_id}] Stateless Refinement ENABLED globally (RAG Cache disabled globally). Proceeding..."
                 )
                 await emit_status("Status: Refining OWI context (stateless)...")
                 if (
-                    not extracted_owi_context
-                ):  # Checks if context exists AFTER potential override
+                    not extracted_owi_context  # Checks if context exists AFTER potential override
+                ):
                     self.logger.debug(
                         f"[{session_id}] Skipping stateless refinement: No OWI context provided or session valve disabled it."
                     )
@@ -2820,45 +2957,56 @@ class Pipe:
                 self.logger.debug(
                     f"[{session_id}] No refinement performed. Using context: '{str(context_for_prompt)[:50]}...'"
                 )
-                refined_context_tokens = -1  # Ensure it's -1 if no refinement happened
-
-            # --- 7d: Select T0 Dialogue History Slice ---
-            # (Implementation unchanged)
-            t0_raw_history_slice = []
-            current_active_history_for_t0 = session_state.get("active_history", [])
-            last_summary_idx = session_state.get("last_summary_turn_index", -1)
-            start_index_for_t0 = last_summary_idx + 1
-            if len(current_active_history_for_t0) > start_index_for_t0:
-                history_to_consider = current_active_history_for_t0[start_index_for_t0:]
-                end_slice_idx = (
-                    -1
-                    if (
-                        latest_user_message
-                        and history_to_consider
-                        and history_to_consider[-1] == latest_user_message
-                    )
-                    else None
+                refined_context_tokens = (
+                    initial_owi_context_tokens  # If no refinement, refined = initial
                 )
+
+            # === START OF SECTION 5.11.7d: Select T0 Dialogue History Slice (REVISED) ===
+            # --- 7d: Select T0 Dialogue History Slice ---
+            # Selects relevant history portion for the LLM context window (T0)
+            # Uses the history *before* the effective_user_message determined earlier
+            t0_raw_history_slice = []
+            last_summary_idx = session_state.get("last_summary_turn_index", -1)
+            # Consider messages *after* the last summary AND *before* the effective query
+            start_index_for_t0_selection = last_summary_idx + 1
+            end_index_for_t0_selection = len(
+                history_for_processing
+            )  # Use length of the history *before* the query
+
+            if end_index_for_t0_selection > start_index_for_t0_selection:
+                # Slice the 'history_for_processing' list
+                history_to_consider_for_t0 = history_for_processing[
+                    start_index_for_t0_selection:end_index_for_t0_selection
+                ]
+
+                # Filter this slice for dialogue roles only
                 t0_raw_history_slice = [
                     msg
-                    for msg in history_to_consider[:end_slice_idx]
-                    if msg.get("role") in DIALOGUE_ROLES_LIST
+                    for msg in history_to_consider_for_t0
+                    if isinstance(msg, dict) and msg.get("role") in DIALOGUE_ROLES_LIST
                 ]
                 self.logger.info(
-                    f"[{session_id}] Selected T0 history: {len(t0_raw_history_slice)} msgs (from idx {start_index_for_t0})."
+                    f"[{session_id}] Selected T0 history slice: {len(t0_raw_history_slice)} dialogue msgs "
+                    f"(from original history index {start_index_for_t0_selection} up to before effective query index {effective_user_message_index})."
                 )
             else:
                 self.logger.info(
-                    f"[{session_id}] No T0 history after last summary idx ({last_summary_idx})."
+                    f"[{session_id}] No relevant history range found for T0 slice "
+                    f"(last summary idx: {last_summary_idx}, effective query index: {effective_user_message_index})."
                 )
+            # === END OF SECTION 5.11.7d (REVISED) ===
 
             # --- 7e: Combine Context Sources ---
-            # (Implementation unchanged)
             combined_context_string = "[Error combining context]"
             if PROMPT_CONTEXT_COMBINE_FUNC:
                 try:
+                    # Ensure context_for_prompt is a string before passing
                     combined_context_string = PROMPT_CONTEXT_COMBINE_FUNC(
-                        final_selected_context=context_for_prompt,
+                        final_selected_context=(
+                            context_for_prompt
+                            if isinstance(context_for_prompt, str)
+                            else None
+                        ),
                         t1_summaries=recent_t1_summaries,
                         t2_rag_results=retrieved_rag_summaries,
                     )
