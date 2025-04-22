@@ -101,7 +101,7 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 
 4.  **Use Query/History for Context:** Utilize the LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand the current focus, identify relevant themes, and resolve contradictions during the merging/updating process. **DO NOT include summaries of the RECENT CHAT HISTORY itself in the cache output.**
 
-5.  **Prune Gently:** Review the *entire* combined information (profile summaries + facts). Remove cached details that are *clearly* outdated, explicitly contradicted by canon sources, or demonstrably irrelevant to the ongoing session narrative based on the dialogue flow. **Avoid removing foundational character summaries or potentially useful lore just because it wasn't mentioned recently.**
+5.  **Prune Gently:** Review the *entire* combined information (profile summaries + facts). Remove cached details that are outdated, explicitly contradicted by canon sources, or demonstrably irrelevant to the ongoing session narrative based on the dialogue flow. Remove character profiles that are no longer relevant to the session. **Do not remove character profiles or lore that are still relevant, even if they are not currently active in the session.**
 
 6.  **Output Format & Structure:**
     *   Produce a clean, coherent text block representing the updated SESSION CACHE.
