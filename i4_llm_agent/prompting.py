@@ -74,35 +74,47 @@ CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 1 (Cache Update)
+# Default Template Text for Step 1 (Cache Update) - v2 (Focus on Character Profiles)
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Curator
-**Task:** Update the PREVIOUSLY REFINED CACHE by intelligently merging relevant new factual information AND synthesizing core character personality traits from the CURRENT OWI RETRIEVAL. Use the LATEST USER QUERY and RECENT CHAT HISTORY primarily for context, resolving contradictions, and noting significant shifts.
-**Objective:** Maintain an accurate and concise persistent cache containing both background information (lore, established character details, world facts) AND core personality profiles relevant to the ongoing session.
+**Task:** Maintain and update the SESSION CACHE by intelligently merging background information (lore, facts) AND establishing persistent core character profile summaries. Prioritize `character_profile` documents as the foundation for character understanding.
+**Objective:** Create and maintain an accurate, concise, and persistent cache containing both factual background information AND foundational summaries of key characters involved in the session, useful for long-term context.
 
 **Instructions:**
 
-1.  **Identify New Factual Information:** Scan CURRENT OWI RETRIEVAL for background *facts* (lore, character facts like lineage/status, established relationships, past events, location details) NOT already present or fully captured in the PREVIOUSLY REFINED CACHE.
-2.  **Extract & Synthesize Personality Traits:**
-    *   Scan CURRENT OWI RETRIEVAL (especially `character_profile` and `character_backstory` documents) for defining personality traits, core motivations, emotional patterns, strengths, and weaknesses for key characters involved in the session (e.g., Emily, Caldric, Julia).
-    *   Look for explicit lists (like bullet points in profiles) or consistent descriptive phrases.
-    *   **Synthesize** these traits into concise descriptions for each character within the cache. If a character's traits are already cached, update them *only if* the new information provides significant clarification or correction based on immutable profile sources.
-    *   Use RECENT CHAT HISTORY primarily to *confirm* established traits or to note *significant, lasting deviations* indicated by major events or consistent character development reflected in the dialogue. **Do not constantly overwrite core personality traits based on temporary actions or moods.**
-3.  **Evaluate Relevance (Facts):** Determine if the *new factual information* identified in Step 1 is potentially relevant to the broader session context, even if not directly tied to the LATEST USER QUERY. Prioritize adding foundational details.
-4.  **Merge & Update:**
-    *   Integrate the relevant new *factual information* (from Step 1 & 3) into the previous cache content. If new factual information contradicts or provides a more accurate/detailed version of existing cached facts, update the cache accordingly. Use RECENT CHAT HISTORY to help resolve factual conflicts if possible.
-    *   Ensure the synthesized *personality traits* (from Step 2) are present and updated within the cache content, ideally grouped per character for clarity (e.g., under a character's name heading).
-5.  **Prune Gently:** Review the *entire* combined information (facts and personality traits). Remove cached details that are *clearly* outdated, explicitly contradicted by recent events/canon sources, or confirmed irrelevant by the dialogue flow. **Avoid removing potentially useful foundational information (facts or core traits) just because it wasn't mentioned in the last few turns.**
-6.  **Focus on Background & Personality:** The output cache must contain *both* background information (lore, facts, established character states) *and* the concise, synthesized descriptions of core character personalities/traits. **DO NOT include summaries of the RECENT CHAT HISTORY itself in the cache output.**
-7.  **Output Format:** Produce a clean, coherent text block representing the updated background cache. Structure it logically (e.g., character sections, lore sections). If no changes are needed, output the PREVIOUSLY REFINED CACHE content. If the cache was empty and OWI retrieval provided nothing relevant (neither facts nor personality), output "[No relevant background context found]".
+1.  **Prioritize Character Profiles:**
+    *   Identify all provided `character_profile` type documents within the CURRENT OWI RETRIEVAL. These are the **primary source** for core character information.
+    *   For each key character (e.g., Caldric, Emily, Julia) with a profile:
+        *   **Extract AND Summarize Key Sections:** Concisely summarize the essential information from their profile, covering: Identity/Origins, Personality/Core Traits, Role/Capabilities, and Historical Legacy/Key Relationships.
+        *   **Mandatory Inclusion:** These character profile summaries **must** form the core foundation of the SESSION CACHE output. If a profile exists, its summarized information should always be present in the cache.
+
+2.  **Integrate New Factual Information:**
+    *   Scan the CURRENT OWI RETRIEVAL (excluding profiles already processed) for new background *facts* (lore, world details, significant established events, location details) that are relevant to the session and NOT already present or accurately captured in the PREVIOUSLY REFINED CACHE.
+    *   Merge these relevant new *facts* logically with the character profile summaries and any existing factual lore from the previous cache.
+
+3.  **Refine & Update (Carefully):**
+    *   **Character Info:** Compare the summarized profile info (Step 1) with the PREVIOUSLY REFINED CACHE and RECENT CHAT HISTORY.
+        *   Update the character summaries *only if* new OWI context provides explicit *canon* corrections/additions (e.g., an updated profile) OR if the RECENT CHAT HISTORY shows *significant, consistent, and lasting* character development or changes that fundamentally alter a core aspect. **Do not overwrite core personality traits from profiles based on temporary actions or moods in recent dialogue.**
+        *   Use RECENT CHAT HISTORY primarily to *confirm* established traits or add minor nuances *without* removing the core profile summary.
+    *   **Factual Lore:** If new factual information contradicts or provides a more accurate/detailed version of existing cached facts, update the cache accordingly. Use RECENT CHAT HISTORY to help resolve factual conflicts if possible.
+
+4.  **Use Query/History for Context:** Utilize the LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand the current focus, identify relevant themes, and resolve contradictions during the merging/updating process. **DO NOT include summaries of the RECENT CHAT HISTORY itself in the cache output.**
+
+5.  **Prune Gently:** Review the *entire* combined information (profile summaries + facts). Remove cached details that are *clearly* outdated, explicitly contradicted by canon sources, or demonstrably irrelevant to the ongoing session narrative based on the dialogue flow. **Avoid removing foundational character summaries or potentially useful lore just because it wasn't mentioned recently.**
+
+6.  **Output Format & Structure:**
+    *   Produce a clean, coherent text block representing the updated SESSION CACHE.
+    *   **Crucially, structure the output logically.** Use headings for clarity (e.g., `# Character: Caldric`, `# Lore: Aethelgard Empire`, `# Plot Point: Julia's Marriage`).
+    *   If no changes are needed (no new relevant info, profiles already cached), output the PREVIOUSLY REFINED CACHE content.
+    *   If the cache was empty and OWI retrieval provided nothing relevant (neither facts nor profiles), output: `[No relevant background context found]`
 
 **INPUTS:**
 
 **LATEST USER QUERY (for context):**
 {CACHE_UPDATE_QUERY_PLACEHOLDER}
 
-**CURRENT OWI RETRIEVAL (potential new info):**
+**CURRENT OWI RETRIEVAL (potential new info & profiles):**
 ---
 {CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER}
 ---
@@ -112,12 +124,12 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 {CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY (for context):**
+**RECENT CHAT HISTORY (for context & nuance):**
 ---
 {CACHE_UPDATE_HISTORY_PLACEHOLDER}
 ---
 
-**OUTPUT (Updated Background Cache Text):**
+**OUTPUT (Updated Session Cache Text - Structured):**
 """
 
 # Placeholders for Step 2 (Final Context Selection)

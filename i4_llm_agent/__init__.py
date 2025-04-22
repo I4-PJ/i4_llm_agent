@@ -46,7 +46,8 @@ from .database import (
     # SQLite T1 Summaries
     add_tier1_summary, get_recent_tier1_summaries, get_tier1_summary_count,
     get_oldest_tier1_summary, delete_tier1_summary,
-    get_max_t1_end_index, # <<< ADDED
+    get_max_t1_end_index,
+    check_t1_summary_exists, # <<< ADDED
     # SQLite RAG Cache
     add_or_update_rag_cache, get_rag_cache,
     # ChromaDB T2
@@ -97,7 +98,8 @@ __all__ = [
     "initialize_sqlite_tables",
     "add_tier1_summary", "get_recent_tier1_summaries", "get_tier1_summary_count",
     "get_oldest_tier1_summary", "delete_tier1_summary",
-    "get_max_t1_end_index", # <<< ADDED
+    "get_max_t1_end_index",
+    "check_t1_summary_exists", # <<< ADDED
     "add_or_update_rag_cache", "get_rag_cache",
     "get_or_create_chroma_collection", "add_to_chroma_collection",
     "query_chroma_collection", "get_chroma_collection_count",

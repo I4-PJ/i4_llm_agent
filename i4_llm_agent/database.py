@@ -55,9 +55,12 @@ def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
         cursor.execute(
             f"CREATE INDEX IF NOT EXISTS idx_t1_session_ts ON {T1_SUMMARY_TABLE_NAME} (session_id, timestamp_utc)"
         )
-        # Index on session_id and turn_end_index for fast MAX() lookup
         cursor.execute(
             f"CREATE INDEX IF NOT EXISTS idx_t1_session_end_idx ON {T1_SUMMARY_TABLE_NAME} (session_id, turn_end_index)"
+        )
+        # Index for the existence check
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_t1_session_start_end ON {T1_SUMMARY_TABLE_NAME} (session_id, turn_start_index, turn_end_index)"
         )
         func_logger.debug(f"Table '{T1_SUMMARY_TABLE_NAME}' initialized successfully.")
 
@@ -189,7 +192,6 @@ async def delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     return await asyncio.to_thread(_sync_delete_tier1_summary, cursor, summary_id)
 
 
-# --- [[[ NEW FUNCTION ]]] ---
 def _sync_get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
     """
     Synchronously retrieves the maximum turn_end_index for a given session_id
@@ -209,20 +211,19 @@ def _sync_get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optio
             (session_id,)
         )
         result = cursor.fetchone()
-        # fetchone() returns a tuple, e.g., (36,) or (None,) if no rows match
         if result and result[0] is not None:
             max_index = int(result[0])
             func_logger.debug(f"[{session_id}] Max T1 end index found in DB: {max_index}")
             return max_index
         else:
             func_logger.debug(f"[{session_id}] No T1 summaries found in DB. Max index is None.")
-            return None # Indicate no summaries found yet
+            return None
     except sqlite3.Error as e:
         func_logger.error(f"[{session_id}] SQLite error getting max T1 end index: {e}")
-        return None # Indicate error
+        return None
     except Exception as e:
         func_logger.error(f"[{session_id}] Unexpected error getting max T1 end index: {e}")
-        return None # Indicate error
+        return None
 
 async def get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
     """
@@ -230,44 +231,86 @@ async def get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optio
     from the Tier 1 summaries table.
     """
     return await asyncio.to_thread(_sync_get_max_t1_end_index, cursor, session_id)
+
+
+# --- [[[ NEW FUNCTION ]]] ---
+def _sync_check_t1_summary_exists(
+    cursor: sqlite3.Cursor, session_id: str, start_index: int, end_index: int
+) -> bool:
+    """
+    Synchronously checks if a Tier 1 summary already exists for the exact
+    session ID, start index, and end index.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_check_t1_summary_exists')
+    if not cursor:
+        func_logger.error(f"[{session_id}] Cursor unavailable for checking T1 existence.")
+        return False # Assume doesn't exist if cursor fails
+    if not session_id or not isinstance(session_id, str):
+        func_logger.error("Invalid session_id provided for T1 check.")
+        return False
+    if not isinstance(start_index, int) or not isinstance(end_index, int):
+        func_logger.error(f"[{session_id}] Invalid start/end index type for T1 check.")
+        return False
+
+    try:
+        # Use EXISTS for efficiency, we only care if at least one row matches
+        cursor.execute(
+            f"""SELECT EXISTS (
+                    SELECT 1 FROM {T1_SUMMARY_TABLE_NAME}
+                    WHERE session_id = ? AND turn_start_index = ? AND turn_end_index = ?
+                    LIMIT 1
+                )""",
+            (session_id, start_index, end_index)
+        )
+        result = cursor.fetchone()
+        # fetchone() returns (1,) if exists, (0,) if not
+        exists = bool(result and result[0])
+        if exists:
+             func_logger.debug(f"[{session_id}] Found existing T1 summary for indices {start_index}-{end_index}.")
+        else:
+             func_logger.debug(f"[{session_id}] No existing T1 summary found for indices {start_index}-{end_index}.")
+        return exists
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error checking for T1 summary ({start_index}-{end_index}): {e}")
+        return False # Assume doesn't exist on error
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error checking for T1 summary ({start_index}-{end_index}): {e}")
+        return False # Assume doesn't exist on error
+
+async def check_t1_summary_exists(
+    cursor: sqlite3.Cursor, session_id: str, start_index: int, end_index: int
+) -> bool:
+    """
+    Async wrapper to check if a T1 summary exists for the exact indices.
+    """
+    return await asyncio.to_thread(
+        _sync_check_t1_summary_exists, cursor, session_id, start_index, end_index
+    )
 # --- [[[ END NEW FUNCTION ]]] ---
 
 
 # ==============================================================================
 # === SQLite RAG Cache Operations                                            ===
 # ==============================================================================
-
-# _sync_initialize_rag_cache_table is handled by _sync_initialize_sqlite_tables
-
+# ... (RAG cache functions remain unchanged) ...
 def _sync_add_or_update_rag_cache(cursor: sqlite3.Cursor, session_id: str, context_text: str) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_add_or_update_rag_cache')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return False
     if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id."); return False
     if not isinstance(context_text, str): func_logger.warning(f"[{session_id}] RAG cache context_text not a string. Storing empty."); context_text = ""
-
-    # Reuse timestamp logic from original file (assuming datetime imported)
     try:
         from datetime import datetime, timezone
-        now_utc = datetime.now(timezone.utc)
-        timestamp_utc = now_utc.timestamp()
-        timestamp_iso = now_utc.isoformat()
+        now_utc = datetime.now(timezone.utc); timestamp_utc = now_utc.timestamp(); timestamp_iso = now_utc.isoformat()
     except ImportError:
-        # Fallback if datetime cannot be imported here (should not happen normally)
-        timestamp_utc = 0.0
-        timestamp_iso = "1970-01-01T00:00:00+00:00"
-        func_logger.error("Could not import datetime for RAG cache timestamp.")
-
+        timestamp_utc = 0.0; timestamp_iso = "1970-01-01T00:00:00+00:00"; func_logger.error("Could not import datetime for RAG cache timestamp.")
     try:
         cursor.execute(f"""INSERT OR REPLACE INTO {RAG_CACHE_TABLE_NAME} (session_id, cached_context, last_updated_utc, last_updated_iso) VALUES (?, ?, ?, ?)""",
                        (session_id, context_text, timestamp_utc, timestamp_iso))
         return True
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error updating RAG cache: {e}"); return False
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error updating RAG cache: {e}"); return False
-
 async def add_or_update_rag_cache(cursor: sqlite3.Cursor, session_id: str, context_text: str) -> bool:
-    """Async wrapper to add or update the RAG cache."""
     return await asyncio.to_thread(_sync_add_or_update_rag_cache, cursor, session_id, context_text)
-
 def _sync_get_rag_cache(cursor: sqlite3.Cursor, session_id: str) -> Optional[str]:
     func_logger = logging.getLogger(__name__ + '._sync_get_rag_cache')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return None
@@ -278,20 +321,13 @@ def _sync_get_rag_cache(cursor: sqlite3.Cursor, session_id: str) -> Optional[str
         return result[0] if result else None
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error retrieving RAG cache: {e}"); return None
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error retrieving RAG cache: {e}"); return None
-
 async def get_rag_cache(cursor: sqlite3.Cursor, session_id: str) -> Optional[str]:
-    """Async wrapper to retrieve the RAG cache."""
     return await asyncio.to_thread(_sync_get_rag_cache, cursor, session_id)
-
 
 # ==============================================================================
 # === ChromaDB Tier 2 Operations                                             ===
 # ==============================================================================
-
-# --- ChromaDB Client Management ---
-# Client initialization is expected to happen outside this module (e.g., in the pipe/orchestrator)
-# and the client instance passed to these functions.
-
+# ... (ChromaDB functions remain unchanged) ...
 def _sync_get_or_create_chroma_collection(
     chroma_client: Any, # Expects chromadb.ClientAPI but use Any for optional import
     collection_name: str,
@@ -302,62 +338,22 @@ def _sync_get_or_create_chroma_collection(
     if not CHROMADB_AVAILABLE: func_logger.error("ChromaDB library not available."); return None
     if not chroma_client: func_logger.error("ChromaDB client instance not provided."); return None
     if not collection_name: func_logger.error("ChromaDB collection name is required."); return None
-
-    # Validate collection name format (copied from pipe script)
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,61}[a-zA-Z0-9]$", collection_name) or ".." in collection_name:
         func_logger.error(f"Invalid ChromaDB collection name format: '{collection_name}'.")
         return None
-
     if embedding_function is None:
         func_logger.warning(f"No embedding function provided for ChromaDB collection '{collection_name}'. Retrieval might fail.")
-
     try:
         func_logger.debug(f"Accessing ChromaDB collection '{collection_name}'...")
-        collection = chroma_client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=embedding_function,
-            metadata=metadata_config,
-        )
-        if collection:
-            func_logger.info(f"Accessed/created ChromaDB collection '{collection_name}'.")
-            return collection
-        else:
-            # This case might indicate an issue with the client/server returning False/None
-            func_logger.error(f"ChromaDB get_or_create_collection returned None/False for '{collection_name}'.")
-            return None
-    except sqlite3.OperationalError as e: # ChromaDB uses SQLite internally
-        func_logger.error(f"SQLite operational error accessing ChromaDB collection '{collection_name}': {e}.", exc_info=True)
-        return None
-    except InvalidDimensionException as ide:
-        func_logger.error(f"ChromaDB Dimension Exception for collection '{collection_name}': {ide}. Check embedding function consistency.", exc_info=True)
-        return None
-    except Exception as e:
-        func_logger.error(f"Unexpected error accessing/creating ChromaDB collection '{collection_name}': {e}", exc_info=True)
-        return None
-
-async def get_or_create_chroma_collection(
-    chroma_client: Any,
-    collection_name: str,
-    embedding_function: Optional[ChromaEmbeddingFunction] = None,
-    metadata_config: Optional[Dict] = None,
-) -> Optional[Any]:
-    """Async wrapper to get or create a ChromaDB collection."""
-    return await asyncio.to_thread(
-        _sync_get_or_create_chroma_collection,
-        chroma_client, collection_name, embedding_function, metadata_config
-    )
-
-# --- ChromaDB Data Operations ---
-# These assume a valid collection object (Any type hint used) is passed in.
-
-def _sync_add_to_chroma_collection(
-    collection: Any, # Expects ChromaCollectionType
-    ids: List[str],
-    embeddings: List[List[float]],
-    metadatas: List[Dict],
-    documents: List[str]
-) -> bool:
-    """Synchronously adds data to a ChromaDB collection."""
+        collection = chroma_client.get_or_create_collection(name=collection_name, embedding_function=embedding_function, metadata=metadata_config,)
+        if collection: func_logger.info(f"Accessed/created ChromaDB collection '{collection_name}'."); return collection
+        else: func_logger.error(f"ChromaDB get_or_create_collection returned None/False for '{collection_name}'."); return None
+    except sqlite3.OperationalError as e: func_logger.error(f"SQLite operational error accessing ChromaDB collection '{collection_name}': {e}.", exc_info=True); return None
+    except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Exception for collection '{collection_name}': {ide}. Check embedding function consistency.", exc_info=True); return None
+    except Exception as e: func_logger.error(f"Unexpected error accessing/creating ChromaDB collection '{collection_name}': {e}", exc_info=True); return None
+async def get_or_create_chroma_collection(chroma_client: Any, collection_name: str, embedding_function: Optional[ChromaEmbeddingFunction] = None, metadata_config: Optional[Dict] = None,) -> Optional[Any]:
+    return await asyncio.to_thread(_sync_get_or_create_chroma_collection, chroma_client, collection_name, embedding_function, metadata_config)
+def _sync_add_to_chroma_collection(collection: Any, ids: List[str], embeddings: List[List[float]], metadatas: List[Dict], documents: List[str]) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_add_to_chroma_collection')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return False
     if not hasattr(collection, 'add'): func_logger.error("Provided collection object lacks 'add' method."); return False
@@ -365,78 +361,29 @@ def _sync_add_to_chroma_collection(
         collection.add(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
         func_logger.info(f"Successfully added {len(ids)} item(s) to ChromaDB collection '{getattr(collection, 'name', 'unknown')}'.")
         return True
-    except InvalidDimensionException as ide:
-        func_logger.error(f"ChromaDB Dimension Error adding to collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True)
-        return False
-    except Exception as e:
-        func_logger.error(f"Error adding to ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True)
-        return False
-
-async def add_to_chroma_collection(
-    collection: Any,
-    ids: List[str],
-    embeddings: List[List[float]],
-    metadatas: List[Dict],
-    documents: List[str]
-) -> bool:
-    """Async wrapper to add data to a ChromaDB collection."""
-    return await asyncio.to_thread(
-        _sync_add_to_chroma_collection,
-        collection, ids, embeddings, metadatas, documents
-    )
-
-
-def _sync_query_chroma_collection(
-    collection: Any, # Expects ChromaCollectionType
-    query_embeddings: List[List[float]],
-    n_results: int,
-    include: List[str] = ["documents", "distances", "metadatas"]
-) -> Optional[Dict[str, Any]]:
-    """Synchronously queries a ChromaDB collection."""
+    except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Error adding to collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True); return False
+    except Exception as e: func_logger.error(f"Error adding to ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return False
+async def add_to_chroma_collection(collection: Any, ids: List[str], embeddings: List[List[float]], metadatas: List[Dict], documents: List[str]) -> bool:
+    return await asyncio.to_thread(_sync_add_to_chroma_collection, collection, ids, embeddings, metadatas, documents)
+def _sync_query_chroma_collection(collection: Any, query_embeddings: List[List[float]], n_results: int, include: List[str] = ["documents", "distances", "metadatas"]) -> Optional[Dict[str, Any]]:
     func_logger = logging.getLogger(__name__ + '._sync_query_chroma_collection')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return None
     if not hasattr(collection, 'query'): func_logger.error("Provided collection object lacks 'query' method."); return None
     if n_results <= 0: func_logger.warning("n_results <= 0 for ChromaDB query, returning empty."); return {'ids': [], 'embeddings': [], 'documents': [], 'metadatas': [], 'distances': []} # Return empty structure
     try:
-        results = collection.query(
-            query_embeddings=query_embeddings,
-            n_results=n_results,
-            include=include
-        )
+        results = collection.query(query_embeddings=query_embeddings, n_results=n_results, include=include)
         func_logger.debug(f"ChromaDB query successful for collection '{getattr(collection, 'name', 'unknown')}'.")
         return results
-    except InvalidDimensionException as ide:
-        func_logger.error(f"ChromaDB Dimension Error querying collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True)
-        return None
-    except Exception as e:
-        func_logger.error(f"Error querying ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True)
-        return None
-
-async def query_chroma_collection(
-    collection: Any,
-    query_embeddings: List[List[float]],
-    n_results: int,
-    include: List[str] = ["documents", "distances", "metadatas"]
-) -> Optional[Dict[str, Any]]:
-    """Async wrapper to query a ChromaDB collection."""
-    return await asyncio.to_thread(
-        _sync_query_chroma_collection,
-        collection, query_embeddings, n_results, include
-    )
-
+    except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Error querying collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True); return None
+    except Exception as e: func_logger.error(f"Error querying ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return None
+async def query_chroma_collection(collection: Any, query_embeddings: List[List[float]], n_results: int, include: List[str] = ["documents", "distances", "metadatas"]) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(_sync_query_chroma_collection, collection, query_embeddings, n_results, include)
 def _sync_get_chroma_collection_count(collection: Any) -> int:
-    """Synchronously gets the count of items in a ChromaDB collection."""
     func_logger = logging.getLogger(__name__ + '._sync_get_chroma_collection_count')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return -1
     if not hasattr(collection, 'count'): func_logger.error("Provided collection object lacks 'count' method."); return -1
-    try:
-        count = collection.count()
-        return count
-    except Exception as e:
-        func_logger.error(f"Error getting count for ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True)
-        return -1
-
+    try: count = collection.count(); return count
+    except Exception as e: func_logger.error(f"Error getting count for ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return -1
 async def get_chroma_collection_count(collection: Any) -> int:
-    """Async wrapper to get the count of items in a ChromaDB collection."""
     return await asyncio.to_thread(_sync_get_chroma_collection_count, collection)
 # [[END MODIFIED database.py]]
