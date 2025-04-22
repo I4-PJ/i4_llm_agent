@@ -4,7 +4,7 @@ import logging
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Any, Callable, Coroutine, Tuple, Union # <<< Union added here
+from typing import List, Dict, Optional, Any, Callable, Coroutine, Tuple, Union
 
 # --- Internal Dependencies & Constants ---
 try:
@@ -101,7 +101,10 @@ def _select_history_slice_by_tokens(
 
 # --- Main Memory Management Function (FIXED: Ignores System Messages for Trigger/Chunk) ---
 async def manage_tier1_summarization(
-    session_state: Dict,
+    # --- MODIFIED SIGNATURE ---
+    # session_state: Dict, # REMOVED: No longer pass the whole state dict
+    current_last_summary_index: int, # ADDED: Pass the *current* index directly
+    # --- END MODIFICATION ---
     active_history: List[Dict], # The *full* active history including system messages
     t0_token_limit: int,
     t1_chunk_size_target: int,
@@ -119,7 +122,8 @@ async def manage_tier1_summarization(
     calls LLM to summarize the dialogue chunk, and saves via callback.
 
     Args:
-        session_state: Mutable dictionary holding session info like 'last_summary_turn_index'.
+        current_last_summary_index (int): The index in active_history of the last message
+                                          included in the *previous* summary.
         active_history: The full list of message dictionaries for the session.
         t0_token_limit: Token limit for the T0 active window.
         t1_chunk_size_target: Target token size for chunks to summarize (T1).
@@ -135,17 +139,19 @@ async def manage_tier1_summarization(
         Tuple containing:
         - bool: True if summarization was successfully performed and saved.
         - Optional[str]: The generated summary text if successful.
-        - int: The new last_summary_turn_index (index in original active_history).
+        - int: The new last_summary_turn_index (index in original active_history) to be saved by the caller.
         - int: Tokens used in the summarizer prompt (-1 if unavailable/failed).
         - int: Index in original active_history of the last message when summary triggered.
     """
     func_logger = logging.getLogger(__name__ + '.manage_tier1_summarization')
     func_logger.debug("Entering manage_tier1_summarization function...")
 
-    original_last_summary_index = session_state.get("last_summary_turn_index", -1)
+    # Use the passed index directly
+    original_last_summary_index = current_last_summary_index
     summarization_performed = False
     generated_summary = None
-    new_last_summary_index = original_last_summary_index # Start with original value
+    # Initialize new index with the original one. It will only change if summarization is successful.
+    new_last_summary_index = original_last_summary_index
     summarizer_prompt_tokens = -1
     t0_end_index_at_summary = -1 # Index in original history
 
@@ -200,11 +206,9 @@ async def manage_tier1_summarization(
 
     # --- Check Trigger Condition (Based on Dialogue Tokens) ---
     summarization_trigger_threshold = t0_token_limit + t1_chunk_size_target
-    # --- ADDED DEBUG LOGGING FOR TRIGGER CHECK ---
     func_logger.info(f"DEBUG TRIGGER CHECK: Dialogue Tokens = {total_unsummarized_dialogue_tokens}, Threshold ({t0_token_limit}+{t1_chunk_size_target}) = {summarization_trigger_threshold}")
     should_summarize = (total_unsummarized_dialogue_tokens > summarization_trigger_threshold)
     func_logger.info(f"DEBUG TRIGGER CHECK: should_summarize = {should_summarize}")
-    # --- END ADDED DEBUG LOGGING ---
 
     if not should_summarize:
         func_logger.debug(f"Summarization not triggered (Dialogue tokens {total_unsummarized_dialogue_tokens} <= threshold {summarization_trigger_threshold}).")
@@ -226,13 +230,11 @@ async def manage_tier1_summarization(
         dialogue_only_roles=dialogue_only_roles # Pass roles just in case helper needs it
     )
 
-    # --- ADDED DEBUG LOGGING FOR T0 SLICE ---
     func_logger.debug(f"DEBUG T0 SLICE: Identified {len(t0_dialogue_slice)} dialogue messages for T0 slice.")
     if t0_dialogue_slice:
         t0_first_role = t0_dialogue_slice[0].get('role','?')
         t0_last_role = t0_dialogue_slice[-1].get('role','?')
         func_logger.debug(f"DEBUG T0 SLICE: First role='{t0_first_role}', Last role='{t0_last_role}'.")
-    # --- END ADDED DEBUG LOGGING ---
 
     if not t0_dialogue_slice:
         # This might happen if the dialogue messages are fewer than target tokens,
@@ -241,30 +243,22 @@ async def manage_tier1_summarization(
         func_logger.warning("Could not select T0 dialogue slice, but summarization was triggered. Proceeding to summarize potentially the whole unsummarized dialogue block.")
         # If T0 is empty, the T1 chunk becomes all the unsummarized dialogue
         t1_chunk_dialogue_messages = unsummarized_dialogue_messages
-        # --- ADDED DEBUG LOGGING ---
         func_logger.debug(f"DEBUG T1 CHUNK: T0 slice empty. Setting T1 chunk to all {len(t1_chunk_dialogue_messages)} unsummarized dialogue messages.")
-        # --- END ADDED DEBUG LOGGING ---
     else:
         # Find the first message of the T0 slice within the unsummarized dialogue list
         first_t0_message = t0_dialogue_slice[0]
         try:
             # Find its index in the *dialogue-only* list
             t1_chunk_end_index_relative_dialogue = unsummarized_dialogue_messages.index(first_t0_message)
-            # --- ADDED DEBUG LOGGING ---
             func_logger.debug(f"DEBUG T1 CHUNK: First message of T0 slice found at relative index {t1_chunk_end_index_relative_dialogue} within unsummarized dialogue messages.")
-            # --- END ADDED DEBUG LOGGING ---
 
             if t1_chunk_end_index_relative_dialogue > 0:
                  # The T1 chunk consists of dialogue messages *before* the T0 slice starts
                  t1_chunk_dialogue_messages = unsummarized_dialogue_messages[:t1_chunk_end_index_relative_dialogue]
-                 # --- MODIFIED LOGGING FOR CLARITY ---
                  func_logger.info(f"Identified T1 chunk: {len(t1_chunk_dialogue_messages)} dialogue messages to summarize (indices 0 to {t1_chunk_end_index_relative_dialogue-1} relative to unsummarized dialogue).")
-                 # --- END MODIFIED LOGGING ---
             else:
                  # T0 slice started at the beginning of unsummarized dialogue. No separate T1 chunk.
-                 # --- MODIFIED LOGGING FOR CLARITY ---
                  func_logger.info(f"T0 dialogue slice started at the beginning (relative index {t1_chunk_end_index_relative_dialogue}) of unsummarized dialogue messages. No separate T1 chunk to summarize yet.")
-                 # --- END MODIFIED LOGGING ---
                  return False, None, new_last_summary_index, -1, t0_end_index_at_summary # Not an error, just nothing to summarize *yet*
         except ValueError:
              # Should not happen if t0_dialogue_slice came from unsummarized_dialogue_messages
@@ -284,7 +278,7 @@ async def manage_tier1_summarization(
     try:
         # --- Determine Absolute Index for Metadata ---
         # Find the actual message object corresponding to the last message of the T1 dialogue chunk
-        # This requires searching the *original* unsummarized_full_slice
+        # This requires searching the *original* full active_history
         last_msg_in_t1_chunk = t1_chunk_dialogue_messages[-1]
         t1_chunk_end_index_absolute = -1
         try:
@@ -357,9 +351,10 @@ async def manage_tier1_summarization(
             if save_successful:
                 func_logger.info(f"T1 summary {summary_id} saved successfully.")
                 summarization_performed = True
-                # CRITICAL: Update the last summary index in the session state
-                new_last_summary_index = t1_chunk_end_index_absolute # Use the calculated absolute index
-                session_state["last_summary_turn_index"] = new_last_summary_index # Update state directly
+                # CRITICAL: Set the new index to be *returned* to the caller
+                new_last_summary_index = t1_chunk_end_index_absolute
+                # REMOVED: Direct state update (caller must handle this)
+                # session_state["last_summary_turn_index"] = new_last_summary_index
             else:
                 func_logger.error(f"Failed to save T1 summary {summary_id} via callback. Last summary index not updated.")
                 # Do NOT update new_last_summary_index if save failed
@@ -381,7 +376,7 @@ async def manage_tier1_summarization(
         # Ensure we don't incorrectly report success
         summarization_performed = False
         generated_summary = None
-        # Keep new_last_summary_index as it was before this failed attempt
+        # Keep new_last_summary_index as it was before this failed attempt (it defaults to original_last_summary_index)
 
     # --- Return Results ---
     func_logger.debug(
@@ -391,5 +386,6 @@ async def manage_tier1_summarization(
         f"Prompt Tok: {summarizer_prompt_tokens}, "
         f"T0 End Idx: {t0_end_index_at_summary}"
         )
-    # Return the calculated new index (or the original one if summary failed/skipped)
+    # Return the calculated new index (or the original one if summary failed/skipped).
+    # The caller is responsible for updating the SessionManager state with this index.
     return summarization_performed, generated_summary, new_last_summary_index, summarizer_prompt_tokens, t0_end_index_at_summary
