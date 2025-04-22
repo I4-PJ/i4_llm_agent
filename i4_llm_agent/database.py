@@ -1,3 +1,4 @@
+# [[START MODIFIED database.py]]
 # i4_llm_agent/database.py
 
 import logging
@@ -53,6 +54,10 @@ def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
             )""")
         cursor.execute(
             f"CREATE INDEX IF NOT EXISTS idx_t1_session_ts ON {T1_SUMMARY_TABLE_NAME} (session_id, timestamp_utc)"
+        )
+        # Index on session_id and turn_end_index for fast MAX() lookup
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_t1_session_end_idx ON {T1_SUMMARY_TABLE_NAME} (session_id, turn_end_index)"
         )
         func_logger.debug(f"Table '{T1_SUMMARY_TABLE_NAME}' initialized successfully.")
 
@@ -182,6 +187,51 @@ def _sync_delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
 async def delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     """Async wrapper to delete a Tier 1 summary."""
     return await asyncio.to_thread(_sync_delete_tier1_summary, cursor, summary_id)
+
+
+# --- [[[ NEW FUNCTION ]]] ---
+def _sync_get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
+    """
+    Synchronously retrieves the maximum turn_end_index for a given session_id
+    from the Tier 1 summaries table.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_get_max_t1_end_index')
+    if not cursor:
+        func_logger.error(f"[{session_id}] Cursor unavailable for getting max T1 index.")
+        return None
+    if not session_id or not isinstance(session_id, str):
+        func_logger.error("Invalid session_id provided.")
+        return None
+
+    try:
+        cursor.execute(
+            f"SELECT MAX(turn_end_index) FROM {T1_SUMMARY_TABLE_NAME} WHERE session_id = ?",
+            (session_id,)
+        )
+        result = cursor.fetchone()
+        # fetchone() returns a tuple, e.g., (36,) or (None,) if no rows match
+        if result and result[0] is not None:
+            max_index = int(result[0])
+            func_logger.debug(f"[{session_id}] Max T1 end index found in DB: {max_index}")
+            return max_index
+        else:
+            func_logger.debug(f"[{session_id}] No T1 summaries found in DB. Max index is None.")
+            return None # Indicate no summaries found yet
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error getting max T1 end index: {e}")
+        return None # Indicate error
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error getting max T1 end index: {e}")
+        return None # Indicate error
+
+async def get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
+    """
+    Async wrapper to retrieve the maximum turn_end_index for a given session_id
+    from the Tier 1 summaries table.
+    """
+    return await asyncio.to_thread(_sync_get_max_t1_end_index, cursor, session_id)
+# --- [[[ END NEW FUNCTION ]]] ---
+
 
 # ==============================================================================
 # === SQLite RAG Cache Operations                                            ===
@@ -389,3 +439,4 @@ def _sync_get_chroma_collection_count(collection: Any) -> int:
 async def get_chroma_collection_count(collection: Any) -> int:
     """Async wrapper to get the count of items in a ChromaDB collection."""
     return await asyncio.to_thread(_sync_get_chroma_collection_count, collection)
+# [[END MODIFIED database.py]]

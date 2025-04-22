@@ -1,3 +1,4 @@
+# [[START MODIFIED orchestration.py]]
 # i4_llm_agent/orchestration.py
 
 import logging
@@ -21,6 +22,7 @@ from .database import (
     # SQLite T1/Cache
     add_tier1_summary, get_recent_tier1_summaries, get_tier1_summary_count,
     get_oldest_tier1_summary, delete_tier1_summary,
+    get_max_t1_end_index, # <<< ADDED
     add_or_update_rag_cache, get_rag_cache,
     # Chroma T2
     get_or_create_chroma_collection, add_to_chroma_collection,
@@ -526,6 +528,22 @@ class SessionPipeOrchestrator:
                  prompt_tokens = -1
                  t0_end_idx = -1
 
+                 # --- Get start index from DB ---
+                 db_max_index = None
+                 current_last_summary_index_for_memory = -1 # Default start
+                 try:
+                     db_max_index = await get_max_t1_end_index(self.sqlite_cursor, session_id)
+                     if isinstance(db_max_index, int) and db_max_index >= 0:
+                         current_last_summary_index_for_memory = db_max_index
+                         self.logger.info(f"[{session_id}] Retrieved Max T1 End Index from DB: {current_last_summary_index_for_memory}")
+                     else:
+                         self.logger.info(f"[{session_id}] No valid max T1 end index found in DB (Result: {db_max_index}). Starting summary check from index -1.")
+                 except Exception as e_get_max:
+                     self.logger.error(f"[{session_id}] Error getting max T1 end index from DB: {e_get_max}. Starting summary check from index -1.", exc_info=True)
+                     current_last_summary_index_for_memory = -1
+                 # --- End get start index ---
+
+
                  # Define nested async function with correct keyword args
                  async def _async_save_t1_summary(
                      summary_id: str, session_id: str, user_id: str, summary_text: str, metadata: Dict
@@ -541,10 +559,10 @@ class SessionPipeOrchestrator:
                      )
 
                  try:
-                     current_index = self.session_manager.get_last_summary_index(session_id)
-                     self.logger.debug(f"[{session_id}] Calling manage_tier1_summarization with current_last_summary_index = {current_index}")
+                     # REMOVED: current_index = self.session_manager.get_last_summary_index(session_id)
+                     self.logger.debug(f"[{session_id}] Calling manage_tier1_summarization with current_last_summary_index = {current_last_summary_index_for_memory} (from DB)")
                      summarization_performed, generated_summary, new_last_summary_idx, prompt_tokens, t0_end_idx = await self._manage_memory_func(
-                         current_last_summary_index=current_index,
+                         current_last_summary_index=current_last_summary_index_for_memory, # <<< USE DB VALUE
                          active_history=current_active_history, # Pass full history
                          t0_token_limit=getattr(self.config, 't0_active_history_token_limit', 4000),
                          t1_chunk_size_target=getattr(self.config, 't1_summarization_chunk_token_target', 2000),
@@ -558,6 +576,7 @@ class SessionPipeOrchestrator:
                          summarization_performed_successfully = True
                          new_t1_summary_text = generated_summary # Assign to outer scope variable
                          summarization_prompt_tokens = prompt_tokens # Assign to outer scope variable
+                         # Store the NEW successful index in memory for *this cycle* - next cycle uses DB again
                          self.session_manager.set_last_summary_index(session_id, new_last_summary_idx)
                          if new_t1_summary_text and self._count_tokens_func and self._tokenizer:
                               try: summarization_output_tokens = self._count_tokens_func(new_t1_summary_text, self._tokenizer)
@@ -907,12 +926,12 @@ class SessionPipeOrchestrator:
             # --- 4d: Select T0 Dialogue History Slice ---
             # t0_raw_history_slice initialized earlier
             # Use the 'history_for_processing' slice which ends *before* the effective query
-            last_summary_idx_for_t0 = self.session_manager.get_last_summary_index(session_id)
-            # Map the last summary index to the index within history_for_processing if possible
-            # This requires knowing the original index of the messages in history_for_processing
-            # For simplicity, we'll select from the *entire* history_for_processing block if T0 selection func isn't used.
-            # If using select_turns_for_t0, it handles the token limit selection.
-            # For manual slicing:
+            # --- Use the MAX DB Index if available for T0 slicing ---
+            # Use the value fetched before the T1 check
+            last_summary_idx_for_t0 = current_last_summary_index_for_memory # Use the DB derived index
+            self.logger.debug(f"[{session_id}] Orchestrator: Using DB-derived index {last_summary_idx_for_t0} as basis for T0 slicing.")
+            # --- End Use DB Index ---
+
             start_idx_for_t0 = last_summary_idx_for_t0 + 1
             # Ensure start_idx_for_t0 is within bounds of the effective history slice
             if start_idx_for_t0 < len(history_for_processing):
@@ -1062,3 +1081,4 @@ class SessionPipeOrchestrator:
             return {"error": f"Orchestrator failed: {type(e_orch).__name__}", "status_code": 500}
 
 # === END OF FILE i4_llm_agent/orchestration.py ===
+# [[END MODIFIED orchestration.py]]
