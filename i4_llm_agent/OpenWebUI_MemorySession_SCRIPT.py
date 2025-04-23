@@ -1,7 +1,7 @@
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.18.6 - Diag Logging & Valves Fix)
+title: SESSION_MEMORY PIPE (v0.18.7 - Diag Logging & Valves Fix)
 author: Petr Jílek & Assistant Gemini 2.5
 version: 0.18.6
 description: Uses i4_llm_agent library (v0.1.4+ recommended). DELEGATES core logic to i4_llm_agent.SessionPipeOrchestrator. Adds diagnostic logging to Pipe.__init__ and on_valves_updated to check loaded configuration. Re-adds debug log valves.
@@ -49,6 +49,22 @@ except ImportError:
     HTTPX_AVAILABLE = False
     logging.getLogger("SessionMemoryPipe_startup").warning(
         "httpx not installed. Final LLM streaming will fail if enabled."
+    )
+
+try:
+    from i4_llm_agent.prompting import (
+        DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
+        DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
+    )
+
+    PROMPTING_DEFAULTS_AVAILABLE = True
+except ImportError:
+    # Use the placeholder strings ONLY if the import fails, as a last resort
+    DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = "[Library Default: Cache Update]"
+    DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = "[Library Default: Final Select]"
+    PROMPTING_DEFAULTS_AVAILABLE = False
+    logging.getLogger("SessionMemoryPipe_startup").error(
+        "Could not import default prompt templates from i4_llm_agent.prompting. Placeholders will be used."
     )
 
 # /////////////////////////////////////////
@@ -470,14 +486,16 @@ class Pipe:
         )
         cache_update_prompt_template: str = Field(
             default=os.getenv(
-                ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE, "[Library Default: Cache Update]"
+                ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE,
+                DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,  # <<< Use imported default
             )
-        )  # Placeholder text if lib not loaded
+        )
         final_context_selection_prompt_template: str = Field(
             default=os.getenv(
-                ENV_VAR_FINAL_SELECT_PROMPT_TEMPLATE, "[Library Default: Final Select]"
+                ENV_VAR_FINAL_SELECT_PROMPT_TEMPLATE,
+                DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,  # <<< Use imported default
             )
-        )  # Placeholder text
+        )
         CACHE_UPDATE_SKIP_OWI_THRESHOLD: int = Field(
             default=int(
                 os.getenv(
@@ -1098,7 +1116,7 @@ class Pipe:
                 exc_info=True,
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD (REFACTORED + DIAG LOGGING + FORCE CONFIG) ===
+    # === SECTION 5.11: MAIN PIPE METHOD (REFACTORED + DIAG LOGGING + FORCE CONFIG + NON-STREAMING) ===
     async def pipe(
         self,
         body: dict,
@@ -1112,12 +1130,12 @@ class Pipe:
         __event_call__=None,
         __task__=None,
         __task_body__: Optional[dict] = None,
-    ) -> Union[dict, AsyncGenerator[str, None], str]:  # Adjusted return type hint
+    ) -> Union[dict, str]:  # <<< MODIFIED RETURN TYPE HINT
         """
         Handles incoming requests, manages session state via SessionManager,
         retrieves OWI embedding function, calculates regeneration heuristic,
         and delegates core processing to the SessionPipeOrchestrator.
-        Includes forced config update for orchestrator.
+        Returns either a dictionary payload or a final string response/error.
         """
         pipe_start_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Pipe.pipe v{self.version}: Entered at {pipe_start_time_iso}")
@@ -1133,10 +1151,10 @@ class Pipe:
                 if session_id != "uninitialized_session"
                 else "[startup/error]"
             )
+            # Check valve existence before accessing
+            emit_updates_enabled = getattr(self.valves, "emit_status_updates", True)
             if (
-                getattr(
-                    self.valves, "emit_status_updates", True
-                )  # Check valve existence
+                emit_updates_enabled
                 and self._current_event_emitter
                 and callable(self._current_event_emitter)
             ):
@@ -1208,7 +1226,9 @@ class Pipe:
             # --- END FORCE REFRESH ---
 
             # --- Log Raw Input (using helper) ---
-            self._log_debug_raw_input(session_id, body)
+            # Check valve existence before accessing
+            if getattr(self.valves, "debug_log_raw_input", False):
+                self._log_debug_raw_input(session_id, body)
 
             # --- 2. Get/Create Session State & Handle User Valves ---
             session_state = self.session_manager.get_or_create_session(session_id)
@@ -1218,7 +1238,8 @@ class Pipe:
                 raw_user_valves = __user__["valves"]
                 try:
                     # Attempt to parse using the defined UserValves model
-                    user_valves_obj = self.UserValves(
+                    # Use self.valves to access the class definition correctly
+                    user_valves_obj = self.valves.UserValves(
                         **(raw_user_valves if isinstance(raw_user_valves, dict) else {})
                     )
                     self.logger.info(f"[{session_id}] Successfully parsed UserValves.")
@@ -1226,12 +1247,14 @@ class Pipe:
                     self.logger.warning(
                         f"[{session_id}] Failed to parse __user__['valves'] into UserValves model: {e_parse_uv}. Using defaults."
                     )
-                    user_valves_obj = self.UserValves()  # Use defaults on failure
+                    # Use self.valves to access the class definition correctly for defaults
+                    user_valves_obj = self.UserValves()
             else:
                 self.logger.debug(
                     f"[{session_id}] No __user__['valves'] found. Using default UserValves."
                 )
-                user_valves_obj = self.UserValves()  # Use defaults if not present
+                # Use self.valves to access the class definition correctly for defaults
+                user_valves_obj = self.UserValves()
 
             # Store resolved user valves in session state
             self.session_manager.set_user_valves(session_id, user_valves_obj)
@@ -1307,7 +1330,7 @@ class Pipe:
             # --- END ADDED DEBUG LOGGING ---
 
             # --- 4. Delegate to Orchestrator ---
-            # Note: History sync/regeneration detection now happens INSIDE orchestrator
+            # Note: History sync now happens INSIDE orchestrator at the start
             await emit_status("Status: Pipe delegating to orchestrator...")
             self.logger.info(f"[{session_id}] Calling orchestrator.process_turn...")
             orchestrator_result = await self.orchestrator.process_turn(
@@ -1318,23 +1341,38 @@ class Pipe:
                 event_emitter=self._current_event_emitter,
                 embedding_func=owi_embed_func,
                 chroma_embed_wrapper=chroma_embed_wrapper,
-                # --- <<< Pass the calculated flag >>> ---
-                is_regeneration_heuristic=is_regeneration_heuristic,
-                # --- <<< End Pass >>> ---
+                is_regeneration_heuristic=is_regeneration_heuristic,  # Pass the flag
             )
+            result_type_name = type(orchestrator_result).__name__
             self.logger.info(
-                f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
+                f"[{session_id}] Orchestrator returned result type: {result_type_name}"
             )
 
-            # --- Log Final Payload (using helper) ---
-            if isinstance(orchestrator_result, dict):
-                self._log_debug_final_payload(session_id, orchestrator_result)
+            # --- Log Final Payload (if it's a dictionary) ---
+            # Check valve existence before accessing
+            if getattr(self.valves, "debug_log_final_payload", False):
+                if isinstance(orchestrator_result, dict):
+                    # Use the helper to log the dictionary payload if debugging enabled
+                    self._log_debug_final_payload(session_id, orchestrator_result)
+
+            # Log if result is a string (Final LLM response or error)
+            if isinstance(orchestrator_result, str):
+                self.logger.info(
+                    f"[{session_id}] Orchestrator returned a string (LLM response or error): '{orchestrator_result[:100]}...'"
+                )
+            elif not isinstance(orchestrator_result, dict):
+                # Should ideally not happen with the new orchestrator logic
+                self.logger.warning(
+                    f"[{session_id}] Orchestrator returned an unexpected type: {result_type_name}"
+                )
 
             # --- 5. Return Result ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(
-                f"Pipe.pipe v{self.version} [{session_id}]: Finished at {pipe_end_time_iso}"
+                f"Pipe.pipe v{self.version} [{session_id}]: Finished at {pipe_end_time_iso}, returning result type: {result_type_name}"
             )
+            # OWI should handle both dict (payload passthrough) and str (direct response) correctly.
+            # No type checking needed here for the return itself.
             return orchestrator_result
 
         # === Pipe-Level Exception Handling ===
@@ -1343,22 +1381,25 @@ class Pipe:
                 f"Pipe.pipe [{session_id}]: Processing cancelled by external signal."
             )
             try:
-                await emit_status("Status: Processing stopped by user.", done=True)
+                # Check valve existence before accessing
+                if getattr(self.valves, "emit_status_updates", True):
+                    await emit_status("Status: Processing stopped by user.", done=True)
             except Exception:
-                pass
-            raise
+                pass  # Avoid error in cancellation handler
+            raise  # Re-raise cancellation
         except Exception as e_pipe_global:
             self.logger.critical(
                 f"Pipe.pipe [{session_id}]: UNHANDLED PIPE SETUP/WRAPPER EXCEPTION: {e_pipe_global}",
                 exc_info=True,
             )
             try:
-                await emit_status(
-                    f"ERROR: Pipe Failed ({type(e_pipe_global).__name__})", done=True
-                )
+                # Check valve existence before accessing
+                if getattr(self.valves, "emit_status_updates", True):
+                    await emit_status(
+                        f"ERROR: Pipe Failed ({type(e_pipe_global).__name__})",
+                        done=True,
+                    )
             except Exception:
-                pass
+                pass  # Avoid error in exception handler
+            # Return a simple error string in case of critical failure
             return f"Apologies, a critical error occurred in the Session Memory Pipe: {type(e_pipe_global).__name__}."
-
-
-# === SECTION 6: END OF SCRIPT ===
