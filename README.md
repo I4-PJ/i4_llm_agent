@@ -134,6 +134,8 @@ When the pipe receives a request from Open WebUI:
 
 ## ⚙️ Configuration (Valves & Environment Variables)
 
+When setting openrouter API, use path like that https://openrouter.ai/api/v1/chat/completions#google/gemini-2.5-pro   so, API path separated by '#' from model name. Google API (prefered) is set as e.g. https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-preview-03-25:generateContent. To be refactored in future.
+
 Set these environment variables before starting Open WebUI to configure the pipe globally.
 
 | Env Var                                | Default Value (or Description)                      | Purpose                                                                 |
