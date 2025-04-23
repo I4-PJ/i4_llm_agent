@@ -208,13 +208,15 @@ These settings can be configured **per chat** within the Open WebUI "Chat Settin
     i4_llm_agent>=0.1.4
     httpx
     # Add other dependencies if needed by OWI or your setup
-    ```
-    Install using `pip install -r requirements.txt`.
-2.  **Place Script:** Copy the latest `OpenWebUI_MemorySession_SCRIP` content into your Open WebUI functions.
-3.  **Configure Environment:** Set the `SM_*` environment variables (especially API keys and desired paths) before launching Open WebUI or via Valves.
-4.  **Restart Open WebUI:** Ensure the changes are picked up.
-5.  **Select Pipe:** In Open WebUI, select the "SESSION\_MEMORY PIPE" in the chat settings or set it as a base model.
-6.  **Configure User Valves:** Adjust the session-specific User Valves (`long_term_goal`, etc.) in the Chat Settings -> Valves section as needed.
+
+   Library istelf can be installed after downloading the folder with using `pip install .` executed from within a project `i4_llm_agent` folder.
+
+    Install dependencies (shouldn't be needed if using open webui) using `pip install -r requirements.txt`.
+1.  **Place Script:** Copy the latest `OpenWebUI_MemorySession_SCRIP` content into your Open WebUI functions.
+2.  **Configure Environment:** Set the `SM_*` environment variables (especially API keys and desired paths) before launching Open WebUI or via Valves.
+3.  **Restart Open WebUI:** Ensure the changes are picked up.
+4.  **Select Pipe:** In Open WebUI, select the "SESSION\_MEMORY PIPE" in the chat settings or set it as a base model.
+5.  **Configure User Valves:** Adjust the session-specific User Valves (`long_term_goal`, etc.) in the Chat Settings -> Valves section as needed.
 
 ---
 
