@@ -210,10 +210,10 @@ These settings can be configured **per chat** within the Open WebUI "Chat Settin
     # Add other dependencies if needed by OWI or your setup
     ```
     Install using `pip install -r requirements.txt`.
-2.  **Place Script:** Copy the latest `script.txt` file into your Open WebUI `pipes` directory (e.g., `open-webui/backend/data/pipes/script.txt`). Create the `pipes` directory if it doesn't exist.
-3.  **Configure Environment:** Set the `SM_*` environment variables (especially API keys and desired paths) before launching Open WebUI.
+2.  **Place Script:** Copy the latest `OpenWebUI_MemorySession_SCRIP` content into your Open WebUI functions.
+3.  **Configure Environment:** Set the `SM_*` environment variables (especially API keys and desired paths) before launching Open WebUI or via Valves.
 4.  **Restart Open WebUI:** Ensure the changes are picked up.
-5.  **Select Pipe:** In Open WebUI, select the "SESSION\_MEMORY PIPE" in the chat settings.
+5.  **Select Pipe:** In Open WebUI, select the "SESSION\_MEMORY PIPE" in the chat settings or set it as a base model.
 6.  **Configure User Valves:** Adjust the session-specific User Valves (`long_term_goal`, etc.) in the Chat Settings -> Valves section as needed.
 
 ---
