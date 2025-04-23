@@ -181,147 +181,6 @@ class SessionPipeOrchestrator:
             return False, {"error_type": "AsyncWrapperError", "message": f"{type(e).__name__}"}
 
 
-    # --- Internal Helper: Final LLM Stream Call Wrapper ---
-    async def _async_final_llm_stream_call(
-        self,
-        api_url: str,
-        api_key: str,
-        payload: Dict[str, Any], # Expects Google 'contents' format initially
-        temperature: float,
-        timeout: int = 120,
-        caller_info: str = "Orchestrator_FinalStream",
-        final_status_message: str = "Status: Stream completed.",
-        event_emitter: Optional[Callable] = None
-    ) -> AsyncGenerator[str, None]:
-        # ... (Implementation remains the same as before) ...
-        log_session_id = caller_info
-        session_id_match = re.search(r'_(user_.*)', log_session_id)
-        extracted_session_id = session_id_match.group(1) if session_id_match else "unknown_session"
-        base_api_url = api_url
-        final_payload_to_send = {}
-        headers = {}
-        stream_successful = False
-
-        if not HTTPX_AVAILABLE:
-            self.logger.error(f"[{log_session_id}] httpx library not available. Cannot stream.")
-            yield f"[Streaming Error: httpx not installed]"
-            return
-
-        if not api_url or not api_key:
-            error_msg = "Missing API Key" if not api_key else "Missing Final LLM URL"
-            self.logger.error(f"[{log_session_id}] {error_msg}.")
-            yield f"[Streaming Error: {error_msg}]"
-            return
-
-        try:
-            converter_func = _convert_google_to_openai_payload
-            if converter_func is None:
-                self.logger.error(f"[{log_session_id}] Payload converter func unavailable. Cannot stream OpenAI.")
-                yield "[Streaming Error: Payload converter missing]"
-                return
-
-            parsed_url = urllib.parse.urlparse(api_url)
-            base_api_url = urllib.parse.urlunparse(parsed_url._replace(fragment=""))
-            url_for_check = base_api_url.lower().rstrip('/')
-
-            if "openrouter.ai/api/v1/chat/completions" in url_for_check or \
-               url_for_check.endswith("/v1/chat/completions"):
-                if parsed_url.fragment:
-                    model_name_for_conversion = parsed_url.fragment
-                    self.logger.debug(f"[{log_session_id}] Final stream target is OpenAI-like. Model: '{model_name_for_conversion}'")
-                    try:
-                        openai_payload_converted = converter_func(payload, model_name_for_conversion, temperature)
-                        openai_payload_converted["stream"] = True
-                        final_payload_to_send = openai_payload_converted
-                    except Exception as e_conv:
-                        self.logger.error(f"[{log_session_id}] Error converting payload for OpenAI stream: {e_conv}", exc_info=True)
-                        yield f"[Streaming Error: Payload conversion failed - {type(e_conv).__name__}]"
-                        return
-
-                    headers = {
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                        "Accept": "text/event-stream"
-                    }
-                else:
-                    self.logger.error(f"[{log_session_id}] OpenAI-like URL requires model fragment for streaming.")
-                    yield "[Streaming Error: Model fragment missing in URL]"
-                    return
-            else:
-                self.logger.error(f"[{log_session_id}] Cannot determine final LLM API type for streaming from URL: {base_api_url}")
-                yield "[Streaming Error: Cannot determine API type for streaming]"
-                return
-
-        except Exception as e_prep:
-            self.logger.error(f"[{log_session_id}] Error parsing URL/preparing payload for stream: {e_prep}", exc_info=True)
-            yield "[Streaming Error: URL/Payload prep failed]"
-            return
-
-        if not final_payload_to_send:
-             self.logger.error(f"[{log_session_id}] Final payload for streaming is empty after preparation.")
-             yield "[Streaming Error: Final payload empty]"
-             return
-
-        self.logger.info(f"[{log_session_id}] Starting final LLM stream call to {base_api_url[:80]}...")
-        try:
-            async with httpx.AsyncClient(timeout=timeout + 10) as client:
-                 async with client.stream("POST", base_api_url, headers=headers, json=final_payload_to_send, timeout=timeout) as response:
-                    if response.status_code != 200:
-                         error_body = await response.aread()
-                         error_text = error_body.decode('utf-8', errors='replace')[:1000]
-                         self.logger.error(f"[{log_session_id}] Stream API Error: Status {response.status_code}. Response: {error_text}...")
-                         yield f"[Streaming Error: API returned status {response.status_code}]"
-                         try:
-                             err_json = json.loads(error_text)
-                             if "error" in err_json and isinstance(err_json["error"], dict):
-                                 err_detail = err_json["error"].get("message", "Unknown API error")
-                                 yield f"\n[Detail: {err_detail}]"
-                         except json.JSONDecodeError: pass
-                         return
-
-                    self.logger.debug(f"[{log_session_id}] Stream connection successful (Status {response.status_code}). Reading chunks...")
-                    async for line in response.aiter_lines():
-                        if line.startswith("data:"):
-                            data_content = line[len("data:"):].strip()
-                            if data_content == "[DONE]":
-                                self.logger.debug(f"[{log_session_id}] Received [DONE] signal.")
-                                stream_successful = True
-                                break
-                            if data_content:
-                                try:
-                                    chunk = json.loads(data_content)
-                                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                    text_chunk = delta.get("content")
-                                    if text_chunk: yield text_chunk
-                                except json.JSONDecodeError: self.logger.warning(f"[{log_session_id}] Failed to decode JSON data chunk: '{data_content}'")
-                                except (IndexError, KeyError, TypeError) as e_parse: self.logger.warning(f"[{log_session_id}] Error parsing stream chunk structure ({type(e_parse).__name__}): {chunk}")
-                        elif line.strip(): self.logger.debug(f"[{log_session_id}] Received non-data line: '{line}'")
-
-        except httpx.TimeoutException as e_timeout:
-            self.logger.error(f"[{log_session_id}] HTTPX Timeout during stream after {timeout}s: {e_timeout}", exc_info=False)
-            yield f"[Streaming Error: Timeout after {timeout}s]"
-        except httpx.RequestError as e_req:
-            self.logger.error(f"[{log_session_id}] HTTPX RequestError during stream: {e_req}", exc_info=True)
-            yield f"[Streaming Error: Network request failed - {type(e_req).__name__}]"
-        except asyncio.CancelledError:
-             self.logger.info(f"[{log_session_id}] Final stream call explicitly cancelled.")
-             yield "[Streaming Error: Cancelled]"
-             raise
-        except Exception as e_stream:
-            self.logger.error(f"[{log_session_id}] Unexpected error during final LLM stream: {e_stream}", exc_info=True)
-            yield f"[Streaming Error: Unexpected error - {type(e_stream).__name__}]"
-        finally:
-             self.logger.info(f"[{log_session_id}] Final LLM stream processing finished.")
-             status_to_emit = final_status_message
-             if not stream_successful:
-                  status_to_emit += " (Stream Interrupted)"
-             await self._emit_status(
-                 event_emitter=event_emitter,
-                 session_id=extracted_session_id,
-                 description=status_to_emit,
-                 done=True
-             )
-
 
     # --- Helper Methods for process_turn ---
 
@@ -1025,55 +884,104 @@ class SessionPipeOrchestrator:
         return status_message, final_payload_tokens
 
 
+# --- Internal Helper: Execute Final LLM (Non-Streaming) or Prepare Output ---
     async def _execute_or_prepare_output(
-        self, session_id: str, body: Dict, final_llm_payload_contents: Optional[List[Dict]],
-        event_emitter: Optional[Callable], status_message: str, final_payload_tokens: int # Pass calculated tokens
-    ) -> OrchestratorResult:
-        """ Executes the final LLM call (if configured) or prepares the output body. """
+        self,
+        session_id: str,
+        body: Dict, # The original input body, potentially for reference
+        final_llm_payload_contents: Optional[List[Dict]], # The constructed payload for the LLM
+        event_emitter: Optional[Callable],
+        status_message: str, # The status message calculated before this step
+        final_payload_tokens: int # Pass calculated tokens for logging/status
+    ) -> Union[Dict, str]: # <<< MODIFIED RETURN TYPE HINT
+        """
+        Executes the final LLM call (if configured and payload exists) NON-STREAMING,
+        or prepares the modified payload dictionary for downstream processing.
+
+        Returns:
+            - str: The final LLM response text on success.
+            - str: An error message string if the final LLM call fails.
+            - Dict: The modified payload dictionary if the final LLM call is not triggered.
+        """
 
         output_body = body.copy() if isinstance(body, dict) else {}
 
         if final_llm_payload_contents:
+            # Update the output body with the constructed payload contents
             output_body["messages"] = final_llm_payload_contents
+            # Preserve relevant keys from original body if needed by downstream (e.g., OWI)
             preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"]
             keys_preserved = [k for k in preserved_keys if k in body]
-            for k in keys_preserved: output_body[k] = body[k]
-            self.logger.info(f"[{session_id}] Output body updated. Preserved: {keys_preserved}.")
+            for k in keys_preserved:
+                output_body[k] = body[k]
+            self.logger.info(f"[{session_id}] Output body updated with final payload. Preserved: {keys_preserved}.")
         else:
-            self.logger.error(f"[{session_id}] Final payload failed. Output body not updated.")
-            # Emit final error status directly here if payload failed
+            # Payload construction failed earlier, cannot proceed with LLM call
+            self.logger.error(f"[{session_id}] Final payload construction failed earlier. Cannot execute final LLM call.")
             await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True)
+            # Return an error dictionary as per standard OWI pipe error handling when not returning text
             return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
 
-
-        # Check Final LLM Trigger
+        # --- Check Final LLM Trigger ---
         final_url = getattr(self.config, 'final_llm_api_url', None)
         final_key = getattr(self.config, 'final_llm_api_key', None)
         url_present = bool(final_url and isinstance(final_url, str) and final_url.strip())
         key_present = bool(final_key and isinstance(final_key, str) and final_key.strip())
-        self.logger.debug(f"[{session_id}] Checking Final LLM Trigger. URL:{url_present}, Key:{key_present}")
+        self.logger.debug(f"[{session_id}] Checking Final LLM Trigger. URL Present:{url_present}, Key Present:{key_present}")
         final_llm_triggered = url_present and key_present
 
         if final_llm_triggered:
-            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED.")
-            await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call (Streaming)...", done=False)
+            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming).")
+            await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call (Non-Streaming)...", done=False)
 
+            # Prepare payload in Google format for the wrapper (dispatcher handles conversion if needed)
             final_call_payload_google_fmt = {"contents": final_llm_payload_contents}
-            final_response_generator = self._async_final_llm_stream_call(
-                api_url=final_url, api_key=final_key, payload=final_call_payload_google_fmt,
+
+            # --- Call the NON-STREAMING wrapper ---
+            success, final_response_or_error = await self._async_llm_call_wrapper(
+                api_url=final_url,
+                api_key=final_key,
+                payload=final_call_payload_google_fmt,
                 temperature=getattr(self.config, 'final_llm_temperature', 0.7),
                 timeout=getattr(self.config, 'final_llm_timeout', 120),
-                caller_info=f"Orch_FinalLLM_{session_id}",
-                final_status_message=status_message, # Pass calculated status
-                event_emitter=event_emitter
+                caller_info=f"Orch_FinalLLM_{session_id}"
             )
-            self.logger.info(f"[{session_id}] Returning final LLM stream generator.")
-            return final_response_generator
+            # --- End NON-STREAMING call ---
+
+            # --- Process Non-Streaming Result ---
+            if success and isinstance(final_response_or_error, str):
+                final_response_text = final_response_or_error # Already a string, no strip here
+                self.logger.info(f"[{session_id}] Final LLM Call successful (Non-Streaming). Response Length: {len(final_response_text)}.")
+                final_status = status_message # Use the status calculated before this step
+                await self._emit_status(event_emitter, session_id, final_status, done=True)
+                # Return the final response string directly
+                return final_response_text
+            else:
+                # Handle failure from the wrapper
+                error_info_str = "[Unknown Error]"
+                if not success and isinstance(final_response_or_error, dict):
+                    err_type = final_response_or_error.get('error_type', 'UnknownType')
+                    err_msg = final_response_or_error.get('message', 'N/A')
+                    error_info_str = f"Type: {err_type}, Msg: {err_msg}"
+                    # Log the full error dictionary if needed for debugging
+                    self.logger.debug(f"[{session_id}] Final LLM Error Dict: {final_response_or_error}")
+                elif not success: # If it failed but didn't return a dict
+                    error_info_str = str(final_response_or_error)
+                elif success: # Should not happen if success is True, but handle defensively
+                    error_info_str = f"Unexpected success state with non-string result: {type(final_response_or_error).__name__}"
+
+                self.logger.error(f"[{session_id}] Final LLM Call (Non-Streaming) failed. Error: '{error_info_str}'.")
+                user_error_message = f"[Final LLM Error: {error_info_str}]" # Format as a string
+                error_status_desc = f"ERROR: Final LLM Failed ({error_info_str[:50]}...)"
+                await self._emit_status(event_emitter, session_id, error_status_desc, done=True)
+                # Return the formatted error string directly
+                return user_error_message
+            # --- End Result Processing ---
 
         else:
-            # Return Modified Payload Body
+            # Final LLM not triggered, return the modified payload dictionary
             self.logger.info(f"[{session_id}] Final LLM Call disabled. Passing modified payload downstream.")
-            # Emit the FINAL status message here for NON-STREAMING path
+            # Emit the FINAL status message here for the NON-STREAMING path that didn't run the final LLM
             await self._emit_status(event_emitter, session_id, status_message, done=True)
             return output_body
 
@@ -1089,10 +997,11 @@ class SessionPipeOrchestrator:
         embedding_func: Optional[Callable] = None,
         chroma_embed_wrapper: Optional[Any] = None,
         is_regeneration_heuristic: bool = False # <<< ADDED parameter to signature
-    ) -> OrchestratorResult:
+    ) -> Union[Dict, str]: # <<< MODIFIED RETURN TYPE HINT
         """
         Processes a single turn by calling helper methods in sequence.
         Accepts regeneration flag from the caller.
+        Returns either the modified payload dictionary or the final LLM response/error string.
         """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})") # Log flag
