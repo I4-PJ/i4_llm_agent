@@ -1283,7 +1283,8 @@ class SessionPipeOrchestrator:
             return output_body
 
 
-# --- Method Replacement 3: process_turn (Complete Implementation) ---
+# [[START MODIFIED process_turn METHOD - FULL with Cursor Fix]]
+# --- Method Replacement 3: process_turn (Complete Implementation with Cursor Fix) ---
     async def process_turn(
         self,
         session_id: str, # Now passed directly
@@ -1298,6 +1299,7 @@ class SessionPipeOrchestrator:
         """
         Processes a single turn by calling helper methods in sequence.
         Includes inventory management enable check and post-turn update call.
+        Ensures database cursor is passed for inventory updates.
         """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
@@ -1306,7 +1308,7 @@ class SessionPipeOrchestrator:
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
         self.logger.info(f"[{session_id}] Inventory Management Enabled: {inventory_enabled}")
 
-        # --- Variable Initializations (existing + inventory) ---
+        # --- Variable Initializations ---
         summarization_performed = False
         new_t1_summary_text = None
         summarization_prompt_tokens = -1
@@ -1322,10 +1324,10 @@ class SessionPipeOrchestrator:
         refined_context_tokens = -1
         t0_dialogue_tokens = -1
         final_payload_tokens = -1
-        formatted_inventory_string_for_status = "" # Store for status message
+        formatted_inventory_string_for_status = ""
         status_message = "Status: Processing..."
-        final_result: Optional[OrchestratorResult] = None # Store result before inventory update
-        final_llm_payload_contents: Optional[List[Dict]] = None # Ensure defined
+        final_result: Optional[OrchestratorResult] = None
+        final_llm_payload_contents: Optional[List[Dict]] = None
 
         try:
             # --- 1. Initialization & History Handling ---
@@ -1336,7 +1338,7 @@ class SessionPipeOrchestrator:
                 if len(incoming_messages) < len(stored_history):
                     self.logger.warning(f"[{session_id}] Incoming history shorter than stored. Resetting.")
                     self.session_manager.set_active_history(session_id, incoming_messages.copy())
-                    self.session_manager.set_last_summary_index(session_id, -1) # Reset summary index on history reset
+                    self.session_manager.set_last_summary_index(session_id, -1)
                 else:
                     self.logger.debug(f"[{session_id}] Updating active history (Len: {len(incoming_messages)}).")
                     self.session_manager.set_active_history(session_id, incoming_messages.copy())
@@ -1376,12 +1378,12 @@ class SessionPipeOrchestrator:
                 embedding_func, chroma_embed_wrapper, event_emitter
             )
 
-            # --- 6. Prepare & Refine Background Context (Includes Inventory) ---
+            # --- 6. Prepare & Refine Background Context (Includes Inventory Fetch/Format) ---
             (combined_context_string, base_system_prompt_text,
              initial_owi_context_tokens, refined_context_tokens,
              cache_update_performed, cache_update_skipped,
              final_context_selection_performed, stateless_refinement_performed,
-             formatted_inventory_string_for_status # Get formatted string back
+             formatted_inventory_string_for_status
             ) = await self._prepare_and_refine_background(
                 session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries,
                 current_active_history, latest_user_query_str, event_emitter
@@ -1413,7 +1415,6 @@ class SessionPipeOrchestrator:
                 t0_dialogue_tokens=t0_dialogue_tokens,
                 final_llm_payload_contents=final_llm_payload_contents
             )
-            # Append inventory status for clarity if enabled
             if inventory_enabled:
                 inv_status = "ON"
                 if "[Error" in formatted_inventory_string_for_status: inv_status = "ERR"
@@ -1430,15 +1431,12 @@ class SessionPipeOrchestrator:
                 event_emitter=event_emitter, status_message=status_message, final_payload_tokens=final_payload_tokens
             )
 
-            # --- 11. Post-Turn Inventory Update (With Config Loading) ---
+            # --- 11. Post-Turn Inventory Update (With Config Loading & Cursor Fix) ---
             if inventory_enabled and self._update_inventories_func:
-                 # Check if the main processing resulted in an error before trying inventory update
                  if isinstance(final_result, dict) and "error" in final_result:
                      self.logger.warning(f"[{session_id}] Skipping post-turn inventory update due to upstream error: {final_result.get('error')}")
-                 # Skip if streaming (needs specific handling)
                  elif isinstance(final_result, AsyncGenerator):
                       self.logger.warning(f"[{session_id}] Skipping post-turn inventory update: Streaming response detected. Update logic needs adjustment for streams.")
-                 # Proceed if we got a non-streaming string response
                  elif isinstance(final_result, str):
                       self.logger.info(f"[{session_id}] Performing post-turn inventory update (Non-Streaming Final LLM response received)...")
                       await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
@@ -1447,36 +1445,33 @@ class SessionPipeOrchestrator:
                           inv_llm_url = getattr(self.config, 'inv_llm_api_url', None)
                           inv_llm_key = getattr(self.config, 'inv_llm_api_key', None)
                           inv_llm_temp = getattr(self.config, 'inv_llm_temperature', 0.3)
-                          # Get template directly from config (Valves should hold the actual text or path)
                           inv_llm_prompt_template = getattr(self.config, 'inv_llm_prompt_template', None)
 
-                          # Check if essential config is present and seems valid
-                          template_seems_valid = inv_llm_prompt_template and isinstance(inv_llm_prompt_template, str) and "[Library Default" not in inv_llm_prompt_template and len(inv_llm_prompt_template) > 50 # Basic check
+                          template_seems_valid = inv_llm_prompt_template and isinstance(inv_llm_prompt_template, str) and "[Library Default" not in inv_llm_prompt_template and len(inv_llm_prompt_template) > 50
                           if not inv_llm_url or not inv_llm_key or not template_seems_valid:
                                self.logger.error(f"[{session_id}] Inventory LLM config missing or invalid (URL: {bool(inv_llm_url)}, Key: {bool(inv_llm_key)}, Template Valid: {template_seems_valid}). Cannot perform update.")
                                await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (config error).", done=True)
+                          elif not self.sqlite_cursor: # Check if cursor exists
+                               self.logger.error(f"[{session_id}] SQLite cursor unavailable. Cannot perform inventory update.")
+                               await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (DB cursor error).", done=True)
                           else:
                                # Assemble config dict
-                               inv_llm_config = {
-                                   "url": inv_llm_url, "key": inv_llm_key,
-                                   "temp": inv_llm_temp, "prompt_template": inv_llm_prompt_template,
-                               }
-
-                               # Prepare context for Inventory LLM
-                               # Include the last assistant turn in history for analysis
+                               inv_llm_config = { "url": inv_llm_url, "key": inv_llm_key, "temp": inv_llm_temp, "prompt_template": inv_llm_prompt_template, }
+                               # Prepare history string
                                history_for_inv_update_list = self._get_recent_turns_func(current_active_history, 4, exclude_last=False)
                                history_for_inv_update_str = self._format_history_func(history_for_inv_update_list)
 
-                               # Call the inventory update function from inventory.py
+                               # Call the update function, passing the cursor
                                update_success = await self._update_inventories_func(
+                                   cursor=self.sqlite_cursor, # <<< Pass cursor here
                                    session_id=session_id,
-                                   main_llm_response=final_result, # The string response
+                                   main_llm_response=final_result,
                                    user_query=latest_user_query_str,
                                    recent_history_str=history_for_inv_update_str,
                                    llm_call_func=self._async_llm_call_wrapper,
-                                   db_get_inventory_func=self._get_char_inventory_db_func, # Pass DB getter
-                                   db_update_inventory_func=self._update_char_inventory_db_func, # Pass DB updater
-                                   inventory_llm_config=inv_llm_config # Pass assembled config
+                                   db_get_inventory_func=self._get_char_inventory_db_func,
+                                   db_update_inventory_func=self._update_char_inventory_db_func,
+                                   inventory_llm_config=inv_llm_config
                                )
 
                                if update_success:
@@ -1490,20 +1485,17 @@ class SessionPipeOrchestrator:
                           self.logger.error(f"[{session_id}] Error during post-turn inventory update call: {e_inv_update}", exc_info=True)
                           await self._emit_status(event_emitter, session_id, "Status: Error during inventory update.", done=True)
 
-                 # If final_result is the original body dict (final LLM call disabled/skipped)
                  elif isinstance(final_result, dict) and final_result.get("messages") == final_llm_payload_contents:
                       self.logger.info(f"[{session_id}] Skipping post-turn inventory update: Final LLM call was disabled or payload unchanged.")
                       if inventory_enabled:
-                          # Ensure a final 'done' status is emitted if inventory was on but skipped here
                            await self._emit_status(event_emitter, session_id, "Status: Processing complete (Inventory check skipped - Final LLM Off).", done=True)
                  else:
                       self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
 
             elif not inventory_enabled:
                  self.logger.debug(f"[{session_id}] Skipping post-turn inventory update: Disabled by valve.")
-                 # Ensure a final 'done' status if inventory is off
-                 await self._emit_status(event_emitter, session_id, status_message + " Inv=OFF", done=True) # Repeat status with Inv=OFF and done=True
-            else: # Inventory enabled but function missing (shouldn't happen if imports work)
+                 await self._emit_status(event_emitter, session_id, status_message + " Inv=OFF", done=True)
+            else: # Inventory enabled but function missing
                  self.logger.warning(f"[{session_id}] Skipping post-turn inventory update: Update function missing/unavailable.")
                  await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (function missing).", done=True)
 
@@ -1511,26 +1503,22 @@ class SessionPipeOrchestrator:
             # --- 12. Return Final Result ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(f"Orchestrator process_turn [{session_id}]: Finished at {pipe_end_time_iso}")
-
-            # Ensure final_result is not None before returning
             if final_result is None:
                 self.logger.error(f"[{session_id}] Final result is None at end of processing. Returning error.")
                 await self._emit_status(event_emitter, session_id, "ERROR: Internal processing error (result is None).", done=True)
                 return {"error": "Internal processing error, final result was None.", "status_code": 500}
-
-            return final_result # Return the dict, string, or stream generator
+            return final_result
 
         # --- Exception Handling ---
         except asyncio.CancelledError:
              self.logger.info(f"[{session_id or 'unknown'}] Orchestrator process_turn cancelled.")
              await self._emit_status(event_emitter, session_id or 'unknown', "Status: Processing cancelled.", done=True)
-             raise # Re-raise CancelledError
+             raise
         except Exception as e_orch:
             session_id_for_log = session_id if 'session_id' in locals() and session_id != "uninitialized_session" else 'unknown'
             self.logger.critical(f"[{session_id_for_log}] Orchestrator UNHANDLED EXCEPTION in process_turn: {e_orch}", exc_info=True)
             await self._emit_status(event_emitter, session_id_for_log, f"ERROR: Orchestrator Failed ({type(e_orch).__name__})", done=True)
-            # Return dict for errors
             return {"error": f"Orchestrator failed: {type(e_orch).__name__}", "status_code": 500}
-# [[END MODIFIED process_turn METHOD - FULL]]
+# [[END MODIFIED process_turn METHOD - FULL with Cursor Fix]]
 
 # === END OF FILE i4_llm_agent/orchestration.py ===

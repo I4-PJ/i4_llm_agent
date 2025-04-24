@@ -502,6 +502,19 @@ def _sync_get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: st
     if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id."); return inventories
 
     try:
+        # --- START DEBUG ADDITION ---
+        db_connection = cursor.connection
+        try:
+            # Attempt to get the database name associated with the connection
+            cursor.execute("PRAGMA database_list;")
+            db_list = cursor.fetchall()
+            # The main database is usually seq 0, file path is column 2
+            db_path_from_pragma = db_list[0][2] if db_list and len(db_list[0]) > 2 else "N/A"
+            func_logger.debug(f"[{session_id}] Attempting to query inventories. Cursor connection DB via PRAGMA: '{db_path_from_pragma}'")
+        except Exception as e_pragma:
+            func_logger.warning(f"[{session_id}] Could not execute PRAGMA database_list to confirm DB path: {e_pragma}")
+        # --- END DEBUG ADDITION ---
+
         cursor.execute(
             f"SELECT character_name, inventory_data FROM {INVENTORY_TABLE_NAME} WHERE session_id = ?",
             (session_id,)
@@ -514,7 +527,11 @@ def _sync_get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: st
         func_logger.debug(f"[{session_id}] Retrieved inventories for {len(inventories)} characters.")
         return inventories
     except sqlite3.Error as e:
+        # This is where the "no such table" error is caught
         func_logger.error(f"[{session_id}] SQLite error retrieving all inventories: {e}")
+        # Log the pragma path again on error
+        try: func_logger.error(f"[{session_id}] DB Path from PRAGMA during error: '{db_path_from_pragma}'")
+        except NameError: func_logger.error(f"[{session_id}] DB Path from PRAGMA unavailable during error.")
         return {} # Return empty dict on error
     except Exception as e:
         func_logger.error(f"[{session_id}] Unexpected error retrieving all inventories: {e}")

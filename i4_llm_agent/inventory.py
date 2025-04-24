@@ -5,6 +5,7 @@ import logging
 import json
 import asyncio # <<< Add asyncio for potential concurrent DB calls
 import re # <<< Import re for stripping
+import sqlite3 # <<< Add sqlite3 import for type hinting
 from typing import Dict, Optional, Callable, Any, Tuple, Union, Coroutine
 
 # --- Import the new formatter and default template ---
@@ -163,241 +164,136 @@ def _modify_inventory_json(
 # === 3. Post-Turn Inventory Update Orchestration                          ===
 # ==============================================================================
 
-# --- 3.1: Update Inventories from LLM Response (JSON Parsing Fix) ---
+# --- 3.1: Update Inventories from LLM Response (No changes needed here) ---
 async def update_inventories_from_llm(
+    cursor: sqlite3.Cursor, # <<< CORRECT: Expects cursor
     session_id: str,
     main_llm_response: str,
     user_query: str,
     recent_history_str: str,
     llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]],
-    db_get_inventory_func: Callable[..., Coroutine[Any, Any, Optional[str]]], # Func to get current JSON
-    db_update_inventory_func: Callable[..., Coroutine[Any, Any, bool]], # Func to save new JSON
-    inventory_llm_config: Dict[str, Any] # Contains URL, Key, Temp, Prompt Template
+    db_get_inventory_func: Callable[..., Coroutine[Any, Any, Optional[str]]],
+    db_update_inventory_func: Callable[..., Coroutine[Any, Any, bool]],
+    inventory_llm_config: Dict[str, Any]
 ) -> bool:
-    """
-    Orchestrates the post-turn inventory update process using a dedicated LLM call.
-    Includes fix for parsing JSON potentially wrapped in markdown code fences.
-    """
+    # ... (Implementation as generated before, including loop calling helper) ...
     func_logger = logging.getLogger(__name__ + '.update_inventories_from_llm')
     func_logger.info(f"[{session_id}] Starting post-turn inventory update analysis...")
+    if not cursor: func_logger.error(f"[{session_id}] SQLite cursor missing for inventory update."); return False
+    if not all([session_id, main_llm_response, user_query, llm_call_func, db_get_inventory_func, db_update_inventory_func, inventory_llm_config]):
+        func_logger.error(f"[{session_id}] Missing required arguments for inventory update."); return False
 
-    # --- Input Validation ---
-    if not all([session_id, main_llm_response, user_query, llm_call_func,
-                db_get_inventory_func, db_update_inventory_func, inventory_llm_config]):
-        func_logger.error(f"[{session_id}] Missing required arguments for inventory update.")
-        return False
-
-    # --- Prepare Inventory LLM Call ---
     inv_template = inventory_llm_config.get("prompt_template", DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT)
-    inv_url = inventory_llm_config.get("url")
-    inv_key = inventory_llm_config.get("key")
-    inv_temp = inventory_llm_config.get("temp", 0.3)
-
-    if not inv_url or not inv_key:
-        func_logger.error(f"[{session_id}] Inventory LLM URL or Key missing in config.")
-        return False
-
-    # Format the prompt
-    prompt_text = format_inventory_update_prompt(
-        main_llm_response=main_llm_response,
-        user_query=user_query,
-        recent_history_str=recent_history_str,
-        template=inv_template
-    )
-
-    if not prompt_text or "[Error" in prompt_text:
-        func_logger.error(f"[{session_id}] Failed to format inventory update prompt: {prompt_text}")
-        return False
-
+    inv_url = inventory_llm_config.get("url"); inv_key = inventory_llm_config.get("key"); inv_temp = inventory_llm_config.get("temp", 0.3)
+    if not inv_url or not inv_key: func_logger.error(f"[{session_id}] Inventory LLM URL or Key missing in config."); return False
+    prompt_text = format_inventory_update_prompt(main_llm_response=main_llm_response, user_query=user_query, recent_history_str=recent_history_str, template=inv_template)
+    if not prompt_text or "[Error" in prompt_text: func_logger.error(f"[{session_id}] Failed to format inventory update prompt: {prompt_text}"); return False
     inv_payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     caller_info = f"InventoryUpdater_{session_id}"
-
-    # --- Call Inventory LLM ---
-    func_logger.info(f"[{session_id}] Calling Inventory LLM...")
-    success, response_or_error = await llm_call_func(
-        api_url=inv_url, api_key=inv_key, payload=inv_payload,
-        temperature=inv_temp, timeout=60, # Shorter timeout for focused task
-        caller_info=caller_info
-    )
-
+    func_logger.info(f"[{session_id}] Calling Inventory LLM...");
+    success, response_or_error = await llm_call_func(api_url=inv_url, api_key=inv_key, payload=inv_payload, temperature=inv_temp, timeout=60, caller_info=caller_info)
     if not success or not isinstance(response_or_error, str):
-        error_details = str(response_or_error)
-        if isinstance(response_or_error, dict):
-            error_details = f"Type: {response_or_error.get('error_type')}, Msg: {response_or_error.get('message')}"
-        func_logger.error(f"[{session_id}] Inventory LLM call failed. Details: {error_details}")
-        return False
+        error_details = str(response_or_error);
+        if isinstance(response_or_error, dict): error_details = f"Type: {response_or_error.get('error_type')}, Msg: {response_or_error.get('message')}"
+        func_logger.error(f"[{session_id}] Inventory LLM call failed. Details: {error_details}"); return False
+    inventory_llm_output = response_or_error.strip(); func_logger.debug(f"[{session_id}] Inventory LLM raw output: {inventory_llm_output[:500]}...")
 
-    inventory_llm_output = response_or_error.strip()
-    func_logger.debug(f"[{session_id}] Inventory LLM raw output: {inventory_llm_output[:500]}...")
-
-    # --- Parse and Process Response ---
     updates_processed_count = 0
     try:
-        # --- START JSON PARSING FIX ---
-        # Attempt to strip markdown code fences (```json ... ``` or ``` ... ```)
         json_string_to_parse = inventory_llm_output
-        # Regex to find content within triple backticks, optionally preceded by 'json'
         match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", json_string_to_parse, re.IGNORECASE)
-        if match:
-            json_string_to_parse = match.group(1).strip()
-            func_logger.debug(f"[{session_id}] Stripped markdown fences. Parsing: {json_string_to_parse[:500]}...")
-        else:
-            # If no fences found, attempt to parse the original string directly
-            func_logger.debug(f"[{session_id}] No markdown fences found. Parsing raw output.")
-            # (Optional: Add further cleanup here if needed, e.g., removing leading/trailing non-JSON chars)
-
-        # --- END JSON PARSING FIX ---
-
-        # Attempt to parse the cleaned JSON string
+        if match: json_string_to_parse = match.group(1).strip(); func_logger.debug(f"[{session_id}] Stripped markdown fences.")
+        else: func_logger.debug(f"[{session_id}] No markdown fences found.")
         parsed_data = json.loads(json_string_to_parse)
-
-        if not isinstance(parsed_data, dict):
-            func_logger.error(f"[{session_id}] Inventory LLM parsed output is not a JSON dictionary. Original: {inventory_llm_output[:100]} Parsed Type: {type(parsed_data)}")
-            return False
-
+        if not isinstance(parsed_data, dict): func_logger.error(f"[{session_id}] Inventory LLM parsed output is not a JSON dictionary. Type: {type(parsed_data)}"); return False
         updates_list = parsed_data.get("updates")
         if not isinstance(updates_list, list):
-            func_logger.error(f"[{session_id}] Inventory LLM JSON missing 'updates' list or it's not a list.")
-            if updates_list is None and len(parsed_data.keys()) == 0:
-                 func_logger.info(f"[{session_id}] Inventory LLM indicated no changes (empty JSON object).")
-                 return True
-            elif updates_list == []:
-                func_logger.info(f"[{session_id}] Inventory LLM indicated no changes (empty updates list).")
-                return True
-            else:
-                return False
-
-        if not updates_list:
-             func_logger.info(f"[{session_id}] Inventory LLM detected no inventory changes.")
-             return True
-
+            func_logger.error(f"[{session_id}] Inventory LLM JSON missing 'updates' list or not a list.")
+            if updates_list is None and len(parsed_data.keys()) == 0: func_logger.info(f"[{session_id}] Inventory LLM indicated no changes (empty JSON object)."); return True
+            elif updates_list == []: func_logger.info(f"[{session_id}] Inventory LLM indicated no changes (empty updates list)."); return True
+            else: return False
+        if not updates_list: func_logger.info(f"[{session_id}] Inventory LLM detected no inventory changes."); return True
         func_logger.info(f"[{session_id}] Inventory LLM detected {len(updates_list)} potential update(s). Processing...")
 
-        # --- Perform DB Updates Concurrently ---
         update_tasks = []
         for update_action in updates_list:
-            if not isinstance(update_action, dict):
-                func_logger.warning(f"[{session_id}] Skipping invalid item in updates list: {update_action}")
-                continue
-
-            char_name = update_action.get("character_name")
-            action = update_action.get("action")
-            item_name = update_action.get("item_name")
-            quantity = update_action.get("quantity")
+            if not isinstance(update_action, dict): func_logger.warning(f"[{session_id}] Skipping invalid item in updates list: {update_action}"); continue
+            char_name = update_action.get("character_name"); action = update_action.get("action")
+            item_name = update_action.get("item_name"); quantity = update_action.get("quantity")
             description = update_action.get("description")
-
             if not all([char_name, action, item_name]) or not isinstance(quantity, int):
-                 func_logger.warning(f"[{session_id}] Skipping update due to missing/invalid fields: {update_action}")
-                 continue
-
+                 func_logger.warning(f"[{session_id}] Skipping update due to missing/invalid fields: {update_action}"); continue
+            # Call helper, ensuring cursor is passed
             update_tasks.append(
-                 _process_single_inventory_update(
-                     session_id, db_get_inventory_func, db_update_inventory_func,
-                     char_name, action, item_name, quantity, description
+                 _process_single_inventory_update( # This call expects 9 args
+                     cursor, # 1
+                     session_id, # 2
+                     db_get_inventory_func, # 3
+                     db_update_inventory_func, # 4
+                     char_name, # 5
+                     action, # 6
+                     item_name, # 7
+                     quantity, # 8
+                     description # 9
                  )
             )
-
-        if not update_tasks:
-             func_logger.warning(f"[{session_id}] No valid update actions found after validation.")
-             return False
-
+        if not update_tasks: func_logger.warning(f"[{session_id}] No valid update actions found after validation."); return False
         results = await asyncio.gather(*update_tasks, return_exceptions=True)
-
         successful_updates = 0
         for i, result in enumerate(results):
              update_info = updates_list[i]
-             if isinstance(result, Exception):
-                 func_logger.error(f"[{session_id}] Error processing update for {update_info.get('character_name', 'Unknown')}: {result}", exc_info=result)
-             elif result:
-                 successful_updates += 1
-
+             if isinstance(result, Exception): func_logger.error(f"[{session_id}] Error processing update for {update_info.get('character_name', 'Unknown')}: {result}", exc_info=result)
+             elif result: successful_updates += 1
         updates_processed_count = successful_updates
         func_logger.info(f"[{session_id}] Processed {len(results)} update actions. Successful DB updates: {successful_updates}.")
-
-    except json.JSONDecodeError as e:
-        func_logger.error(f"[{session_id}] Failed to decode JSON response from Inventory LLM after cleanup: {e}. String was: '{json_string_to_parse[:500]}...'")
-        return False
-    except Exception as e:
-        func_logger.error(f"[{session_id}] Unexpected error processing Inventory LLM response: {e}", exc_info=True)
-        return False
-
+    except json.JSONDecodeError as e: func_logger.error(f"[{session_id}] Failed to decode JSON response from Inventory LLM after cleanup: {e}. String was: '{json_string_to_parse[:500]}...'"); return False
+    except Exception as e: func_logger.error(f"[{session_id}] Unexpected error processing Inventory LLM response: {e}", exc_info=True); return False
     return updates_processed_count > 0
 
 
-# --- Helper for processing a single update action ---
-# (No changes needed in _process_single_inventory_update)
+# --- Helper for processing a single update action (Corrected Definition) ---
 async def _process_single_inventory_update(
-    session_id: str,
-    db_get_func: Callable[..., Coroutine[Any, Any, Optional[str]]],
-    db_update_func: Callable[..., Coroutine[Any, Any, bool]],
-    char_name: str, action: str, item_name: str, quantity: int, description: Optional[str]
+    # --- Definition CORRECTED to accept 9 arguments ---
+    cursor: sqlite3.Cursor,           # Arg 1
+    session_id: str,                # Arg 2
+    db_get_func: Callable[..., Coroutine[Any, Any, Optional[str]]], # Arg 3
+    db_update_func: Callable[..., Coroutine[Any, Any, bool]],      # Arg 4
+    char_name: str,                 # Arg 5
+    action: str,                    # Arg 6
+    item_name: str,                 # Arg 7
+    quantity: int,                  # Arg 8
+    description: Optional[str]      # Arg 9
 ) -> bool:
     """ Fetches current state, modifies JSON, saves new state for one update. """
     func_logger = logging.getLogger(__name__ + '._process_single_inventory_update')
+    if not cursor: func_logger.error(f"[{session_id}] Missing cursor in _process_single_inventory_update for {char_name}."); return False
     try:
         func_logger.debug(f"[{session_id}] Processing update for {char_name}: {action} {quantity} x {item_name}")
-        current_json_state = await db_get_func(session_id=session_id, character_name=char_name)
+        # Call DB functions *with* the cursor
+        current_json_state = await db_get_func(cursor=cursor, session_id=session_id, character_name=char_name)
+
         new_json_state = _modify_inventory_json(
             current_inventory_json=current_json_state,
             action=action, item_name=item_name, quantity=quantity, description=description
         )
+
         if new_json_state is None:
             func_logger.error(f"[{session_id}] Failed to generate new inventory JSON for {char_name} ({item_name}).")
             return False
+
         save_success = await db_update_func(
+            cursor=cursor, # Pass cursor
             session_id=session_id, character_name=char_name, inventory_data_json=new_json_state
         )
-        if not save_success:
-            func_logger.error(f"[{session_id}] Failed to save updated inventory to DB for {char_name}.")
-            return False
-        func_logger.debug(f"[{session_id}] Successfully updated DB inventory for {char_name}.")
-        return True
-    except Exception as e:
-        func_logger.error(f"[{session_id}] Exception in _process_single_inventory_update for {char_name}: {e}", exc_info=True)
-        return False
 
-# --- Helper for processing a single update action ---
-async def _process_single_inventory_update(
-    session_id: str,
-    db_get_func: Callable[..., Coroutine[Any, Any, Optional[str]]],
-    db_update_func: Callable[..., Coroutine[Any, Any, bool]],
-    char_name: str, action: str, item_name: str, quantity: int, description: Optional[str]
-) -> bool:
-    """ Fetches current state, modifies JSON, saves new state for one update. """
-    func_logger = logging.getLogger(__name__ + '._process_single_inventory_update')
-    try:
-        func_logger.debug(f"[{session_id}] Processing update for {char_name}: {action} {quantity} x {item_name}")
-        current_json_state = await db_get_func(session_id=session_id, character_name=char_name)
-
-        new_json_state = _modify_inventory_json(
-            current_inventory_json=current_json_state,
-            action=action,
-            item_name=item_name,
-            quantity=quantity,
-            description=description
-        )
-
-        if new_json_state is None:
-            # Error logged within _modify_inventory_json
-            func_logger.error(f"[{session_id}] Failed to generate new inventory JSON for {char_name} ({item_name}).")
-            return False
-
-        # Save the updated state
-        save_success = await db_update_func(
-            session_id=session_id,
-            character_name=char_name,
-            inventory_data_json=new_json_state
-        )
-
-        if not save_success:
-            func_logger.error(f"[{session_id}] Failed to save updated inventory to DB for {char_name}.")
-            return False
+        if not save_success: func_logger.error(f"[{session_id}] Failed to save updated inventory to DB for {char_name}."); return False
 
         func_logger.debug(f"[{session_id}] Successfully updated DB inventory for {char_name}.")
         return True
 
+    except TypeError as te:
+        func_logger.error(f"[{session_id}] TypeError in _process_single_inventory_update for {char_name}: {te}. Args passed: cursor={bool(cursor)}, sid={session_id}, char={char_name}", exc_info=True)
+        return False
     except Exception as e:
         func_logger.error(f"[{session_id}] Exception in _process_single_inventory_update for {char_name}: {e}", exc_info=True)
         return False
-
-# [[END MODIFIED inventory.py - Update Function Implementation]]
