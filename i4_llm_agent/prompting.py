@@ -592,53 +592,69 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
     return extracted
 
 
-
 # Placeholders for Inventory Update LLM
 INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Post-Turn Inventory Update LLM
+# Default Template Text for Post-Turn Inventory Update LLM (Revised for Commands)
 DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Inventory Log Keeper
-**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) in a roleplaying session to identify any explicit changes to character inventories.
+**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) in a roleplaying session to identify any explicit changes to character inventories, either described in dialogue OR stated via direct commands.
 **Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
 
+**Supported Direct Command Formats (Expected in User Query):**
+*   `INVENTORY: SET [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Replaces entire inventory for the character)
+*   `INVENTORY: ADD [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Adds specified items/quantities)
+*   `INVENTORY: REMOVE [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Removes specified items/quantities)
+*   `INVENTORY: CLEAR [Character Name]` (Removes all items for the character)
+*(Note: Use `__USER__` for the player character if their specific name isn't provided in the command)*
+
 **Instructions:**
-1.  **Focus on Explicit Changes:** Identify actions like picking up, dropping, giving, receiving, using (if consumable), crafting, buying, or selling items mentioned in the ASSISTANT RESPONSE or clearly implied by the USER QUERY and ASSISTANT RESPONSE together. Also look for explicit SYSTEM directives regarding inventory changes.
-2.  **Determine Character:** Identify the character(s) whose inventory is affected. Assume "You" or "I" in the ASSISTANT RESPONSE likely refers to the character addressed by the USER QUERY, often "__USER__". Identify NPCs by name mentioned in the interaction.
-3.  **Determine Action:** Classify the change as "add", "remove", or potentially "set_quantity" (if an exact new total is stated).
-4.  **Determine Item & Quantity:** Extract the item name and the quantity involved. Default to quantity 1 if not specified for add/remove.
-5.  **Extract Description (Optional):** If a clear, concise description of an *added* item is provided, include it.
-6.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+
+1.  **Prioritize Direct Commands:** First, check the **USER QUERY** for any explicit `INVENTORY:` commands matching the formats above.
+    *   If a valid command is found, parse it accurately to determine the character(s), action(s) (SET, ADD, REMOVE, CLEAR), items, and quantities.
+    *   Generate the JSON `updates` based *solely* on the parsed command. **Ignore conflicting dialogue in the Assistant Response if a command is present.**
+    *   For `SET`, generate multiple "set_quantity" actions (or equivalent "add" actions if starting fresh/clearing first). For `CLEAR`, generate "remove" actions for existing items or a special indicator if possible. *(Self-correction: Simpler might be to just output a single conceptual 'set' or 'clear' action if the target system can handle it, but the JSON structure only has add/remove/set_quantity. Let's stick to generating fundamental actions)* -> For `SET`: Generate `set_quantity` action for each item listed. For `CLEAR`, generate `remove` actions for *all* items currently known for that character (requires context not available here - ** fallback: ** Output a single action `{{ "character_name": "[Name]", "action": "remove", "item_name": "__ALL__", "quantity": 0 }}` if you detect `CLEAR`). *(Self-correction 2: Sticking to defined actions is safest)* -> For `SET`, generate a series of `set_quantity` updates. For `CLEAR`, aim to generate `remove` actions for all items *mentioned in the command context or recent history if possible*, otherwise signal inability or generate a placeholder like `remove __ALL__`. *(Self-correction 3: Let's keep it simple for now)* -> **If `INVENTORY: SET` is found, generate `set_quantity` actions for *only* the items listed in the command.** (Existing items not listed are implicitly removed by the downstream logic). **If `INVENTORY: CLEAR` is found, represent this with `{{ "action": "remove", "item_name": "__ALL_ITEMS__", "quantity": 0 }}`.**
+
+2.  **Analyze Dialogue (If No Command Found):** If no `INVENTORY:` command is present in the User Query, *then* analyze the **ASSISTANT RESPONSE** (and User Query for context) for narrative descriptions of inventory changes.
+    *   Identify actions like picking up, dropping, giving, receiving, using (if consumable), crafting, buying, or selling items mentioned.
+    *   Determine the character(s) involved. Use `__USER__` for the player character if their specific name isn't mentioned or easily inferred from history. Identify NPCs by name. Use history context to resolve pronouns ("he", "she", "they").
+    *   Determine the action ("add", "remove", "set_quantity").
+    *   Extract the item name and quantity (default 1 if unspecified).
+    *   Extract an optional description for added items if clearly provided.
+
+3.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
     ```json
     {{
       "updates": [
+        // One entry for each detected change (from command OR dialogue)
         {{
           "character_name": "Name or __USER__",
           "action": "add | remove | set_quantity",
-          "item_name": "Exact Item Name",
+          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
           "quantity": <integer>,
-          "description": "<optional string>"
+          "description": "<optional string>" // Typically only for 'add' from dialogue
         }}
+        // ... more updates if needed
       ]
     }}
     ```
-7.  **Accuracy is Key:** Only report changes explicitly stated or directly and unambiguously implied. Do NOT infer inventory changes.
-8.  **No Change:** If NO inventory changes are detected, output `{{"updates": []}}`.
+4.  **Accuracy is Key:** Only report changes explicitly stated in commands or directly and unambiguously implied by the dialogue. Do NOT infer changes.
+5.  **No Change:** If NO commands are found AND NO inventory changes are detected in the dialogue, output `{{"updates": []}}`.
 
 **INPUTS:**
 
-**USER QUERY (Trigger for the response):**
+**USER QUERY (Check for commands first):**
 {INVENTORY_UPDATE_QUERY_PLACEHOLDER}
 
-**ASSISTANT RESPONSE (Main text to analyze):**
+**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
 ---
 {INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY (For context):**
+**RECENT CHAT HISTORY (For context, especially pronoun resolution):**
 ---
 {INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
 ---
@@ -646,7 +662,7 @@ DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 **OUTPUT (JSON object with detected inventory updates):**
 """
 
-# --- Function: Format Inventory Update Prompt ---
+# --- Function: Format Inventory Update Prompt (No code changes needed here) ---
 def format_inventory_update_prompt(
     main_llm_response: str,
     user_query: str,
@@ -656,7 +672,6 @@ def format_inventory_update_prompt(
     """Formats the prompt for the Post-Turn Inventory Update LLM."""
     func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
     if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
-
     # Use basic replace for safety, assuming placeholders are unique enough
     try:
         formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
@@ -666,5 +681,3 @@ def format_inventory_update_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
         return f"[Error formatting inventory update prompt: {type(e).__name__}]"
-
-# === END OF FILE i4_llm_agent/prompting.py ===
