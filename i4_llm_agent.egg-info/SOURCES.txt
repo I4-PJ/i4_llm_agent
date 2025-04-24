@@ -7,6 +7,7 @@ i4_llm_agent/api_client.py
 i4_llm_agent/cache.py
 i4_llm_agent/database.py
 i4_llm_agent/history.py
+i4_llm_agent/inventory.py
 i4_llm_agent/memory.py
 i4_llm_agent/orchestration.py
 i4_llm_agent/prompting.py

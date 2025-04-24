@@ -1,4 +1,6 @@
-# [[START MODIFIED orchestration.py]]
+# --- START OF FILE orchestration.py ---
+
+# [[START MODIFIED orchestration.py - FULL]]
 # i4_llm_agent/orchestration.py
 
 import logging
@@ -29,6 +31,10 @@ from .database import (
     query_chroma_collection, get_chroma_collection_count,
     CHROMADB_AVAILABLE, ChromaEmbeddingFunction, ChromaCollectionType, # Use types if needed
     InvalidDimensionException,
+    # Add inventory DB functions
+    get_all_inventories_for_session,
+    get_character_inventory_data, # Needed by inventory module potentially
+    add_or_update_character_inventory, # Needed by inventory module
 )
 from .history import (
     format_history_for_llm, get_recent_turns, DIALOGUE_ROLES, select_turns_for_t0
@@ -41,7 +47,9 @@ from .prompting import (
     DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
     format_cache_update_prompt, format_final_context_selection_prompt,
     DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
-    DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
+    DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT, # Now includes inventory placeholder
+    # Add inventory prompt formatter
+    format_inventory_update_prompt, DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
 )
 from .cache import ( # Import orchestrators from cache.py
     update_rag_cache, select_final_context
@@ -51,6 +59,12 @@ from .api_client import call_google_llm_api # Use the dispatcher
 
 from .utils import count_tokens, calculate_string_similarity
 
+# --- Inventory Module Import ---
+from .inventory import (
+    format_inventory_for_prompt,
+    update_inventories_from_llm,
+)
+
 # --- Optional Imports ---
 try:
     import httpx
@@ -58,7 +72,7 @@ try:
 except ImportError:
     httpx = None
     HTTPX_AVAILABLE = False
-    # Log warning during initialization if needed
+    # Logging handled by Pipe startup
 
 # Need this for URL parsing within the stream call prep
 import urllib.parse
@@ -83,8 +97,10 @@ class SessionPipeOrchestrator:
     """
     Orchestrates the core processing logic of the Session Memory Pipe.
     Encapsulates logic in helper methods for clarity and maintainability.
+    Includes inventory management features.
     """
 
+# --- Method Replacement 1: __init__ (Includes Inventory Aliases) ---
     def __init__(
         self,
         config: object, # Expects an object with attributes similar to Pipe.Valves
@@ -93,7 +109,7 @@ class SessionPipeOrchestrator:
         chroma_client: Optional[Any] = None, # Expects chromadb.ClientAPI
         logger_instance: Optional[logging.Logger] = None,
     ):
-        # ... (Initialization remains the same as before) ...
+        """Initializes the orchestrator with config, manager, DB, and clients."""
         self.config = config
         self.session_manager = session_manager
         self.sqlite_cursor = sqlite_cursor
@@ -112,25 +128,33 @@ class SessionPipeOrchestrator:
         elif not TIKTOKEN_AVAILABLE:
              self.logger.warning("Orchestrator: tiktoken unavailable. Token counting disabled.")
 
-        # Direct function aliases from library (assuming library functions handle None checks)
+        # --- Function Aliases ---
+        # Core
         self._llm_call_func = call_google_llm_api # Use dispatcher
         self._format_history_func = format_history_for_llm
         self._get_recent_turns_func = get_recent_turns
         self._manage_memory_func = manage_tier1_summarization
         self._construct_payload_func = construct_final_llm_payload
+        self._count_tokens_func = count_tokens
+        self._calculate_similarity_func = calculate_string_similarity
+        self._dialogue_roles = DIALOGUE_ROLES
+        # Prompting/Context
         self._clean_context_tags_func = clean_context_tags
         self._generate_rag_query_func = generate_rag_query
         self._combine_context_func = combine_background_context
         self._process_system_prompt_func = process_system_prompt
-        self._count_tokens_func = count_tokens
-        self._calculate_similarity_func = calculate_string_similarity
-        self._dialogue_roles = DIALOGUE_ROLES
-
-        # Refinement/Cache functions
+        # Refinement/Cache Orchestrators
         self._stateless_refine_func = refine_external_context
         self._cache_update_func = update_rag_cache
         self._cache_select_func = select_final_context
-        self._get_rag_cache_db_func = get_rag_cache # Direct DB getter
+        # DB Getters/Setters (Specific)
+        self._get_rag_cache_db_func = get_rag_cache
+        self._get_all_inventories_db_func = get_all_inventories_for_session # <<< NEW Inventory DB Alias
+        self._get_char_inventory_db_func = get_character_inventory_data # <<< NEW Inventory DB Alias
+        self._update_char_inventory_db_func = add_or_update_character_inventory # <<< NEW Inventory DB Alias
+        # Inventory Module Functions
+        self._format_inventory_func = format_inventory_for_prompt # <<< NEW Inventory Alias
+        self._update_inventories_func = update_inventories_from_llm # <<< NEW Inventory Alias
 
         self.logger.info("SessionPipeOrchestrator initialized.")
 
@@ -138,18 +162,19 @@ class SessionPipeOrchestrator:
     async def _emit_status(
         self,
         event_emitter: Optional[Callable],
-        session_id: str, # Added session_id for logging context
+        session_id: str,
         description: str,
         done: bool = False
     ):
-        # ... (Implementation remains the same as before) ...
+        """Emits status updates via the provided callable if configured."""
         if event_emitter and callable(event_emitter) and getattr(self.config, 'emit_status_updates', True):
             try:
-                status_data = {
-                    "type": "status",
-                    "data": {"description": str(description), "done": bool(done)}
-                }
-                await event_emitter(status_data)
+                status_data = { "type": "status", "data": {"description": str(description), "done": bool(done)} }
+                # Check if emitter is async or sync (though Pipe usually provides async)
+                if asyncio.iscoroutinefunction(event_emitter):
+                    await event_emitter(status_data)
+                else:
+                    event_emitter(status_data) # Call sync directly
             except Exception as e_emit:
                 self.logger.warning(f"[{session_id}] Orchestrator failed to emit status '{description}': {e_emit}")
         else:
@@ -166,119 +191,240 @@ class SessionPipeOrchestrator:
         timeout: int = 90,
         caller_info: str = "Orchestrator_LLM",
     ) -> Tuple[bool, Union[str, Dict]]:
-        # ... (Implementation remains the same as before) ...
+        """
+        Wraps the library's LLM call function for error handling.
+        Handles both awaitable coroutines and direct tuple returns for early errors.
+        """
         if not self._llm_call_func:
             self.logger.error(f"[{caller_info}] LLM func unavailable in orchestrator.")
             return False, {"error_type": "SetupError", "message": "LLM func unavailable"}
         try:
-             return await asyncio.to_thread(
-                 self._llm_call_func,
-                 api_url=api_url, api_key=api_key, payload=payload,
-                 temperature=temperature, timeout=timeout, caller_info=caller_info
-             )
+            # Call the underlying function (which might be sync or async internally)
+            result = self._llm_call_func(
+                api_url=api_url, api_key=api_key, payload=payload,
+                temperature=temperature, timeout=timeout, caller_info=caller_info
+            )
+
+            # Check if the result is awaitable (a coroutine)
+            if asyncio.iscoroutine(result):
+                # If it's awaitable, await it
+                self.logger.debug(f"[{caller_info}] Awaiting result from LLM function.")
+                return await result
+            elif isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], bool):
+                # If it's already a tuple (likely an early sync error return), return it directly
+                self.logger.debug(f"[{caller_info}] LLM function returned tuple directly (Success: {result[0]}).")
+                return result
+            else:
+                # Unexpected return type from the underlying function
+                self.logger.error(f"[{caller_info}] LLM function returned unexpected type: {type(result)}. Result: {result}")
+                return False, {"error_type": "InternalError", "message": f"LLM function returned unexpected type {type(result)}"}
+
         except Exception as e:
+            # Catch exceptions during the call itself or during await
             self.logger.error(f"Orchestrator LLM Wrapper Error [{caller_info}]: {e}", exc_info=True)
-            return False, {"error_type": "AsyncWrapperError", "message": f"{type(e).__name__}"}
+            return False, {"error_type": "AsyncWrapperError", "message": f"{type(e).__name__}: {str(e)}"}
 
 
+    # --- Internal Helper: Final LLM Stream Call Wrapper ---
+    async def _async_final_llm_stream_call(
+        self,
+        api_url: str,
+        api_key: str,
+        payload: Dict[str, Any], # Expects Google 'contents' format initially
+        temperature: float,
+        timeout: int = 120,
+        caller_info: str = "Orchestrator_FinalStream",
+        final_status_message: str = "Status: Stream completed.",
+        event_emitter: Optional[Callable] = None
+    ) -> AsyncGenerator[str, None]:
+        """Handles streaming calls to OpenAI-compatible endpoints."""
+        # Extract session ID for logging if present in caller_info
+        log_session_id = caller_info
+        session_id_match = re.search(r'_(user_.*|chat_.*)', log_session_id) # Adjusted regex
+        extracted_session_id = session_id_match.group(1) if session_id_match else "unknown_session"
+
+        base_api_url = api_url
+        final_payload_to_send = {}
+        headers = {}
+        stream_successful = False
+
+        if not HTTPX_AVAILABLE:
+            self.logger.error(f"[{log_session_id}] httpx library not available. Cannot stream.")
+            yield f"[Streaming Error: httpx not installed]"
+            return
+
+        if not api_url or not api_key:
+            error_msg = "Missing API Key" if not api_key else "Missing Final LLM URL"
+            self.logger.error(f"[{log_session_id}] {error_msg}.")
+            yield f"[Streaming Error: {error_msg}]"
+            return
+
+        try:
+            converter_func = _convert_google_to_openai_payload
+            if converter_func is None:
+                self.logger.error(f"[{log_session_id}] Payload converter func unavailable. Cannot stream OpenAI.")
+                yield "[Streaming Error: Payload converter missing]"
+                return
+
+            parsed_url = urllib.parse.urlparse(api_url)
+            base_api_url = urllib.parse.urlunparse(parsed_url._replace(fragment=""))
+            url_for_check = base_api_url.lower().rstrip('/')
+
+            # Check for known streaming endpoints
+            if "openrouter.ai/api/v1/chat/completions" in url_for_check or \
+               url_for_check.endswith("/v1/chat/completions"): # Common OpenAI pattern
+                if parsed_url.fragment:
+                    model_name_for_conversion = parsed_url.fragment
+                    self.logger.debug(f"[{log_session_id}] Final stream target is OpenAI-like. Model: '{model_name_for_conversion}'")
+                    try:
+                        openai_payload_converted = converter_func(payload, model_name_for_conversion, temperature)
+                        openai_payload_converted["stream"] = True
+                        # Add other potential streaming params if needed (e.g., based on original body)
+                        # Example: if 'max_tokens' in original_body: openai_payload_converted['max_tokens'] = original_body['max_tokens']
+                        final_payload_to_send = openai_payload_converted
+                    except Exception as e_conv:
+                        self.logger.error(f"[{log_session_id}] Error converting payload for OpenAI stream: {e_conv}", exc_info=True)
+                        yield f"[Streaming Error: Payload conversion failed - {type(e_conv).__name__}]"
+                        return
+
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                        "Accept": "text/event-stream"
+                        # Add site URL / App name if needed for providers like OpenRouter
+                        # "HTTP-Referer": ..., "X-Title": ...
+                    }
+                else:
+                    self.logger.error(f"[{log_session_id}] OpenAI-like URL requires model fragment (e.g., #model/name) for streaming.")
+                    yield "[Streaming Error: Model fragment missing in URL]"
+                    return
+            # Add other potential streaming API types here if needed (e.g., Anthropic)
+            else:
+                self.logger.error(f"[{log_session_id}] Cannot determine final LLM API type for streaming from URL: {base_api_url}")
+                yield "[Streaming Error: Cannot determine API type for streaming]"
+                return
+
+        except Exception as e_prep:
+            self.logger.error(f"[{log_session_id}] Error parsing URL/preparing payload for stream: {e_prep}", exc_info=True)
+            yield "[Streaming Error: URL/Payload prep failed]"
+            return
+
+        if not final_payload_to_send:
+             self.logger.error(f"[{log_session_id}] Final payload for streaming is empty after preparation.")
+             yield "[Streaming Error: Final payload empty]"
+             return
+
+        self.logger.info(f"[{log_session_id}] Starting final LLM stream call to {base_api_url[:80]}...")
+        # Log payload *before* call for debugging stream issues
+        self.logger.debug(f"[{log_session_id}] Streaming Payload: {json.dumps(final_payload_to_send)}")
+        try:
+            async with httpx.AsyncClient(timeout=timeout + 10) as client: # Slightly longer timeout for client
+                 async with client.stream("POST", base_api_url, headers=headers, json=final_payload_to_send, timeout=timeout) as response:
+                    # Log headers right after request potentially
+                    # self.logger.debug(f"[{log_session_id}] Stream Request Headers: {response.request.headers}")
+                    if response.status_code != 200:
+                         error_body = await response.aread() # Read error body
+                         error_text = error_body.decode('utf-8', errors='replace')[:1000] # Decode safely
+                         self.logger.error(f"[{log_session_id}] Stream API Error: Status {response.status_code}. Response: {error_text}...")
+                         yield f"[Streaming Error: API returned status {response.status_code}]"
+                         # Try to parse common error structure
+                         try:
+                             err_json = json.loads(error_text)
+                             if "error" in err_json and isinstance(err_json["error"], dict):
+                                 err_detail = err_json["error"].get("message", "Unknown API error")
+                                 yield f"\n[Detail: {err_detail}]"
+                         except json.JSONDecodeError: pass # Ignore if error body wasn't JSON
+                         return # Stop generation
+
+                    self.logger.debug(f"[{log_session_id}] Stream connection successful (Status {response.status_code}). Reading chunks...")
+                    async for line in response.aiter_lines():
+                        if line.startswith("data:"):
+                            data_content = line[len("data:"):].strip()
+                            if data_content == "[DONE]":
+                                self.logger.debug(f"[{log_session_id}] Received [DONE] signal.")
+                                stream_successful = True
+                                break # Exit the loop cleanly
+                            if data_content:
+                                try:
+                                    chunk = json.loads(data_content)
+                                    # Common OpenAI structure: choices[0].delta.content
+                                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                    text_chunk = delta.get("content")
+                                    if text_chunk: # Ensure content exists and is not empty/null
+                                        yield text_chunk
+                                    # Log other delta info if needed (e.g., role, finish_reason)
+                                    # finish_reason = chunk.get("choices", [{}])[0].get("finish_reason")
+                                    # if finish_reason: logger.debug(f"[{log_session_id}] Stream finish reason: {finish_reason}")
+                                except json.JSONDecodeError:
+                                    self.logger.warning(f"[{log_session_id}] Failed to decode JSON data chunk: '{data_content}'")
+                                except (IndexError, KeyError, TypeError) as e_parse:
+                                    self.logger.warning(f"[{log_session_id}] Error parsing stream chunk structure ({type(e_parse).__name__}): {chunk}")
+                        elif line.strip(): # Log non-empty, non-data lines if needed
+                             self.logger.debug(f"[{log_session_id}] Received non-data line: '{line}'")
+
+        except httpx.TimeoutException as e_timeout:
+            self.logger.error(f"[{log_session_id}] HTTPX Timeout during stream after {timeout}s: {e_timeout}", exc_info=False)
+            yield f"[Streaming Error: Timeout after {timeout}s]"
+        except httpx.RequestError as e_req:
+            # Handles connection errors, DNS errors etc.
+            self.logger.error(f"[{log_session_id}] HTTPX RequestError during stream: {e_req}", exc_info=True)
+            yield f"[Streaming Error: Network request failed - {type(e_req).__name__}]"
+        except asyncio.CancelledError:
+             self.logger.info(f"[{log_session_id}] Final stream call explicitly cancelled.")
+             yield "[Streaming Error: Cancelled]"
+             raise # Propagate cancellation
+        except Exception as e_stream:
+            self.logger.error(f"[{log_session_id}] Unexpected error during final LLM stream: {e_stream}", exc_info=True)
+            yield f"[Streaming Error: Unexpected error - {type(e_stream).__name__}]"
+        finally:
+             # Ensure final status is emitted regardless of how the stream ended
+             self.logger.info(f"[{log_session_id}] Final LLM stream processing finished.")
+             status_to_emit = final_status_message
+             if not stream_successful:
+                  status_to_emit += " (Stream Interrupted or Failed)"
+             await self._emit_status(
+                 event_emitter=event_emitter,
+                 session_id=extracted_session_id, # Use extracted ID
+                 description=status_to_emit,
+                 done=True # Mark as done since streaming finished/failed
+             )
 
     # --- Helper Methods for process_turn ---
-
-    async def _initialize_turn_state(
-        self, body: Dict, __user__: Optional[dict]
-    ) -> Tuple[str, str, Any, List[Dict], bool, Dict]:
-        """
-        Validates input, gets/creates session, parses user valves, syncs history,
-        and detects regeneration.
-        """
-        user_id = "default_user"
-        if isinstance(__user__, dict) and "id" in __user__:
-            user_id = __user__["id"]
-        else:
-            self.logger.warning(f"User info/ID missing. Using '{user_id}'.")
-
-        chat_id = body.get("chat_id") # Get chat_id from body if available (fallback)
-        if not chat_id: # Prefer chat_id from body, fallback to session_id logic if needed
-            session_id = body.get("session_id", f"user_{user_id}_chat_unknown") # Basic fallback
-            self.logger.warning(f"chat_id missing in body, using derived session_id: {session_id}")
-        else:
-            safe_chat_id_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(chat_id))
-            session_id = f"user_{user_id}_chat_{safe_chat_id_part}"
-
-        self.logger.info(f"Derived Session ID: {session_id}")
-
-        # Get/Create Session State & Handle User Valves
-        session_state = self.session_manager.get_or_create_session(session_id)
-        user_valves_obj = None
-        if isinstance(__user__, dict) and "valves" in __user__:
-            raw_user_valves = __user__["valves"]
-            try:
-                user_valves_obj = self.config.UserValves(**(raw_user_valves if isinstance(raw_user_valves, dict) else {})) # Use config's UserValves
-                self.logger.info(f"[{session_id}] Parsed UserValves.")
-            except Exception as e_parse_uv:
-                self.logger.warning(f"[{session_id}] Failed to parse UserValves: {e_parse_uv}. Using defaults.")
-                user_valves_obj = self.config.UserValves()
-        else:
-            self.logger.debug(f"[{session_id}] No __user__['valves'] found. Using default UserValves.")
-            user_valves_obj = self.config.UserValves()
-
-        self.session_manager.set_user_valves(session_id, user_valves_obj)
-
-        # Synchronize History & Detect Regeneration
-        incoming_messages = body.get("messages", [])
-        stored_history = self.session_manager.get_active_history(session_id) or []
-        previous_input = self.session_manager.get_previous_input_messages(session_id)
-
-        if incoming_messages != stored_history:
-            if len(incoming_messages) < len(stored_history):
-                self.logger.warning(f"[{session_id}] Incoming history shorter than stored. Resetting.")
-                self.session_manager.set_active_history(session_id, incoming_messages.copy())
-                self.session_manager.set_last_summary_index(session_id, -1)
-            else:
-                self.logger.debug(f"[{session_id}] Updating active history (Len: {len(incoming_messages)}).")
-                self.session_manager.set_active_history(session_id, incoming_messages.copy())
-        else:
-            self.logger.debug(f"[{session_id}] Incoming history matches stored.")
-
-        current_active_history = self.session_manager.get_active_history(session_id) # Get the potentially updated history
-
-        # Store current input for next cycle's regeneration check BEFORE potential modifications
-        self.session_manager.set_previous_input_messages(session_id, incoming_messages.copy())
-
-        is_regeneration_heuristic = (
-             previous_input is not None and
-             incoming_messages == previous_input and
-             len(incoming_messages) > 0
-        )
-
-        return session_id, user_id, user_valves_obj, current_active_history, is_regeneration_heuristic, session_state
-
 
     async def _determine_effective_query(
         self, session_id: str, current_active_history: List[Dict], is_regeneration_heuristic: bool
     ) -> Tuple[str, List[Dict]]:
         """ Determines the effective user query and the history slice preceding it. """
         effective_user_message_index = -1
+        # Ensure messages are dicts with 'role' before checking
         user_message_indices = [i for i, msg in enumerate(current_active_history) if isinstance(msg, dict) and msg.get("role") == "user"]
 
         if not user_message_indices:
             self.logger.error(f"[{session_id}] No user messages found in history.")
-            # Return empty defaults, main process_turn should handle this error earlier
-            return "", []
+            return "", [] # Return empty defaults, caller must handle
 
+        # Determine index based on regeneration
         if is_regeneration_heuristic:
+            # Use second-to-last user msg if available, else the last (shouldn't happen if regen needs >1 turn)
             effective_user_message_index = user_message_indices[-2] if len(user_message_indices) >= 2 else user_message_indices[-1]
             log_level = self.logger.info if len(user_message_indices) >= 2 else self.logger.warning
-            log_level(f"[{session_id}] Regen: Using user message index {effective_user_message_index} as query.")
+            log_level(f"[{session_id}] Regen: Using user message at index {effective_user_message_index} as query base.")
         else:
+            # Use the very last user message
             effective_user_message_index = user_message_indices[-1]
-            self.logger.debug(f"[{session_id}] Normal: Using user message index {effective_user_message_index} as query.")
+            self.logger.debug(f"[{session_id}] Normal: Using user message at index {effective_user_message_index} as query base.")
+
+        # Ensure index is valid before slicing
+        if effective_user_message_index < 0 or effective_user_message_index >= len(current_active_history):
+             self.logger.error(f"[{session_id}] Calculated effective user index {effective_user_message_index} is out of bounds.")
+             return "", [] # Return empty defaults
 
         effective_user_message = current_active_history[effective_user_message_index]
+        # History for processing includes everything *before* the effective user message
         history_for_processing = current_active_history[:effective_user_message_index]
-        latest_user_query_str = effective_user_message.get("content", "")
+        latest_user_query_str = effective_user_message.get("content", "") if isinstance(effective_user_message, dict) else ""
 
-        self.logger.debug(f"[{session_id}] Effective query set (len: {len(latest_user_query_str)}). History slice len: {len(history_for_processing)}.")
+        self.logger.debug(f"[{session_id}] Effective query set (len: {len(latest_user_query_str)}). History slice for processing len: {len(history_for_processing)}.")
         return latest_user_query_str, history_for_processing
 
 
@@ -288,88 +434,21 @@ class SessionPipeOrchestrator:
         """ Checks and performs T1 summarization, skipping LLM call if regenerating an existing block. """
         await self._emit_status(event_emitter, session_id, "Status: Checking summarization...")
 
-        # --- Regeneration check flag is now used INSIDE manage_tier1_summarization ---
-        # We no longer skip the entire function call here.
-
         summarization_performed_successfully = False
         generated_summary = None
         summarization_prompt_tokens = -1
         summarization_output_tokens = -1
 
+        # Check prerequisites
         can_summarize = all([
             self._manage_memory_func, self._tokenizer, self._count_tokens_func,
             self.sqlite_cursor, self._async_llm_call_wrapper,
             hasattr(self.config, 'summarizer_api_url') and self.config.summarizer_api_url,
             hasattr(self.config, 'summarizer_api_key') and self.config.summarizer_api_key,
-            current_active_history,
+            current_active_history, # Ensure history is not empty
         ])
 
-        if can_summarize:
-            summarizer_llm_config = {
-                 "url": self.config.summarizer_api_url, "key": self.config.summarizer_api_key,
-                 "temp": getattr(self.config, 'summarizer_temperature', 0.5),
-                 "sys_prompt": getattr(self.config, 'summarizer_system_prompt', "Summarize this dialogue."),
-             }
-            new_last_summary_idx = -1
-            prompt_tokens = -1
-            t0_end_idx = -1
-
-            # Get start index from DB
-            db_max_index = None
-            current_last_summary_index_for_memory = -1
-            try:
-                db_max_index = await get_max_t1_end_index(self.sqlite_cursor, session_id)
-                if isinstance(db_max_index, int) and db_max_index >= 0:
-                    current_last_summary_index_for_memory = db_max_index
-                    self.logger.info(f"[{session_id}] T1: Start Index from DB: {current_last_summary_index_for_memory}")
-                else:
-                    self.logger.info(f"[{session_id}] T1: No valid start index in DB. Starting from -1.")
-            except Exception as e_get_max:
-                self.logger.error(f"[{session_id}] T1: Error getting start index: {e_get_max}. Starting from -1.", exc_info=True)
-                current_last_summary_index_for_memory = -1
-
-            # Nested save function
-            async def _async_save_t1_summary(summary_id: str, session_id: str, user_id: str, summary_text: str, metadata: Dict):
-                 return await add_tier1_summary(cursor=self.sqlite_cursor, summary_id=summary_id, session_id=session_id, user_id=user_id, summary_text=summary_text, metadata=metadata)
-
-            try:
-                self.logger.debug(f"[{session_id}] Calling manage_tier1_summarization with start index = {current_last_summary_index_for_memory} (Regen={is_regeneration_heuristic})")
-                # <<< Pass cursor and regeneration flag >>>
-                summarization_performed, generated_summary_text, new_last_summary_idx, prompt_tokens, t0_end_idx = await self._manage_memory_func(
-                    current_last_summary_index=current_last_summary_index_for_memory,
-                    active_history=current_active_history,
-                    t0_token_limit=getattr(self.config, 't0_active_history_token_limit', 4000),
-                    t1_chunk_size_target=getattr(self.config, 't1_summarization_chunk_token_target', 2000),
-                    tokenizer=self._tokenizer,
-                    llm_call_func=self._async_llm_call_wrapper,
-                    llm_config=summarizer_llm_config,
-                    add_t1_summary_func=_async_save_t1_summary,
-                    session_id=session_id, user_id=user_id,
-                    cursor=self.sqlite_cursor, # <<< Pass cursor
-                    is_regeneration=is_regeneration_heuristic, # <<< Pass flag
-                    dialogue_only_roles=self._dialogue_roles,
-                )
-                # <<< End Pass >>>
-
-                if summarization_performed:
-                    summarization_performed_successfully = True
-                    generated_summary = generated_summary_text
-                    summarization_prompt_tokens = prompt_tokens
-                    # Update in-memory index for this cycle
-                    self.session_manager.set_last_summary_index(session_id, new_last_summary_idx)
-                    if generated_summary and self._count_tokens_func and self._tokenizer:
-                        try: summarization_output_tokens = self._count_tokens_func(generated_summary, self._tokenizer)
-                        except Exception: summarization_output_tokens = -1
-                    self.logger.info(f"[{session_id}] T1 summary generated/saved. NewIdx: {new_last_summary_idx}.")
-                    await self._emit_status(event_emitter, session_id, "Status: Summary generated.", done=False)
-                else:
-                    # This log now also covers the case where summarization was skipped due to regeneration check
-                    self.logger.debug(f"[{session_id}] T1 summarization skipped or criteria not met.")
-            except TypeError as e_type:
-                 self.logger.error(f"[{session_id}] Orchestrator TYPE ERROR calling T1 manage func: {e_type}. Signature mismatch?", exc_info=True)
-            except Exception as e_manage:
-                self.logger.error(f"[{session_id}] Orchestrator EXCEPTION during T1 manage call: {e_manage}", exc_info=True)
-        else:
+        if not can_summarize:
              missing_prereqs = [p for p, v in {
                  "manage_func": self._manage_memory_func, "tokenizer": self._tokenizer,
                  "count_func": self._count_tokens_func, "db_cursor": self.sqlite_cursor,
@@ -379,7 +458,78 @@ class SessionPipeOrchestrator:
                  "history": bool(current_active_history)
              }.items() if not v]
              self.logger.warning(f"[{session_id}] Skipping T1 check: Missing prerequisites: {', '.join(missing_prereqs)}.")
+             return False, None, -1, -1 # Return defaults
 
+        # Prepare config and call memory manager
+        summarizer_llm_config = {
+             "url": self.config.summarizer_api_url, "key": self.config.summarizer_api_key,
+             "temp": getattr(self.config, 'summarizer_temperature', 0.5),
+             "sys_prompt": getattr(self.config, 'summarizer_system_prompt', "Summarize this dialogue."),
+        }
+        new_last_summary_idx = -1
+        prompt_tokens = -1
+        t0_end_idx = -1
+        db_max_index = None
+        current_last_summary_index_for_memory = -1
+
+        # Get start index from DB
+        try:
+            db_max_index = await get_max_t1_end_index(self.sqlite_cursor, session_id)
+            if isinstance(db_max_index, int) and db_max_index >= 0:
+                current_last_summary_index_for_memory = db_max_index
+                self.logger.info(f"[{session_id}] T1: Start Index from DB: {current_last_summary_index_for_memory}")
+            else:
+                self.logger.info(f"[{session_id}] T1: No valid start index in DB. Starting from -1.")
+        except Exception as e_get_max:
+            self.logger.error(f"[{session_id}] T1: Error getting start index: {e_get_max}. Starting from -1.", exc_info=True)
+            current_last_summary_index_for_memory = -1
+
+        # Define nested save function
+        async def _async_save_t1_summary(summary_id: str, session_id: str, user_id: str, summary_text: str, metadata: Dict) -> bool:
+             """Nested async function to save T1 summary via library function."""
+             try:
+                 return await add_tier1_summary(cursor=self.sqlite_cursor, summary_id=summary_id, session_id=session_id, user_id=user_id, summary_text=summary_text, metadata=metadata)
+             except Exception as e_save:
+                 self.logger.error(f"[{session_id}] Exception in nested _async_save_t1_summary for {summary_id}: {e_save}", exc_info=True)
+                 return False
+
+        # Call the main memory management function
+        try:
+            self.logger.debug(f"[{session_id}] Calling manage_tier1_summarization with start index = {current_last_summary_index_for_memory} (Regen={is_regeneration_heuristic})")
+            summarization_performed, generated_summary_text, new_last_summary_idx, prompt_tokens, t0_end_idx = await self._manage_memory_func(
+                current_last_summary_index=current_last_summary_index_for_memory,
+                active_history=current_active_history,
+                t0_token_limit=getattr(self.config, 't0_active_history_token_limit', 4000),
+                t1_chunk_size_target=getattr(self.config, 't1_summarization_chunk_token_target', 2000),
+                tokenizer=self._tokenizer,
+                llm_call_func=self._async_llm_call_wrapper,
+                llm_config=summarizer_llm_config,
+                add_t1_summary_func=_async_save_t1_summary, # Pass nested save func
+                session_id=session_id, user_id=user_id,
+                cursor=self.sqlite_cursor, # Pass cursor
+                is_regeneration=is_regeneration_heuristic, # Pass flag
+                dialogue_only_roles=self._dialogue_roles,
+            )
+
+            if summarization_performed:
+                summarization_performed_successfully = True
+                generated_summary = generated_summary_text
+                summarization_prompt_tokens = prompt_tokens
+                # Calculate output tokens
+                if generated_summary and self._count_tokens_func and self._tokenizer:
+                    try: summarization_output_tokens = self._count_tokens_func(generated_summary, self._tokenizer)
+                    except Exception: summarization_output_tokens = -1
+                self.logger.info(f"[{session_id}] T1 summary generated/saved. New Idx: {new_last_summary_idx}, PromptTok: {summarization_prompt_tokens}, OutTok: {summarization_output_tokens}.")
+                await self._emit_status(event_emitter, session_id, "Status: Summary generated.", done=False)
+            else:
+                # Log covers skipped due to regen check or criteria not met
+                self.logger.debug(f"[{session_id}] T1 summarization skipped or criteria not met (Returned Index: {new_last_summary_idx}).")
+        except TypeError as e_type:
+             self.logger.error(f"[{session_id}] Orchestrator TYPE ERROR calling T1 manage func: {e_type}. Signature mismatch?", exc_info=True)
+        except Exception as e_manage:
+            self.logger.error(f"[{session_id}] Orchestrator EXCEPTION during T1 manage call: {e_manage}", exc_info=True)
+
+        # Return calculated values
         return summarization_performed_successfully, generated_summary, summarization_prompt_tokens, summarization_output_tokens
 
 
@@ -388,95 +538,123 @@ class SessionPipeOrchestrator:
     ) -> None:
         """ Handles the transition of the oldest T1 summary to T2 if needed. """
         await self._emit_status(event_emitter, session_id, "Status: Checking long-term memory capacity...")
-        tier2_collection = None # Initialize locally
+        tier2_collection = None
 
-        if self.chroma_client and chroma_embed_wrapper:
+        # Check prerequisites for T2 transition
+        inventory_enabled = getattr(self.config, 'enable_inventory_management', False) # Check if inventory active
+        max_t1_blocks = getattr(self.config, 'max_stored_summary_blocks', 0)
+
+        can_transition = all([
+            t1_success, # Only run if a T1 summary was actually generated this turn
+            self.chroma_client is not None,
+            chroma_embed_wrapper is not None,
+            self.sqlite_cursor is not None,
+            max_t1_blocks > 0
+        ])
+
+        if not can_transition:
+            reason = "(T1 did not run)" if not t1_success else "(Prerequisites not met)"
+            self.logger.debug(f"[{session_id}] Skipping T1->T2 transition check: {reason}.")
+            return
+
+        # Get T2 collection instance
+        try:
             base_prefix = getattr(self.config, 'summary_collection_prefix', 'sm_t2_')
             safe_session_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", session_id)[:50]
             tier2_collection_name = f"{base_prefix}{safe_session_part}"[:63]
             tier2_collection = await get_or_create_chroma_collection(
                  self.chroma_client, tier2_collection_name, chroma_embed_wrapper
             )
+            if not tier2_collection:
+                 self.logger.error(f"[{session_id}] Failed to get/create T2 collection '{tier2_collection_name}'. Skipping transition.")
+                 return
+        except Exception as e_get_coll:
+             self.logger.error(f"[{session_id}] Error getting T2 collection: {e_get_coll}. Skipping transition.", exc_info=True)
+             return
 
-        can_transition = all([
-            t1_success, tier2_collection is not None, # Check if T1 actually happened this turn
-            chroma_embed_wrapper is not None, self.sqlite_cursor is not None,
-            getattr(self.config, 'max_stored_summary_blocks', 0) > 0
-        ])
-
-        if not can_transition:
-            self.logger.debug(f"[{session_id}] Skipping T1->T2 transition check: Prerequisites not met (T1 Success: {t1_success}).")
-            return
-
+        # Perform transition logic
         try:
-            max_t1_blocks = self.config.max_stored_summary_blocks
             current_tier1_count = await get_tier1_summary_count(self.sqlite_cursor, session_id)
 
             if current_tier1_count == -1:
                 self.logger.error(f"[{session_id}] Failed get T1 count. Skipping T1->T2 check.")
             elif current_tier1_count > max_t1_blocks:
-                self.logger.info(f"[{session_id}] T1 limit ({max_t1_blocks}) exceeded ({current_tier1_count}). Transitioning...")
+                self.logger.info(f"[{session_id}] T1 limit ({max_t1_blocks}) exceeded ({current_tier1_count}). Transitioning oldest...")
                 await self._emit_status(event_emitter, session_id, "Status: Archiving oldest summary...")
+
                 oldest_summary_data = await get_oldest_tier1_summary(self.sqlite_cursor, session_id)
+                if not oldest_summary_data:
+                    self.logger.warning(f"[{session_id}] T1 count exceeded limit, but couldn't retrieve oldest summary.")
+                    return
 
-                if oldest_summary_data:
-                    oldest_id, oldest_text, oldest_metadata = oldest_summary_data
-                    embedding_vector = None; embedding_successful = False
-                    try:
-                        embedding_list = await asyncio.to_thread(chroma_embed_wrapper, [oldest_text])
-                        if isinstance(embedding_list, list) and len(embedding_list) == 1 and isinstance(embedding_list[0], list) and len(embedding_list[0]) > 0:
-                             embedding_vector = embedding_list[0]; embedding_successful = True
-                        else: self.logger.error(f"[{session_id}] T1->T2 Embed: Invalid structure: {embedding_list}")
-                    except Exception as embed_e: self.logger.error(f"[{session_id}] EXCEPTION embedding T1->T2 {oldest_id}: {embed_e}", exc_info=True)
+                oldest_id, oldest_text, oldest_metadata = oldest_summary_data
+                embedding_vector = None; embedding_successful = False
 
-                    if embedding_successful and embedding_vector:
-                        added_to_t2 = False; deleted_from_t1 = False
-                        chroma_metadata = oldest_metadata.copy()
-                        chroma_metadata["transitioned_from_t1"] = True
-                        chroma_metadata["original_t1_id"] = oldest_id
-                        sanitized_chroma_metadata = {k: (v if isinstance(v, (str, int, float, bool)) else str(v)) for k, v in chroma_metadata.items() if v is not None}
-                        tier2_id = f"t2_{oldest_id}"
-                        self.logger.info(f"[{session_id}] Adding summary {tier2_id} to T2 '{tier2_collection.name}'...")
-                        added_to_t2 = await add_to_chroma_collection(
-                             tier2_collection, ids=[tier2_id], embeddings=[embedding_vector],
-                             metadatas=[sanitized_chroma_metadata], documents=[oldest_text]
-                        )
-                        if added_to_t2:
-                             self.logger.info(f"[{session_id}] Added {tier2_id} to T2. Deleting T1 {oldest_id}...")
-                             deleted_from_t1 = await delete_tier1_summary(self.sqlite_cursor, oldest_id)
-                             if deleted_from_t1: await self._emit_status(event_emitter, session_id, "Status: Summary archive complete.", done=False)
-                             else: self.logger.warning(f"[{session_id}] Added {tier2_id} to T2, but FAILED delete T1 {oldest_id}.")
-                    else: self.logger.error(f"[{session_id}] Skipping T2 add for {oldest_id}: embedding failed.")
-                else: self.logger.warning(f"[{session_id}] T1 count exceeded limit, but couldn't retrieve oldest.")
+                # Embed the oldest summary text
+                try:
+                    # Ensure wrapper call runs in a thread if it's synchronous internally
+                    embedding_list = await asyncio.to_thread(chroma_embed_wrapper, [oldest_text])
+                    if isinstance(embedding_list, list) and len(embedding_list) == 1 and isinstance(embedding_list[0], list) and len(embedding_list[0]) > 0:
+                         embedding_vector = embedding_list[0]; embedding_successful = True
+                    else: self.logger.error(f"[{session_id}] T1->T2 Embed: Invalid structure returned by wrapper: {type(embedding_list)}")
+                except Exception as embed_e:
+                    self.logger.error(f"[{session_id}] EXCEPTION embedding T1->T2 summary {oldest_id}: {embed_e}", exc_info=True)
+
+                # Add to T2 and delete from T1 if embedding was successful
+                if embedding_successful and embedding_vector:
+                    added_to_t2 = False; deleted_from_t1 = False
+                    chroma_metadata = oldest_metadata.copy() # Avoid modifying original dict
+                    chroma_metadata["transitioned_from_t1"] = True
+                    chroma_metadata["original_t1_id"] = oldest_id
+                    # Sanitize metadata for ChromaDB (only basic types allowed)
+                    sanitized_chroma_metadata = {k: (v if isinstance(v, (str, int, float, bool)) else str(v)) for k, v in chroma_metadata.items() if v is not None}
+                    tier2_id = f"t2_{oldest_id}"
+
+                    self.logger.info(f"[{session_id}] Adding summary {tier2_id} to T2 collection '{tier2_collection.name}'...")
+                    added_to_t2 = await add_to_chroma_collection(
+                         tier2_collection, ids=[tier2_id], embeddings=[embedding_vector],
+                         metadatas=[sanitized_chroma_metadata], documents=[oldest_text]
+                    )
+
+                    if added_to_t2:
+                         self.logger.info(f"[{session_id}] Added {tier2_id} to T2. Deleting T1 summary {oldest_id}...")
+                         deleted_from_t1 = await delete_tier1_summary(self.sqlite_cursor, oldest_id)
+                         if deleted_from_t1:
+                             self.logger.info(f"[{session_id}] Successfully deleted T1 summary {oldest_id}.")
+                             await self._emit_status(event_emitter, session_id, "Status: Summary archive complete.", done=False)
+                         else:
+                             # Critical issue if T1 deletion fails after T2 add
+                             self.logger.critical(f"[{session_id}] Added {tier2_id} to T2, but FAILED TO DELETE T1 {oldest_id}. Potential data duplication!")
+                    else:
+                        self.logger.error(f"[{session_id}] Failed to add summary {tier2_id} to T2 collection.")
+                else:
+                    self.logger.error(f"[{session_id}] Skipping T2 addition for T1 summary {oldest_id}: Embedding failed.")
             else:
-                self.logger.debug(f"[{session_id}] T1 count ({current_tier1_count}) within limit. No transition needed.")
+                self.logger.debug(f"[{session_id}] T1 count ({current_tier1_count}) within limit ({max_t1_blocks}). No transition needed.")
         except Exception as e_t2_trans:
             self.logger.error(f"[{session_id}] Unexpected error during T1->T2 transition: {e_t2_trans}", exc_info=True)
-
-
-    async def _resolve_embedding_context(self, __request__, __user__) -> Tuple[Optional[Callable], Optional[Any]]:
-        """Gets OWI embedding function and creates ChromaDB wrapper."""
-        # This method requires access to the Pipe's _owi_embedding_func_cache
-        # and OWI-specific imports/logic, so it's kept separate for now.
-        # It might need to be called from the Pipe class itself, or the cache
-        # needs to be managed differently if called from Orchestrator.
-        # For now, assume it's called by the Pipe and results passed to Orchestrator.
-        # Placeholder implementation:
-        self.logger.warning("_resolve_embedding_context needs OWI specific logic from Pipe class.")
-        return None, None # Simulate failure or needs implementation within Pipe class
 
 
     async def _get_t1_summaries(self, session_id: str) -> Tuple[List[str], int]:
         """ Fetches recent T1 summaries from the database. """
         recent_t1_summaries = []
         t1_retrieved_count = 0
-        if self.sqlite_cursor and getattr(self.config, 'max_stored_summary_blocks', 0) > 0:
+        max_blocks_t1 = getattr(self.config, 'max_stored_summary_blocks', 0)
+
+        if self.sqlite_cursor and max_blocks_t1 > 0:
              try:
-                 max_blocks = getattr(self.config, 'max_stored_summary_blocks', 10) # Ensure default
-                 recent_t1_summaries = await get_recent_tier1_summaries(self.sqlite_cursor, session_id, max_blocks)
+                 # Use max_blocks as the limit for retrieval
+                 recent_t1_summaries = await get_recent_tier1_summaries(self.sqlite_cursor, session_id, max_blocks_t1)
                  t1_retrieved_count = len(recent_t1_summaries)
-             except Exception as e_get_t1: self.logger.error(f"[{session_id}] Error retrieving T1: {e_get_t1}", exc_info=True)
-        if t1_retrieved_count > 0: self.logger.info(f"[{session_id}] Retrieved {t1_retrieved_count} T1 summaries.")
+             except Exception as e_get_t1:
+                 self.logger.error(f"[{session_id}] Error retrieving T1 summaries: {e_get_t1}", exc_info=True)
+                 recent_t1_summaries = []; t1_retrieved_count = 0 # Reset on error
+        elif not self.sqlite_cursor:
+             self.logger.warning(f"[{session_id}] Cannot get T1 summaries: SQLite cursor unavailable.")
+        elif max_blocks_t1 <= 0:
+             self.logger.debug(f"[{session_id}] Skipping T1 summary retrieval: max_stored_summary_blocks is {max_blocks_t1}.")
+
+        if t1_retrieved_count > 0: self.logger.info(f"[{session_id}] Retrieved {t1_retrieved_count} T1 summaries for context.")
         return recent_t1_summaries, t1_retrieved_count
 
 
@@ -484,111 +662,156 @@ class SessionPipeOrchestrator:
         self, session_id: str, history_for_processing: List[Dict], latest_user_query_str: str,
         embedding_func: Optional[Callable], chroma_embed_wrapper: Optional[Any], event_emitter: Optional[Callable]
     ) -> Tuple[List[str], int]:
-        """ Performs T2 RAG lookup. """
+        """ Performs T2 RAG lookup based on a generated query. """
         await self._emit_status(event_emitter, session_id, "Status: Searching long-term memory...")
         retrieved_rag_summaries = []
         t2_retrieved_count = 0
         tier2_collection = None
+        n_results_t2 = getattr(self.config, 'rag_summary_results_count', 0)
 
-        if self.chroma_client and chroma_embed_wrapper:
+        # Check prerequisites for T2 RAG
+        can_rag = all([
+            self.chroma_client is not None,
+            chroma_embed_wrapper is not None, # Wrapper needed to get collection
+            latest_user_query_str, # Need query to generate RAGQ
+            embedding_func is not None, # Need OWI embedding func for query
+            self._generate_rag_query_func is not None,
+            self._async_llm_call_wrapper is not None,
+            getattr(self.config, 'ragq_llm_api_url', None),
+            getattr(self.config, 'ragq_llm_api_key', None),
+            getattr(self.config, 'ragq_llm_prompt', None),
+            n_results_t2 > 0 # Need to retrieve at least 1 result
+        ])
+
+        if not can_rag:
+            self.logger.info(f"[{session_id}] Skipping T2 RAG check: Prerequisites not met (RAG Results Count: {n_results_t2}).")
+            return [], 0
+
+        # Get T2 Collection
+        try:
             base_prefix = getattr(self.config, 'summary_collection_prefix', 'sm_t2_')
             safe_session_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", session_id)[:50]
             tier2_collection_name = f"{base_prefix}{safe_session_part}"[:63]
             tier2_collection = await get_or_create_chroma_collection(
                  self.chroma_client, tier2_collection_name, chroma_embed_wrapper
             )
+            if not tier2_collection:
+                 self.logger.error(f"[{session_id}] Failed get/create T2 collection '{tier2_collection_name}'. Skipping RAG.")
+                 return [], 0
+        except Exception as e_get_coll_rag:
+             self.logger.error(f"[{session_id}] Error getting T2 collection for RAG: {e_get_coll_rag}. Skipping.", exc_info=True)
+             return [], 0
 
-        can_rag = all([
-            tier2_collection is not None, latest_user_query_str, # Use query directly
-            embedding_func is not None, self._generate_rag_query_func is not None,
-            self._async_llm_call_wrapper is not None,
-            getattr(self.config, 'ragq_llm_api_url', None), getattr(self.config, 'ragq_llm_api_key', None),
-            getattr(self.config, 'ragq_llm_prompt', None), getattr(self.config, 'rag_summary_results_count', 0) > 0,
-        ])
+        # Check if collection is empty
+        try:
+            t2_doc_count = await get_chroma_collection_count(tier2_collection)
+            if t2_doc_count <= 0:
+                self.logger.info(f"[{session_id}] Skipping T2 RAG: Collection '{tier2_collection.name}' is empty or count failed ({t2_doc_count}).")
+                return [], 0
+        except Exception as e_count:
+             self.logger.error(f"[{session_id}] Error checking T2 collection count: {e_count}. Skipping RAG.", exc_info=True)
+             return [], 0
 
-        if not can_rag:
-            self.logger.info(f"[{session_id}] Skipping T2 RAG check: Prerequisites not met.")
-            return [], 0
-
-        t2_doc_count = await get_chroma_collection_count(tier2_collection)
-        if t2_doc_count <= 0:
-            self.logger.info(f"[{session_id}] Skipping T2 RAG: Collection '{tier2_collection.name}' is empty or count failed ({t2_doc_count}).")
-            return [], 0
-
+        # Proceed with query generation and execution
         try:
             await self._emit_status(event_emitter, session_id, "Status: Generating search query...")
+            # Get dialogue context for the RAG query generator LLM
             context_messages_for_ragq = self._get_recent_turns_func(
-                 history_for_processing, count=6, exclude_last=False, roles=self._dialogue_roles
+                 history_for_processing, # Use history BEFORE the current query
+                 count=getattr(self.config, 'refiner_history_count', 6), # Use same history count?
+                 exclude_last=False, # Include all of this slice
+                 roles=self._dialogue_roles
             )
             dialogue_context_str = self._format_history_func(context_messages_for_ragq) if context_messages_for_ragq else "[No recent history]"
+
+            # Prepare config for RAG Query LLM
             ragq_llm_config = {
                  "url": self.config.ragq_llm_api_url, "key": self.config.ragq_llm_api_key,
-                 "temp": getattr(self.config, 'ragq_llm_temperature', 0.3), "prompt": self.config.ragq_llm_prompt,
+                 "temp": getattr(self.config, 'ragq_llm_temperature', 0.3),
+                 "prompt": self.config.ragq_llm_prompt,
             }
             rag_query = await self._generate_rag_query_func(
-                 latest_message_str=latest_user_query_str, dialogue_context_str=dialogue_context_str,
-                 llm_call_func=self._async_llm_call_wrapper, llm_config=ragq_llm_config,
+                 latest_message_str=latest_user_query_str, # The user's current effective query
+                 dialogue_context_str=dialogue_context_str,
+                 llm_call_func=self._async_llm_call_wrapper,
+                 llm_config=ragq_llm_config,
                  caller_info=f"Orch_RAGQ_{session_id}",
             )
 
             if not (rag_query and isinstance(rag_query, str) and not rag_query.startswith("[Error:") and rag_query.strip()):
-                 self.logger.error(f"[{session_id}] RAG Query Generation failed: {rag_query}.")
+                 self.logger.error(f"[{session_id}] RAG Query Generation failed or returned empty: Result='{rag_query}'. Skipping RAG.")
                  return [], 0
+            self.logger.info(f"[{session_id}] Generated RAG Query: '{rag_query[:100]}...'")
 
-            if not embedding_func:
-                self.logger.error(f"[{session_id}] Cannot embed RAG query: Embedding func missing.")
-                return [], 0
-
+            # Embed the generated query using the OWI function
             await self._emit_status(event_emitter, session_id, "Status: Embedding search query...")
             query_embedding = None; query_embedding_successful = False
             try:
+                # Ensure embedding_func exists and is callable
+                if not callable(embedding_func):
+                     self.logger.error(f"[{session_id}] Cannot embed RAG query: OWI Embedding function unavailable/invalid.")
+                     return [], 0
+
                 # Use the global import if available
                 from open_webui.config import RAG_EMBEDDING_QUERY_PREFIX
+                # Embed in a thread as OWI func might be sync
                 query_embedding_list = await asyncio.to_thread(embedding_func, [rag_query], prefix=RAG_EMBEDDING_QUERY_PREFIX)
                 if isinstance(query_embedding_list, list) and len(query_embedding_list) == 1 and isinstance(query_embedding_list[0], list) and len(query_embedding_list[0]) > 0:
                      query_embedding = query_embedding_list[0]; query_embedding_successful = True
-                else: self.logger.error(f"[{session_id}] RAG query embed invalid structure: {query_embedding_list}.")
-            except Exception as embed_e: self.logger.error(f"[{session_id}] EXCEPTION RAG query embedding: {embed_e}", exc_info=True)
+                     self.logger.debug(f"[{session_id}] RAG query embedding successful (vector dim: {len(query_embedding)}).")
+                else:
+                     self.logger.error(f"[{session_id}] RAG query embed invalid structure returned: {type(query_embedding_list)}.")
+            except Exception as embed_e:
+                 self.logger.error(f"[{session_id}] EXCEPTION during RAG query embedding: {embed_e}", exc_info=True)
 
             if not (query_embedding_successful and query_embedding):
-                 self.logger.error(f"[{session_id}] Skipping T2 ChromaDB query: Embedding failed.")
+                 self.logger.error(f"[{session_id}] Skipping T2 ChromaDB query: RAG query embedding failed.")
                  return [], 0
 
-            n_results = self.config.rag_summary_results_count
-            await self._emit_status(event_emitter, session_id, f"Status: Searching vector store (top {n_results})...")
+            # Query ChromaDB
+            await self._emit_status(event_emitter, session_id, f"Status: Searching vector store (top {n_results_t2})...")
             rag_results_dict = await query_chroma_collection(
-                  tier2_collection, query_embeddings=[query_embedding], n_results=n_results,
-                  include=["documents", "distances", "metadatas"]
+                  tier2_collection, query_embeddings=[query_embedding], n_results=n_results_t2,
+                  include=["documents", "distances", "metadatas"] # Request necessary fields
             )
+
+            # Process results
             if rag_results_dict and isinstance(rag_results_dict.get("documents"), list) and rag_results_dict["documents"] and isinstance(rag_results_dict["documents"][0], list):
                   retrieved_docs = rag_results_dict["documents"][0]
                   if retrieved_docs:
                        retrieved_rag_summaries = retrieved_docs
                        t2_retrieved_count = len(retrieved_docs)
+                       # Log distances and IDs for debugging relevance
                        distances = rag_results_dict.get("distances", [[None]])[0]; ids = rag_results_dict.get("ids", [["N/A"]])[0]
                        dist_str = [f"{d:.4f}" for d in distances if d is not None]
                        self.logger.info(f"[{session_id}] Retrieved {t2_retrieved_count} docs from T2 RAG. IDs: {ids}, Dist: {dist_str}")
-                  else: self.logger.info(f"[{session_id}] T2 RAG query executed but returned no documents.")
-            else: self.logger.info(f"[{session_id}] T2 RAG query returned no matches or unexpected structure.")
+                  else:
+                       self.logger.info(f"[{session_id}] T2 RAG query executed but returned no documents.")
+            else:
+                 self.logger.info(f"[{session_id}] T2 RAG query returned no matches or unexpected structure: {type(rag_results_dict)}")
 
         except Exception as e_rag_outer:
             self.logger.error(f"[{session_id}] Unexpected error during outer T2 RAG processing: {e_rag_outer}", exc_info=True)
             retrieved_rag_summaries = []
-            t2_retrieved_count = 0
+            t2_retrieved_count = 0 # Ensure reset on error
 
         return retrieved_rag_summaries, t2_retrieved_count
 
 
+# --- Method Replacement 2: _prepare_and_refine_background (Includes Inventory) ---
     async def _prepare_and_refine_background(
         self, session_id: str, body: Dict, user_valves: Any,
         retrieved_t1_summaries: List[str], retrieved_rag_summaries: List[str],
         current_active_history: List[Dict], latest_user_query_str: str,
         event_emitter: Optional[Callable]
-    ) -> Tuple[str, str, int, int, bool, bool, bool, bool]:
-        """ Processes system prompt, applies refinement/cache logic, combines context. """
+    ) -> Tuple[str, str, int, int, bool, bool, bool, bool, str]: # Added formatted_inventory_string to return
+        """
+        Processes system prompt, applies refinement/cache logic, combines context (now including inventory).
+        MODIFIED to fetch, format, and include inventory data if enabled.
+        """
         await self._emit_status(event_emitter, session_id, "Status: Preparing context...")
 
-        # Process System Prompt & Extract Initial OWI Context
+        # --- 1. Process System Prompt & Extract OWI Context ---
         base_system_prompt_text = "You are helpful."
         extracted_owi_context = None
         initial_owi_context_tokens = -1
@@ -602,9 +825,9 @@ class SessionPipeOrchestrator:
                  elif not extracted_owi_context: self.logger.debug(f"[{session_id}] No OWI <context> tag found.")
                  if not base_system_prompt_text: base_system_prompt_text = "You are helpful."; self.logger.warning(f"[{session_id}] System prompt empty after clean. Using default.")
              except Exception as e_proc_sys: self.logger.error(f"[{session_id}] Error process_system_prompt: {e_proc_sys}.", exc_info=True); base_system_prompt_text = "You are helpful."; extracted_owi_context = None
-        else: self.logger.error(f"[{session_id}] process_system_prompt unavailable.")
+        else: self.logger.error(f"[{session_id}] process_system_prompt unavailable."); base_system_prompt_text = "You are helpful."
 
-        # Remove Specified Text Block
+        # --- 2. Remove Text Block from System Prompt ---
         session_text_block_to_remove = str(getattr(user_valves, 'text_block_to_remove', ''))
         if session_text_block_to_remove:
             self.logger.info(f"[{session_id}] Removing text block from base system prompt...")
@@ -612,18 +835,49 @@ class SessionPipeOrchestrator:
             temp_prompt = base_system_prompt_text.replace(session_text_block_to_remove, "")
             if len(temp_prompt) < original_len:
                 base_system_prompt_text = temp_prompt; self.logger.info(f"[{session_id}] Removed text block ({original_len - len(temp_prompt)} chars).")
-            else: self.logger.warning(f"[{session_id}] Text block for removal NOT FOUND.")
+            else: self.logger.warning(f"[{session_id}] Text block for removal '{session_text_block_to_remove[:50]}...' NOT FOUND.")
         else: self.logger.debug(f"[{session_id}] No text block for removal specified.")
 
-        # Apply session valve override for OWI processing
+        # --- 3. Apply OWI RAG Processing Valve ---
         session_process_owi_rag = bool(getattr(user_valves, 'process_owi_rag', True))
         if not session_process_owi_rag:
              self.logger.info(f"[{session_id}] Session valve 'process_owi_rag=False'. Discarding OWI context.")
              extracted_owi_context = None
              initial_owi_context_tokens = 0
 
-        # Context Refinement (RAG Cache OR Stateless OR None)
-        context_for_prompt = extracted_owi_context # Initialize
+        # --- 4. Fetch and Format Inventory Data (Conditional) ---
+        formatted_inventory_string = "[Inventory Management Disabled]"
+        raw_session_inventories = {}
+        inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
+
+        if inventory_enabled and self._get_all_inventories_db_func and self._format_inventory_func and self.sqlite_cursor:
+            self.logger.debug(f"[{session_id}] Inventory enabled, fetching data...")
+            try:
+                raw_session_inventories = await self._get_all_inventories_db_func(self.sqlite_cursor, session_id)
+                if raw_session_inventories:
+                    self.logger.info(f"[{session_id}] Retrieved inventory data for {len(raw_session_inventories)} characters.")
+                    try:
+                        formatted_inventory_string = self._format_inventory_func(raw_session_inventories)
+                        self.logger.info(f"[{session_id}] Formatted inventory string generated (len: {len(formatted_inventory_string)}).")
+                    except Exception as e_fmt_inv:
+                        self.logger.error(f"[{session_id}] Failed to format inventory string: {e_fmt_inv}", exc_info=True)
+                        formatted_inventory_string = "[Error Formatting Inventory]"
+                else:
+                    self.logger.info(f"[{session_id}] No inventory data found in DB for this session.")
+                    formatted_inventory_string = "[No Inventory Data Available]"
+            except Exception as e_get_inv:
+                self.logger.error(f"[{session_id}] Error retrieving inventory data from DB: {e_get_inv}", exc_info=True)
+                formatted_inventory_string = "[Error Retrieving Inventory]"
+        elif not inventory_enabled:
+            self.logger.debug(f"[{session_id}] Skipping inventory fetch: Feature disabled by valve.")
+        else:
+            missing_inv_funcs = [f for f, fn in {"db_get": self._get_all_inventories_db_func, "formatter": self._format_inventory_func, "cursor": self.sqlite_cursor}.items() if not fn]
+            self.logger.warning(f"[{session_id}] Skipping inventory fetch: Missing prerequisites: {missing_inv_funcs}")
+            formatted_inventory_string = "[Inventory Init/Config Error]"
+
+
+        # --- 5. Context Refinement (RAG Cache OR Stateless OR None) ---
+        context_for_prompt = extracted_owi_context # Start with OWI context (or None)
         refined_context_tokens = -1
         cache_update_performed = False
         cache_update_skipped = False
@@ -634,8 +888,10 @@ class SessionPipeOrchestrator:
         enable_rag_cache_global = getattr(self.config, 'enable_rag_cache', False)
         enable_stateless_refin_global = getattr(self.config, 'enable_stateless_refinement', False)
 
+        # --- RAG Cache Path ---
         if enable_rag_cache_global and self._cache_update_func and self._cache_select_func and self._get_rag_cache_db_func and self.sqlite_cursor:
             self.logger.info(f"[{session_id}] RAG Cache Feature ENABLED.")
+            # Retrieve previous cache
             run_step1 = False
             previous_cache_text = ""
             try:
@@ -643,6 +899,7 @@ class SessionPipeOrchestrator:
                  if cache_result is not None: previous_cache_text = cache_result
             except Exception as e_get_cache: self.logger.error(f"[{session_id}] Error retrieving previous cache: {e_get_cache}", exc_info=True)
 
+            # Determine if Step 1 (Update) should run
             if not session_process_owi_rag:
                  self.logger.info(f"[{session_id}] Skipping RAG Cache Step 1 (session valve 'process_owi_rag=False').")
                  cache_update_skipped = True; run_step1 = False
@@ -651,12 +908,12 @@ class SessionPipeOrchestrator:
                  skip_len = False; skip_sim = False
                  owi_content_for_check = extracted_owi_context or ""
                  len_thresh = getattr(self.config, 'CACHE_UPDATE_SKIP_OWI_THRESHOLD', 50)
-                 if len(owi_content_for_check.strip()) < len_thresh: skip_len = True; self.logger.info(f"[{session_id}] Cache S1 Skip: OWI len < {len_thresh}.")
+                 if len(owi_content_for_check.strip()) < len_thresh: skip_len = True; self.logger.info(f"[{session_id}] Cache S1 Skip: OWI len ({len(owi_content_for_check.strip())}) < {len_thresh}.")
                  elif self._calculate_similarity_func and previous_cache_text:
                       sim_thresh = getattr(self.config, 'CACHE_UPDATE_SIMILARITY_THRESHOLD', 0.9)
                       try:
                           sim_score = self._calculate_similarity_func(owi_content_for_check, previous_cache_text)
-                          if sim_score > sim_thresh: skip_sim = True; self.logger.info(f"[{session_id}] Cache S1 Skip: Sim > {sim_thresh:.2f}.")
+                          if sim_score > sim_thresh: skip_sim = True; self.logger.info(f"[{session_id}] Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.")
                       except Exception as e_sim: self.logger.error(f"[{session_id}] Error calculating similarity: {e_sim}")
                  cache_update_skipped = skip_len or skip_sim
                  run_step1 = not cache_update_skipped
@@ -664,6 +921,7 @@ class SessionPipeOrchestrator:
                       await self._emit_status(event_emitter, session_id, "Status: Skipping cache update (redundant OWI).")
                       updated_cache_text_intermediate = previous_cache_text
 
+            # Prepare LLM configs
             cache_update_llm_config = {
                 "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None),
                 "temp": getattr(self.config, 'refiner_llm_temperature', 0.3),
@@ -672,12 +930,12 @@ class SessionPipeOrchestrator:
             final_select_llm_config = {
                 "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None),
                 "temp": getattr(self.config, 'refiner_llm_temperature', 0.3),
-                "prompt_template": getattr(self.config, 'final_context_selection_prompt_template', DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT),
+                "prompt_template": DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT, # Use imported default
             }
-
             configs_ok_step1 = all([cache_update_llm_config["url"], cache_update_llm_config["key"], cache_update_llm_config["prompt_template"]])
             configs_ok_step2 = all([final_select_llm_config["url"], final_select_llm_config["key"], final_select_llm_config["prompt_template"]])
 
+            # Execute Step 1 (Update Cache)
             if not (configs_ok_step1 and configs_ok_step2):
                  self.logger.error(f"[{session_id}] Cannot proceed with RAG Cache: Refiner URL/Key/Prompts missing.")
                  await self._emit_status(event_emitter, session_id, "ERROR: RAG Cache Refiner config incomplete.", done=False)
@@ -695,26 +953,38 @@ class SessionPipeOrchestrator:
                       )
                       cache_update_performed = True
 
+            # Execute Step 2 (Select Final Context)
             if configs_ok_step2:
                  await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context...")
+                 # --- TEMPORARY WORKAROUND: Inject inventory into OWI context for selection ---
+                 # TODO: Refactor cache.py to accept inventory string explicitly via prompt formatting args
+                 temp_owi_for_select = extracted_owi_context or ""
+                 inv_context_to_inject = formatted_inventory_string # Use the string fetched earlier
+                 if inventory_enabled and inv_context_to_inject and "[Error" not in inv_context_to_inject and "[Inventory Management Disabled]" not in inv_context_to_inject and "[No Inventory Data Available]" not in inv_context_to_inject:
+                      # Only inject if inventory is enabled and formatted string seems valid
+                      temp_owi_for_select += f"\n\n--- Current Inventory ---\n{inv_context_to_inject}"
+                      self.logger.info(f"[{session_id}] TEMPORARY: Injected formatted inventory into OWI context for selection step.")
+
+                 # Call the selection function (from cache.py)
                  final_selected_context = await self._cache_select_func(
                       updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""),
-                      current_owi_context=extracted_owi_context, history_messages=current_active_history,
+                      current_owi_context=temp_owi_for_select, # Pass potentially augmented OWI
+                      history_messages=current_active_history,
                       latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper,
                       context_selection_llm_config=final_select_llm_config,
                       history_count=getattr(self.config, 'refiner_history_count', 6),
                       dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CtxSelect_{session_id}",
                  )
                  final_context_selection_performed = True
-                 context_for_prompt = final_selected_context
+                 context_for_prompt = final_selected_context # Use the output of selection
                  log_step1_status = "Performed" if cache_update_performed else ("Skipped" if cache_update_skipped else "Not Run")
                  self.logger.info(f"[{session_id}] RAG Cache Step 2 complete. Context len: {len(context_for_prompt)}. Step 1: {log_step1_status}")
                  await self._emit_status(event_emitter, session_id, "Status: Context selection complete.", done=False)
             else:
-                 self.logger.warning(f"[{session_id}] Skipping RAG Cache Step 2 (config). Using intermediate cache.")
+                 self.logger.warning(f"[{session_id}] Skipping RAG Cache Step 2 (config missing). Using intermediate cache as context.")
                  context_for_prompt = updated_cache_text_intermediate
 
-        # ELSE IF: Stateless Refinement
+        # --- ELSE IF: Stateless Refinement Path ---
         elif enable_stateless_refin_global and self._stateless_refine_func:
             self.logger.info(f"[{session_id}] Stateless Refinement ENABLED.")
             await self._emit_status(event_emitter, session_id, "Status: Refining OWI context (stateless)...")
@@ -724,13 +994,14 @@ class SessionPipeOrchestrator:
                  stateless_refiner_config = {
                      "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None),
                      "temp": getattr(self.config, 'refiner_llm_temperature', 0.3),
-                     "prompt_template": getattr(self.config, 'stateless_refiner_prompt_template', None),
+                     "prompt_template": getattr(self.config, 'stateless_refiner_prompt_template', None), # Use template from valve
                  }
                  if not stateless_refiner_config["url"] or not stateless_refiner_config["key"]:
                       self.logger.error(f"[{session_id}] Skipping stateless refinement: Refiner URL/Key missing.")
                       await self._emit_status(event_emitter, session_id, "ERROR: Stateless Refiner config incomplete.", done=False)
                  else:
                       try:
+                          # Note: Inventory is NOT currently passed into stateless refinement
                           refined_stateless_context = await self._stateless_refine_func(
                                external_context=extracted_owi_context, history_messages=current_active_history,
                                latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper,
@@ -739,45 +1010,65 @@ class SessionPipeOrchestrator:
                                history_count=getattr(self.config, 'refiner_history_count', 6),
                                dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_StatelessRef_{session_id}",
                           )
+                          # Check if refinement actually changed the context
                           if refined_stateless_context != extracted_owi_context:
-                               context_for_prompt = refined_stateless_context; stateless_refinement_performed = True
-                               self.logger.info(f"[{session_id}] Stateless refinement successful. Length: {len(context_for_prompt)}")
+                               context_for_prompt = refined_stateless_context # Use refined context
+                               stateless_refinement_performed = True
+                               self.logger.info(f"[{session_id}] Stateless refinement successful (Length: {len(context_for_prompt)}).")
                                await self._emit_status(event_emitter, session_id, "Status: OWI context refined (stateless).", done=False)
-                          else: self.logger.info(f"[{session_id}] Stateless refinement no change/skipped.")
-                      except Exception as e_refine_stateless: self.logger.error(f"[{session_id}] EXCEPTION stateless refinement: {e_refine_stateless}", exc_info=True)
+                          else:
+                               self.logger.info(f"[{session_id}] Stateless refinement resulted in no change or was skipped by length.")
+                               # Keep context_for_prompt as original extracted_owi_context
+                      except Exception as e_refine_stateless:
+                          self.logger.error(f"[{session_id}] EXCEPTION during stateless refinement: {e_refine_stateless}", exc_info=True)
+                          # Keep context_for_prompt as original extracted_owi_context on error
 
-        # Calculate refined tokens
+        # --- 6. Calculate Refined Context Tokens ---
+        # Calculate tokens based on whatever ended up in context_for_prompt
         if self._count_tokens_func and self._tokenizer:
             try:
-                token_source = context_for_prompt if (final_context_selection_performed or stateless_refinement_performed) else extracted_owi_context
-                if token_source: refined_context_tokens = self._count_tokens_func(token_source, self._tokenizer)
+                token_source = context_for_prompt # This holds the result of refinement or the original OWI context
+                if token_source and isinstance(token_source, str):
+                     refined_context_tokens = self._count_tokens_func(token_source, self._tokenizer)
+                else: refined_context_tokens = 0 # No context to count
                 self.logger.debug(f"[{session_id}] Refined context tokens (RefOUT): {refined_context_tokens}")
-            except Exception as e_tok_ref: refined_context_tokens = -1; self.logger.error(f"[{session_id}] Error calculating refined tokens: {e_tok_ref}")
-        elif not (final_context_selection_performed or stateless_refinement_performed):
-             refined_context_tokens = initial_owi_context_tokens # If no refinement ran, RefOUT = OWI_IN
+            except Exception as e_tok_ref:
+                refined_context_tokens = -1; self.logger.error(f"[{session_id}] Error calculating refined tokens: {e_tok_ref}")
+        else: # Tokenizer unavailable
+             refined_context_tokens = -1
 
-        # Combine Context Sources
+        # --- 7. Combine Context Sources (Includes Inventory via Formatted String) ---
         combined_context_string = "[No background context generated]"
         if self._combine_context_func:
             try:
+                # Pass the final selected/refined context and other sources
+                # `formatted_inventory_string` was fetched earlier in this method
                 combined_context_string = self._combine_context_func(
                     final_selected_context=(context_for_prompt if isinstance(context_for_prompt, str) else None),
-                    t1_summaries=retrieved_t1_summaries, t2_rag_results=retrieved_rag_summaries,
+                    t1_summaries=retrieved_t1_summaries,
+                    t2_rag_results=retrieved_rag_summaries,
+                    # Pass formatted inventory if enabled and valid
+                    inventory_context=(formatted_inventory_string if inventory_enabled and formatted_inventory_string and "[Error" not in formatted_inventory_string and "[Disabled]" not in formatted_inventory_string else None)
                 )
-            except Exception as e_combine: self.logger.error(f"[{session_id}] Error combining context: {e_combine}", exc_info=True); combined_context_string = "[Error combining context]"
-        else: self.logger.error(f"[{session_id}] Cannot combine context: Function unavailable.")
+            except Exception as e_combine:
+                 self.logger.error(f"[{session_id}] Error combining context: {e_combine}", exc_info=True); combined_context_string = "[Error combining context]"
+        else:
+            self.logger.error(f"[{session_id}] Cannot combine context: Function unavailable.")
+            # Fallback: manually assemble if combine func missing? Or just use refined?
+            # For now, stick with error placeholder.
         self.logger.debug(f"[{session_id}] Combined background context length: {len(combined_context_string)}.")
 
-        # Return relevant state for the next steps
+        # --- 8. Return relevant state ---
         return (
             combined_context_string,
             base_system_prompt_text,
             initial_owi_context_tokens,
-            refined_context_tokens,
+            refined_context_tokens, # Tokens of the context *before* combining with T1/T2/Inventory
             cache_update_performed,
             cache_update_skipped,
             final_context_selection_performed,
-            stateless_refinement_performed
+            stateless_refinement_performed,
+            formatted_inventory_string # Return the formatted string for status logging
         )
 
 
@@ -787,6 +1078,7 @@ class SessionPipeOrchestrator:
         t0_dialogue_tokens = -1
         db_max_index_for_t0 = -1
 
+        # Get max index from DB
         try:
             db_index_result = await get_max_t1_end_index(self.sqlite_cursor, session_id)
             if isinstance(db_index_result, int) and db_index_result >= 0:
@@ -796,22 +1088,30 @@ class SessionPipeOrchestrator:
             self.logger.error(f"[{session_id}] T0 Slice: Error getting DB index: {e_get_max_t0}. Using -1.")
             db_max_index_for_t0 = -1
 
+        # Determine start index for the T0 slice in the *current* history
         start_idx_for_t0 = db_max_index_for_t0 + 1
+        if start_idx_for_t0 < 0: start_idx_for_t0 = 0 # Ensure start index is not negative
+
         if start_idx_for_t0 < len(history_for_processing):
             history_to_consider_for_t0 = history_for_processing[start_idx_for_t0:]
             # Filter this slice for dialogue roles
             t0_raw_history_slice = [msg for msg in history_to_consider_for_t0 if isinstance(msg, dict) and msg.get("role") in self._dialogue_roles]
-            self.logger.info(f"[{session_id}] T0 Slice: Selected {len(t0_raw_history_slice)} dialogue msgs (from orig index {start_idx_for_t0}).")
+            self.logger.info(f"[{session_id}] T0 Slice: Selected {len(t0_raw_history_slice)} dialogue msgs (from original history index {start_idx_for_t0}).")
         else:
-            self.logger.info(f"[{session_id}] T0 Slice: No relevant history range (start {start_idx_for_t0} >= hist len {len(history_for_processing)}).")
+            # This happens if last summary included the message right before the current query
+            self.logger.info(f"[{session_id}] T0 Slice: No relevant history range after last summary (start {start_idx_for_t0} >= hist len {len(history_for_processing)}). Slice is empty.")
             t0_raw_history_slice = []
 
         # Calculate T0 tokens
         if t0_raw_history_slice and self._count_tokens_func and self._tokenizer:
-            try: t0_dialogue_tokens = sum(self._count_tokens_func(msg["content"], self._tokenizer) for msg in t0_raw_history_slice if isinstance(msg, dict) and isinstance(msg.get("content"), str))
-            except Exception as e_tok_t0: t0_dialogue_tokens = -1; self.logger.error(f"[{session_id}] Error calc T0 tokens: {e_tok_t0}")
-        elif not t0_raw_history_slice: t0_dialogue_tokens = 0
-        else: t0_dialogue_tokens = -1
+            try:
+                t0_dialogue_tokens = sum(self._count_tokens_func(msg["content"], self._tokenizer) for msg in t0_raw_history_slice if isinstance(msg, dict) and isinstance(msg.get("content"), str))
+            except Exception as e_tok_t0:
+                t0_dialogue_tokens = -1; self.logger.error(f"[{session_id}] Error calculating T0 tokens: {e_tok_t0}")
+        elif not t0_raw_history_slice:
+            t0_dialogue_tokens = 0 # Empty slice has 0 tokens
+        else: # Tokenizer unavailable
+            t0_dialogue_tokens = -1
 
         return t0_raw_history_slice, t0_dialogue_tokens
 
@@ -826,21 +1126,27 @@ class SessionPipeOrchestrator:
 
         if self._construct_payload_func:
             try:
-                memory_guidance = "\n\n--- Memory Guidance ---\nUse dialogue history and background info for context."
+                # Add guidance about using memory
+                memory_guidance = "\n\n--- Memory Guidance ---\nUse the dialogue history and the background information provided (if any) to inform your response and maintain context."
                 enhanced_system_prompt = base_system_prompt_text.strip() + memory_guidance
                 session_long_term_goal = str(getattr(user_valves, 'long_term_goal', ''))
+                include_acks = getattr(self.config, 'include_ack_turns', True)
 
                 payload_dict = self._construct_payload_func(
-                    system_prompt=enhanced_system_prompt, history=t0_raw_history_slice,
-                    context=combined_context_string, query=latest_user_query_str,
-                    long_term_goal=session_long_term_goal, strategy="standard",
-                    include_ack_turns=getattr(self.config, 'include_ack_turns', True),
+                    system_prompt=enhanced_system_prompt,
+                    history=t0_raw_history_slice, # Pass the filtered T0 dialogue slice
+                    context=combined_context_string, # Pass the combined background context
+                    query=latest_user_query_str,
+                    long_term_goal=session_long_term_goal,
+                    strategy="standard", # Or configure via valve? 'standard' puts history before context
+                    include_ack_turns=include_acks,
                 )
+                # Validate the output structure
                 if isinstance(payload_dict, dict) and "contents" in payload_dict and isinstance(payload_dict["contents"], list):
                     final_llm_payload_contents = payload_dict["contents"]
                     self.logger.info(f"[{session_id}] Constructed final payload ({len(final_llm_payload_contents)} turns).")
                 else:
-                    self.logger.error(f"[{session_id}] Payload constructor returned invalid structure: {payload_dict}")
+                    self.logger.error(f"[{session_id}] Payload constructor returned invalid structure: {type(payload_dict)}. Payload: {payload_dict}")
             except Exception as e_payload:
                 self.logger.error(f"[{session_id}] EXCEPTION during payload construction: {e_payload}", exc_info=True)
         else:
@@ -856,22 +1162,41 @@ class SessionPipeOrchestrator:
         initial_owi_context_tokens: int, refined_context_tokens: int,
         summarization_prompt_tokens: int, summarization_output_tokens: int,
         t0_dialogue_tokens: int, final_llm_payload_contents: Optional[List[Dict]]
-    ) -> str:
+    ) -> Tuple[str, int]: # Returns status string and final token count
         """ Calculates final payload tokens and formats the status message string. """
         final_payload_tokens = -1
+        # Calculate final payload tokens if possible
         if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
-            try: final_payload_tokens = sum( self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str) )
-            except Exception as e_tok_final: final_payload_tokens = -1; self.logger.error(f"[{session_id}] Error calculating final payload tokens: {e_tok_final}")
-        elif not final_llm_payload_contents: final_payload_tokens = 0
+            try:
+                # Sum tokens from all 'text' parts in the Google 'contents' format
+                 final_payload_tokens = sum(
+                     self._count_tokens_func(part["text"], self._tokenizer)
+                     for turn in final_llm_payload_contents if isinstance(turn, dict)
+                     for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str)
+                 )
+            except Exception as e_tok_final:
+                final_payload_tokens = -1; self.logger.error(f"[{session_id}] Error calculating final payload tokens: {e_tok_final}")
+        elif not final_llm_payload_contents:
+            final_payload_tokens = 0 # No payload means 0 tokens
 
-        # Assemble Final Status Message
+        # Assemble Final Status Message Parts
         enable_rag_cache_global = getattr(self.config, 'enable_rag_cache', False)
         enable_stateless_refin_global = getattr(self.config, 'enable_stateless_refinement', False)
-        refinement_status = "Refined=N"
-        if enable_rag_cache_global and final_context_selection_performed: refinement_status = f"Refined=Cache(S1Skip={cache_update_skipped})"
-        elif enable_stateless_refin_global and stateless_refinement_performed: refinement_status = "Refined=Stateless"
+
+        # Determine Refinement Status indicator
+        refinement_status = "Refined=N" # Default: No refinement ran or configured
+        if enable_rag_cache_global and final_context_selection_performed:
+            refinement_status = f"Refined=Cache(S1Skip={'Y' if cache_update_skipped else 'N'})"
+        elif enable_stateless_refin_global and stateless_refinement_performed:
+            refinement_status = "Refined=Stateless"
+
+        # OWI Processing Status
         owi_proc_status = f"OWIProc={'ON' if session_process_owi_rag else 'OFF'}"
+
+        # Basic Status Parts
         status_parts = [f"T1={t1_retrieved_count}", f"T2={t2_retrieved_count}", owi_proc_status, refinement_status]
+
+        # Token Parts (only include if value is valid >= 0)
         token_parts = []
         if initial_owi_context_tokens >= 0: token_parts.append(f"OWI_IN={initial_owi_context_tokens}")
         if refined_context_tokens >= 0: token_parts.append(f"RefOUT={refined_context_tokens}")
@@ -879,50 +1204,36 @@ class SessionPipeOrchestrator:
         if summarization_output_tokens >= 0: token_parts.append(f"SumOUT={summarization_output_tokens}")
         if t0_dialogue_tokens >= 0: token_parts.append(f"Hist={t0_dialogue_tokens}")
         if final_payload_tokens >= 0: token_parts.append(f"FinalIN={final_payload_tokens}")
-        status_message = "Status: " + ", ".join(status_parts) + (" | " + " ".join(token_parts) if token_parts else "")
+
+        # Combine into final message string
+        status_message = "Status: " + ", ".join(status_parts) + (" | Tokens: " + " ".join(token_parts) if token_parts else "")
 
         return status_message, final_payload_tokens
 
 
-# --- Internal Helper: Execute Final LLM (Non-Streaming) or Prepare Output ---
     async def _execute_or_prepare_output(
-        self,
-        session_id: str,
-        body: Dict, # The original input body, potentially for reference
-        final_llm_payload_contents: Optional[List[Dict]], # The constructed payload for the LLM
-        event_emitter: Optional[Callable],
-        status_message: str, # The status message calculated before this step
-        final_payload_tokens: int # Pass calculated tokens for logging/status
-    ) -> Union[Dict, str]: # <<< MODIFIED RETURN TYPE HINT
+        self, session_id: str, body: Dict, final_llm_payload_contents: Optional[List[Dict]],
+        event_emitter: Optional[Callable], status_message: str, final_payload_tokens: int
+    ) -> OrchestratorResult:
         """
-        Executes the final LLM call (if configured and payload exists) NON-STREAMING,
-        or prepares the modified payload dictionary for downstream processing.
-
-        Returns:
-            - str: The final LLM response text on success.
-            - str: An error message string if the final LLM call fails.
-            - Dict: The modified payload dictionary if the final LLM call is not triggered.
+        Executes the final LLM call (non-streaming if triggered) or prepares the output body.
         """
 
         output_body = body.copy() if isinstance(body, dict) else {}
 
+        # Check if payload construction was successful
         if final_llm_payload_contents:
-            # Update the output body with the constructed payload contents
             output_body["messages"] = final_llm_payload_contents
-            # Preserve relevant keys from original body if needed by downstream (e.g., OWI)
             preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"]
             keys_preserved = [k for k in preserved_keys if k in body]
-            for k in keys_preserved:
-                output_body[k] = body[k]
-            self.logger.info(f"[{session_id}] Output body updated with final payload. Preserved: {keys_preserved}.")
+            for k in keys_preserved: output_body[k] = body[k]
+            self.logger.info(f"[{session_id}] Output body updated with final payload. Preserved keys: {keys_preserved}.")
         else:
-            # Payload construction failed earlier, cannot proceed with LLM call
-            self.logger.error(f"[{session_id}] Final payload construction failed earlier. Cannot execute final LLM call.")
+            self.logger.error(f"[{session_id}] Final payload construction failed. Cannot proceed.")
             await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True)
-            # Return an error dictionary as per standard OWI pipe error handling when not returning text
             return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
 
-        # --- Check Final LLM Trigger ---
+        # Check Final LLM Trigger Valves
         final_url = getattr(self.config, 'final_llm_api_url', None)
         final_key = getattr(self.config, 'final_llm_api_key', None)
         url_present = bool(final_url and isinstance(final_url, str) and final_url.strip())
@@ -931,62 +1242,48 @@ class SessionPipeOrchestrator:
         final_llm_triggered = url_present and key_present
 
         if final_llm_triggered:
+            # --- Final LLM Call Triggered: ALWAYS Use Non-Streaming ---
             self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming).")
-            await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call (Non-Streaming)...", done=False)
+            await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call...", done=False)
 
-            # Prepare payload in Google format for the wrapper (dispatcher handles conversion if needed)
+            final_temp = getattr(self.config, 'final_llm_temperature', 0.7)
+            final_timeout = getattr(self.config, 'final_llm_timeout', 120)
             final_call_payload_google_fmt = {"contents": final_llm_payload_contents}
 
-            # --- Call the NON-STREAMING wrapper ---
-            success, final_response_or_error = await self._async_llm_call_wrapper(
-                api_url=final_url,
-                api_key=final_key,
-                payload=final_call_payload_google_fmt,
-                temperature=getattr(self.config, 'final_llm_temperature', 0.7),
-                timeout=getattr(self.config, 'final_llm_timeout', 120),
+            # Use the standard non-streaming wrapper (_async_llm_call_wrapper handles await/tuple)
+            success, response_or_error = await self._async_llm_call_wrapper(
+                api_url=final_url, api_key=final_key, payload=final_call_payload_google_fmt,
+                temperature=final_temp, timeout=final_timeout,
                 caller_info=f"Orch_FinalLLM_{session_id}"
             )
-            # --- End NON-STREAMING call ---
 
-            # --- Process Non-Streaming Result ---
-            if success and isinstance(final_response_or_error, str):
-                final_response_text = final_response_or_error # Already a string, no strip here
-                self.logger.info(f"[{session_id}] Final LLM Call successful (Non-Streaming). Response Length: {len(final_response_text)}.")
-                final_status = status_message # Use the status calculated before this step
-                await self._emit_status(event_emitter, session_id, final_status, done=True)
-                # Return the final response string directly
-                return final_response_text
+            final_status = status_message + (" (Success)" if success else " (Failed)")
+            await self._emit_status(event_emitter, session_id, final_status, done=True)
+
+            if success and isinstance(response_or_error, str):
+                self.logger.info(f"[{session_id}] Final LLM call successful. Returning response string.")
+                return response_or_error # Return the string directly
+            elif not success and isinstance(response_or_error, dict):
+                self.logger.error(f"[{session_id}] Final LLM call failed. Returning error dict: {response_or_error}")
+                return response_or_error # Return error dict
             else:
-                # Handle failure from the wrapper
-                error_info_str = "[Unknown Error]"
-                if not success and isinstance(final_response_or_error, dict):
-                    err_type = final_response_or_error.get('error_type', 'UnknownType')
-                    err_msg = final_response_or_error.get('message', 'N/A')
-                    error_info_str = f"Type: {err_type}, Msg: {err_msg}"
-                    # Log the full error dictionary if needed for debugging
-                    self.logger.debug(f"[{session_id}] Final LLM Error Dict: {final_response_or_error}")
-                elif not success: # If it failed but didn't return a dict
-                    error_info_str = str(final_response_or_error)
-                elif success: # Should not happen if success is True, but handle defensively
-                    error_info_str = f"Unexpected success state with non-string result: {type(final_response_or_error).__name__}"
-
-                self.logger.error(f"[{session_id}] Final LLM Call (Non-Streaming) failed. Error: '{error_info_str}'.")
-                user_error_message = f"[Final LLM Error: {error_info_str}]" # Format as a string
-                error_status_desc = f"ERROR: Final LLM Failed ({error_info_str[:50]}...)"
-                await self._emit_status(event_emitter, session_id, error_status_desc, done=True)
-                # Return the formatted error string directly
-                return user_error_message
-            # --- End Result Processing ---
+                self.logger.error(f"[{session_id}] Final LLM call returned unexpected format. Success={success}, Type={type(response_or_error)}")
+                return {"error": "Final LLM call returned unexpected result format.", "status_code": 500}
 
         else:
-            # Final LLM not triggered, return the modified payload dictionary
+            # --- No Final LLM Call ---
+            # Return Modified Payload Body for OWI processing (could be streaming or not based on original request)
             self.logger.info(f"[{session_id}] Final LLM Call disabled. Passing modified payload downstream.")
-            # Emit the FINAL status message here for the NON-STREAMING path that didn't run the final LLM
             await self._emit_status(event_emitter, session_id, status_message, done=True)
+            if getattr(self.config, 'debug_log_final_payload', False):
+                 try: payload_str = json.dumps(output_body, indent=2)
+                 except Exception: payload_str = str(output_body)
+                 self.logger.debug(f"[{session_id}] Returning Payload:\n{payload_str}")
+            # OWI will handle streaming based on output_body['stream'] if present
             return output_body
 
 
-# --- Main Processing Method (Orchestrator) ---
+# --- Method Replacement 3: process_turn (Complete Implementation) ---
     async def process_turn(
         self,
         session_id: str, # Now passed directly
@@ -996,17 +1293,20 @@ class SessionPipeOrchestrator:
         event_emitter: Optional[Callable],
         embedding_func: Optional[Callable] = None,
         chroma_embed_wrapper: Optional[Any] = None,
-        is_regeneration_heuristic: bool = False # <<< ADDED parameter to signature
-    ) -> Union[Dict, str]: # <<< MODIFIED RETURN TYPE HINT
+        is_regeneration_heuristic: bool = False
+    ) -> OrchestratorResult:
         """
         Processes a single turn by calling helper methods in sequence.
-        Accepts regeneration flag from the caller.
-        Returns either the modified payload dictionary or the final LLM response/error string.
+        Includes inventory management enable check and post-turn update call.
         """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
-        self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})") # Log flag
+        self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
 
-        # --- Variable Initializations ---
+        # --- Check if Inventory Management is Enabled Globally ---
+        inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
+        self.logger.info(f"[{session_id}] Inventory Management Enabled: {inventory_enabled}")
+
+        # --- Variable Initializations (existing + inventory) ---
         summarization_performed = False
         new_t1_summary_text = None
         summarization_prompt_tokens = -1
@@ -1022,47 +1322,43 @@ class SessionPipeOrchestrator:
         refined_context_tokens = -1
         t0_dialogue_tokens = -1
         final_payload_tokens = -1
-        status_message = "Status: Processing..." # Default intermediate status
+        formatted_inventory_string_for_status = "" # Store for status message
+        status_message = "Status: Processing..."
+        final_result: Optional[OrchestratorResult] = None # Store result before inventory update
+        final_llm_payload_contents: Optional[List[Dict]] = None # Ensure defined
 
         try:
             # --- 1. Initialization & History Handling ---
-            # <<< START History Sync (Moved from Pipe) >>>
             await self._emit_status(event_emitter, session_id, "Status: Orchestrator syncing history...")
             incoming_messages = body.get("messages", [])
             stored_history = self.session_manager.get_active_history(session_id) or []
-
             if incoming_messages != stored_history:
                 if len(incoming_messages) < len(stored_history):
                     self.logger.warning(f"[{session_id}] Incoming history shorter than stored. Resetting.")
                     self.session_manager.set_active_history(session_id, incoming_messages.copy())
-                    # Reset T1 index if history goes backward
-                    self.session_manager.set_last_summary_index(session_id, -1)
+                    self.session_manager.set_last_summary_index(session_id, -1) # Reset summary index on history reset
                 else:
                     self.logger.debug(f"[{session_id}] Updating active history (Len: {len(incoming_messages)}).")
                     self.session_manager.set_active_history(session_id, incoming_messages.copy())
             else:
                 self.logger.debug(f"[{session_id}] Incoming history matches stored.")
 
-            # Get the latest, potentially updated history
             current_active_history = self.session_manager.get_active_history(session_id) or []
             if not current_active_history:
                  self.logger.error(f"[{session_id}] Active history is empty after sync. Cannot proceed.")
                  await self._emit_status(event_emitter, session_id, "ERROR: History synchronization failed.", done=True)
                  return {"error": "Active history is empty.", "status_code": 500}
-            # <<< END History Sync >>>
 
             # --- 2. Determine Effective Query ---
-            # <<< Pass the received is_regeneration_heuristic flag >>>
             latest_user_query_str, history_for_processing = await self._determine_effective_query(
                 session_id, current_active_history, is_regeneration_heuristic
             )
-            if not latest_user_query_str and not is_regeneration_heuristic: # Check still valid here
-                 self.logger.error(f"[{session_id}] Cannot proceed without an effective user query.")
+            if not latest_user_query_str and not is_regeneration_heuristic:
+                 self.logger.error(f"[{session_id}] Cannot proceed without an effective user query (and not regeneration).")
                  await self._emit_status(event_emitter, session_id, "ERROR: Could not determine user query.", done=True)
                  return {"error": "Could not determine user query.", "status_code": 400}
 
             # --- 3. Tier 1 Summarization ---
-            # <<< Pass the received is_regeneration_heuristic flag >>>
             (summarization_performed, new_t1_summary_text,
              summarization_prompt_tokens, summarization_output_tokens) = await self._handle_tier1_summarization(
                 session_id, user_id, current_active_history, is_regeneration_heuristic, event_emitter
@@ -1080,11 +1376,12 @@ class SessionPipeOrchestrator:
                 embedding_func, chroma_embed_wrapper, event_emitter
             )
 
-            # --- 6. Prepare & Refine Background Context ---
+            # --- 6. Prepare & Refine Background Context (Includes Inventory) ---
             (combined_context_string, base_system_prompt_text,
              initial_owi_context_tokens, refined_context_tokens,
              cache_update_performed, cache_update_skipped,
-             final_context_selection_performed, stateless_refinement_performed
+             final_context_selection_performed, stateless_refinement_performed,
+             formatted_inventory_string_for_status # Get formatted string back
             ) = await self._prepare_and_refine_background(
                 session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries,
                 current_active_history, latest_user_query_str, event_emitter
@@ -1101,7 +1398,7 @@ class SessionPipeOrchestrator:
                 combined_context_string, latest_user_query_str, user_valves
             )
 
-            # --- 9. Calculate Status Message ---
+            # --- 9. Calculate Status Message (Includes Inventory Status) ---
             session_process_owi_rag = bool(getattr(user_valves, 'process_owi_rag', True))
             status_message, final_payload_tokens = await self._calculate_and_format_status(
                 session_id=session_id, t1_retrieved_count=t1_retrieved_count, t2_retrieved_count=t2_retrieved_count,
@@ -1116,8 +1413,16 @@ class SessionPipeOrchestrator:
                 t0_dialogue_tokens=t0_dialogue_tokens,
                 final_llm_payload_contents=final_llm_payload_contents
             )
-            await self._emit_status(event_emitter, session_id, status_message, done=False)
+            # Append inventory status for clarity if enabled
+            if inventory_enabled:
+                inv_status = "ON"
+                if "[Error" in formatted_inventory_string_for_status: inv_status = "ERR"
+                elif "[Disabled]" in formatted_inventory_string_for_status or "[No Inventory" in formatted_inventory_string_for_status: inv_status = "OFF/EMPTY"
+                status_message += f" Inv={inv_status}"
+            else:
+                 status_message += " Inv=OFF"
 
+            await self._emit_status(event_emitter, session_id, status_message, done=False) # Emit before final call
 
             # --- 10. Execute Final LLM or Prepare Output ---
             final_result = await self._execute_or_prepare_output(
@@ -1125,19 +1430,107 @@ class SessionPipeOrchestrator:
                 event_emitter=event_emitter, status_message=status_message, final_payload_tokens=final_payload_tokens
             )
 
+            # --- 11. Post-Turn Inventory Update (With Config Loading) ---
+            if inventory_enabled and self._update_inventories_func:
+                 # Check if the main processing resulted in an error before trying inventory update
+                 if isinstance(final_result, dict) and "error" in final_result:
+                     self.logger.warning(f"[{session_id}] Skipping post-turn inventory update due to upstream error: {final_result.get('error')}")
+                 # Skip if streaming (needs specific handling)
+                 elif isinstance(final_result, AsyncGenerator):
+                      self.logger.warning(f"[{session_id}] Skipping post-turn inventory update: Streaming response detected. Update logic needs adjustment for streams.")
+                 # Proceed if we got a non-streaming string response
+                 elif isinstance(final_result, str):
+                      self.logger.info(f"[{session_id}] Performing post-turn inventory update (Non-Streaming Final LLM response received)...")
+                      await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
+                      try:
+                          # Read Valves for Inventory LLM Config
+                          inv_llm_url = getattr(self.config, 'inv_llm_api_url', None)
+                          inv_llm_key = getattr(self.config, 'inv_llm_api_key', None)
+                          inv_llm_temp = getattr(self.config, 'inv_llm_temperature', 0.3)
+                          # Get template directly from config (Valves should hold the actual text or path)
+                          inv_llm_prompt_template = getattr(self.config, 'inv_llm_prompt_template', None)
+
+                          # Check if essential config is present and seems valid
+                          template_seems_valid = inv_llm_prompt_template and isinstance(inv_llm_prompt_template, str) and "[Library Default" not in inv_llm_prompt_template and len(inv_llm_prompt_template) > 50 # Basic check
+                          if not inv_llm_url or not inv_llm_key or not template_seems_valid:
+                               self.logger.error(f"[{session_id}] Inventory LLM config missing or invalid (URL: {bool(inv_llm_url)}, Key: {bool(inv_llm_key)}, Template Valid: {template_seems_valid}). Cannot perform update.")
+                               await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (config error).", done=True)
+                          else:
+                               # Assemble config dict
+                               inv_llm_config = {
+                                   "url": inv_llm_url, "key": inv_llm_key,
+                                   "temp": inv_llm_temp, "prompt_template": inv_llm_prompt_template,
+                               }
+
+                               # Prepare context for Inventory LLM
+                               # Include the last assistant turn in history for analysis
+                               history_for_inv_update_list = self._get_recent_turns_func(current_active_history, 4, exclude_last=False)
+                               history_for_inv_update_str = self._format_history_func(history_for_inv_update_list)
+
+                               # Call the inventory update function from inventory.py
+                               update_success = await self._update_inventories_func(
+                                   session_id=session_id,
+                                   main_llm_response=final_result, # The string response
+                                   user_query=latest_user_query_str,
+                                   recent_history_str=history_for_inv_update_str,
+                                   llm_call_func=self._async_llm_call_wrapper,
+                                   db_get_inventory_func=self._get_char_inventory_db_func, # Pass DB getter
+                                   db_update_inventory_func=self._update_char_inventory_db_func, # Pass DB updater
+                                   inventory_llm_config=inv_llm_config # Pass assembled config
+                               )
+
+                               if update_success:
+                                   self.logger.info(f"[{session_id}] Post-turn inventory update successful.")
+                                   await self._emit_status(event_emitter, session_id, "Status: Inventory update complete.", done=True)
+                               else:
+                                   self.logger.warning(f"[{session_id}] Post-turn inventory update function returned False (no changes detected or saved).")
+                                   await self._emit_status(event_emitter, session_id, "Status: Inventory update check finished (no changes saved).", done=True)
+
+                      except Exception as e_inv_update:
+                          self.logger.error(f"[{session_id}] Error during post-turn inventory update call: {e_inv_update}", exc_info=True)
+                          await self._emit_status(event_emitter, session_id, "Status: Error during inventory update.", done=True)
+
+                 # If final_result is the original body dict (final LLM call disabled/skipped)
+                 elif isinstance(final_result, dict) and final_result.get("messages") == final_llm_payload_contents:
+                      self.logger.info(f"[{session_id}] Skipping post-turn inventory update: Final LLM call was disabled or payload unchanged.")
+                      if inventory_enabled:
+                          # Ensure a final 'done' status is emitted if inventory was on but skipped here
+                           await self._emit_status(event_emitter, session_id, "Status: Processing complete (Inventory check skipped - Final LLM Off).", done=True)
+                 else:
+                      self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
+
+            elif not inventory_enabled:
+                 self.logger.debug(f"[{session_id}] Skipping post-turn inventory update: Disabled by valve.")
+                 # Ensure a final 'done' status if inventory is off
+                 await self._emit_status(event_emitter, session_id, status_message + " Inv=OFF", done=True) # Repeat status with Inv=OFF and done=True
+            else: # Inventory enabled but function missing (shouldn't happen if imports work)
+                 self.logger.warning(f"[{session_id}] Skipping post-turn inventory update: Update function missing/unavailable.")
+                 await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (function missing).", done=True)
+
+
+            # --- 12. Return Final Result ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(f"Orchestrator process_turn [{session_id}]: Finished at {pipe_end_time_iso}")
-            return final_result
 
+            # Ensure final_result is not None before returning
+            if final_result is None:
+                self.logger.error(f"[{session_id}] Final result is None at end of processing. Returning error.")
+                await self._emit_status(event_emitter, session_id, "ERROR: Internal processing error (result is None).", done=True)
+                return {"error": "Internal processing error, final result was None.", "status_code": 500}
+
+            return final_result # Return the dict, string, or stream generator
+
+        # --- Exception Handling ---
         except asyncio.CancelledError:
              self.logger.info(f"[{session_id or 'unknown'}] Orchestrator process_turn cancelled.")
              await self._emit_status(event_emitter, session_id or 'unknown', "Status: Processing cancelled.", done=True)
-             raise
+             raise # Re-raise CancelledError
         except Exception as e_orch:
-            session_id_for_log = session_id if 'session_id' in locals() and session_id else 'unknown'
+            session_id_for_log = session_id if 'session_id' in locals() and session_id != "uninitialized_session" else 'unknown'
             self.logger.critical(f"[{session_id_for_log}] Orchestrator UNHANDLED EXCEPTION in process_turn: {e_orch}", exc_info=True)
             await self._emit_status(event_emitter, session_id_for_log, f"ERROR: Orchestrator Failed ({type(e_orch).__name__})", done=True)
+            # Return dict for errors
             return {"error": f"Orchestrator failed: {type(e_orch).__name__}", "status_code": 500}
+# [[END MODIFIED process_turn METHOD - FULL]]
 
 # === END OF FILE i4_llm_agent/orchestration.py ===
-# [[END MODIFIED orchestration.py]]

@@ -132,13 +132,14 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 **OUTPUT (Updated Session Cache Text - Structured):**
 """
 
-# Placeholders for Step 2 (Final Context Selection)
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
+# FINAL_SELECT_CURRENT_INVENTORY_PLACEHOLDER = "{current_inventory}" # <<< REMOVED Placeholder
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 2 (Final Context Selection)
+# Default Template Text for Step 2 (Final Context Selection) - REVERTED
+# --- START REPLACEMENT 1 (Reverted Prompt) ---
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Query-Focused Context Selector
@@ -162,7 +163,7 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 {FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER}
 ---
 
-**CURRENT OWI RETRIEVAL (Secondary Source):**
+**CURRENT OWI RETRIEVAL (Secondary Source, may include injected inventory):**
 ---
 {FINAL_SELECT_CURRENT_OWI_PLACEHOLDER}
 ---
@@ -506,37 +507,71 @@ def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
     t2_rag_results: Optional[List[str]],
-    labels: Dict[str, str] = TAG_LABELS # Use existing labels
+    inventory_context: Optional[str] = None, # <<< ADDED parameter
+    labels: Dict[str, str] = TAG_LABELS
 ) -> str:
     """
     Combines various background context sources into a single formatted string
-    suitable for injection into the final LLM prompt.
+    suitable for injection into the final LLM prompt. Now includes inventory.
+
+    Args:
+        final_selected_context: Context from OWI/Cache/Stateless refinement.
+        t1_summaries: List of recent Tier 1 summary strings.
+        t2_rag_results: List of retrieved Tier 2 RAG result strings.
+        inventory_context: Formatted string of current character inventories. <<< ADDED
+        labels: Dictionary mapping context types to labels for formatting.
+
+    Returns:
+        A single formatted string containing all valid context parts,
+        or a placeholder if no context is available.
     """
     func_logger = logging.getLogger(__name__ + '.combine_background_context')
     context_parts = []
-    # 1. Add Final Selected Context
-    selected_context_label = "Selected Background Context"
+
+    # 1. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
+    selected_context_label = "Selected Background Context" # Label for this dynamic part
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
-    if safe_selected_context and safe_selected_context != EMPTY_CONTEXT_PLACEHOLDER:
+    # Check if it's empty or just the placeholder indicating nothing was relevant
+    if safe_selected_context and "[No relevant background context found" not in safe_selected_context:
         func_logger.debug(f"Adding selected context (len: {len(safe_selected_context)}).")
         context_parts.append(f"--- {selected_context_label} ---\n{safe_selected_context}")
+
     # 2. Add T1 Summaries
     t1_label = labels.get("t1", "Recent Summaries (T1)")
     if t1_summaries:
+        # Filter out empty strings and join valid ones
         combined_t1 = "\n---\n".join(s.strip() for s in t1_summaries if isinstance(s, str) and s.strip())
-        if combined_t1: func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries."); context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
+        if combined_t1:
+            func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
+            context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
+
     # 3. Add T2 RAG Results
     t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
     if t2_rag_results:
+        # Filter out empty strings and join valid ones
         combined_t2 = "\n---\n".join(s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip())
-        if combined_t2: func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results."); context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
-    # 4. Combine parts or return placeholder
+        if combined_t2:
+            func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
+            context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
+
+    # 4. Add Inventory Context <<< NEW SECTION >>>
+    inventory_label = "Current Inventories" # Define a label
+    safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
+    # Check if inventory context is valid and not just a placeholder/error message
+    if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
+        func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
+        context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
+    # <<< END NEW SECTION >>>
+
+    # 5. Combine parts or return placeholder
     if context_parts:
+        # Join sections with double newlines for readability
         full_context_string = "\n\n".join(context_parts)
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
         return full_context_string
     else:
         func_logger.info("No background context available from any source.")
+        # Return the standard placeholder if all sources were empty/invalid
         return EMPTY_CONTEXT_PLACEHOLDER
 
 # --- Less Relevant Functions (Keep for potential internal use/completeness) ---
@@ -555,4 +590,81 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         match = re.search(pattern, system_content, re.DOTALL | re.IGNORECASE)
         if match: extracted[key] = match.group(1).strip()
     return extracted
+
+
+
+# Placeholders for Inventory Update LLM
+INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
+INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
+INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+
+# Default Template Text for Post-Turn Inventory Update LLM
+DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Inventory Log Keeper
+**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) in a roleplaying session to identify any explicit changes to character inventories.
+**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
+
+**Instructions:**
+1.  **Focus on Explicit Changes:** Identify actions like picking up, dropping, giving, receiving, using (if consumable), crafting, buying, or selling items mentioned in the ASSISTANT RESPONSE or clearly implied by the USER QUERY and ASSISTANT RESPONSE together. Also look for explicit SYSTEM directives regarding inventory changes.
+2.  **Determine Character:** Identify the character(s) whose inventory is affected. Assume "You" or "I" in the ASSISTANT RESPONSE likely refers to the character addressed by the USER QUERY, often "__USER__". Identify NPCs by name mentioned in the interaction.
+3.  **Determine Action:** Classify the change as "add", "remove", or potentially "set_quantity" (if an exact new total is stated).
+4.  **Determine Item & Quantity:** Extract the item name and the quantity involved. Default to quantity 1 if not specified for add/remove.
+5.  **Extract Description (Optional):** If a clear, concise description of an *added* item is provided, include it.
+6.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+    ```json
+    {{
+      "updates": [
+        {{
+          "character_name": "Name or __USER__",
+          "action": "add | remove | set_quantity",
+          "item_name": "Exact Item Name",
+          "quantity": <integer>,
+          "description": "<optional string>"
+        }}
+      ]
+    }}
+    ```
+7.  **Accuracy is Key:** Only report changes explicitly stated or directly and unambiguously implied. Do NOT infer inventory changes.
+8.  **No Change:** If NO inventory changes are detected, output `{{"updates": []}}`.
+
+**INPUTS:**
+
+**USER QUERY (Trigger for the response):**
+{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
+
+**ASSISTANT RESPONSE (Main text to analyze):**
+---
+{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY (For context):**
+---
+{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (JSON object with detected inventory updates):**
+"""
+
+# --- Function: Format Inventory Update Prompt ---
+def format_inventory_update_prompt(
+    main_llm_response: str,
+    user_query: str,
+    recent_history_str: str,
+    template: str # Expecting the specific template for this step
+) -> str:
+    """Formats the prompt for the Post-Turn Inventory Update LLM."""
+    func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
+    if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
+
+    # Use basic replace for safety, assuming placeholders are unique enough
+    try:
+        formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
+        return formatted_prompt
+    except Exception as e:
+        func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
+        return f"[Error formatting inventory update prompt: {type(e).__name__}]"
+
 # === END OF FILE i4_llm_agent/prompting.py ===
