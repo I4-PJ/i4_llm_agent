@@ -3,26 +3,22 @@
 
 import logging
 import json
-import asyncio # <<< Add asyncio for potential concurrent DB calls
-import re # <<< Import re for stripping
-import sqlite3 # <<< Add sqlite3 import for type hinting
+import asyncio # Keep asyncio for the main function signature
+import re
+import sqlite3
 from typing import Dict, Optional, Callable, Any, Tuple, Union, Coroutine
 
-# --- Import the new formatter and default template ---
 from .prompting import format_inventory_update_prompt, DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT
 
 logger = logging.getLogger(__name__) # i4_llm_agent.inventory
 
 # ==============================================================================
-# === 1. Inventory Formatting (Implemented previously)                     ===
+# === 1. Inventory Formatting (No changes needed)                           ===
 # ==============================================================================
-# --- 1.1: Format Inventory for Prompt ---
-# (Code implemented in previous step)
 def format_inventory_for_prompt(session_inventories: Dict[str, str]) -> str:
     """
     Formats the inventory data retrieved from the database into a single,
     human-readable string suitable for context injection.
-    [Implementation from previous step goes here]
     """
     if not session_inventories:
         return "[No Inventory Data Available]"
@@ -70,20 +66,17 @@ def format_inventory_for_prompt(session_inventories: Dict[str, str]) -> str:
     return "\n\n".join(formatted_parts)
 
 # ==============================================================================
-# === 2. Inventory State Modification (JSON Helper - Implemented previously) ===
+# === 2. Inventory State Modification (No changes needed)                    ===
 # ==============================================================================
-# --- 2.1: Modify Inventory JSON Helper ---
-# (Code implemented in previous step)
 def _modify_inventory_json(
     current_inventory_json: Optional[str],
-    action: str, # e.g., "add", "remove", "set_quantity"
+    action: str,
     item_name: str,
     quantity: int = 1,
     description: Optional[str] = None
 ) -> Optional[str]:
     """
     Internal helper to modify inventory data stored as a JSON string.
-    [Implementation from previous step goes here]
     """
     if not item_name or not isinstance(item_name, str) or not item_name.strip():
         logger.error("_modify_inventory_json: Invalid or empty item_name provided.")
@@ -161,12 +154,12 @@ def _modify_inventory_json(
         return None
 
 # ==============================================================================
-# === 3. Post-Turn Inventory Update Orchestration                          ===
+# === 3. Post-Turn Inventory Update Orchestration (MODIFIED SECTION)        ===
 # ==============================================================================
 
-# --- 3.1: Update Inventories from LLM Response (No changes needed here) ---
+# --- 3.1: Update Inventories from LLM Response (MODIFIED: Sequential Processing) ---
 async def update_inventories_from_llm(
-    cursor: sqlite3.Cursor, # <<< CORRECT: Expects cursor
+    cursor: sqlite3.Cursor, # Still needs cursor for DB calls
     session_id: str,
     main_llm_response: str,
     user_query: str,
@@ -176,7 +169,6 @@ async def update_inventories_from_llm(
     db_update_inventory_func: Callable[..., Coroutine[Any, Any, bool]],
     inventory_llm_config: Dict[str, Any]
 ) -> bool:
-    # ... (Implementation as generated before, including loop calling helper) ...
     func_logger = logging.getLogger(__name__ + '.update_inventories_from_llm')
     func_logger.info(f"[{session_id}] Starting post-turn inventory update analysis...")
     if not cursor: func_logger.error(f"[{session_id}] SQLite cursor missing for inventory update."); return False
@@ -199,6 +191,9 @@ async def update_inventories_from_llm(
     inventory_llm_output = response_or_error.strip(); func_logger.debug(f"[{session_id}] Inventory LLM raw output: {inventory_llm_output[:500]}...")
 
     updates_processed_count = 0
+    successful_updates_count = 0 # <<< Track successful updates
+    total_actions_processed = 0   # <<< Track total actions attempted
+
     try:
         json_string_to_parse = inventory_llm_output
         match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", json_string_to_parse, re.IGNORECASE)
@@ -213,19 +208,21 @@ async def update_inventories_from_llm(
             elif updates_list == []: func_logger.info(f"[{session_id}] Inventory LLM indicated no changes (empty updates list)."); return True
             else: return False
         if not updates_list: func_logger.info(f"[{session_id}] Inventory LLM detected no inventory changes."); return True
-        func_logger.info(f"[{session_id}] Inventory LLM detected {len(updates_list)} potential update(s). Processing...")
+        func_logger.info(f"[{session_id}] Inventory LLM detected {len(updates_list)} potential update(s). Processing sequentially...")
 
-        update_tasks = []
+        # --- MODIFICATION START: Sequential Loop ---
         for update_action in updates_list:
+            total_actions_processed += 1 # Count attempt
             if not isinstance(update_action, dict): func_logger.warning(f"[{session_id}] Skipping invalid item in updates list: {update_action}"); continue
             char_name = update_action.get("character_name"); action = update_action.get("action")
             item_name = update_action.get("item_name"); quantity = update_action.get("quantity")
             description = update_action.get("description")
             if not all([char_name, action, item_name]) or not isinstance(quantity, int):
                  func_logger.warning(f"[{session_id}] Skipping update due to missing/invalid fields: {update_action}"); continue
-            # Call helper, ensuring cursor is passed
-            update_tasks.append(
-                 _process_single_inventory_update( # This call expects 9 args
+
+            # Call helper sequentially and wait for it to complete
+            try:
+                update_success = await _process_single_inventory_update(
                      cursor, # 1
                      session_id, # 2
                      db_get_inventory_func, # 3
@@ -236,33 +233,36 @@ async def update_inventories_from_llm(
                      quantity, # 8
                      description # 9
                  )
-            )
-        if not update_tasks: func_logger.warning(f"[{session_id}] No valid update actions found after validation."); return False
-        results = await asyncio.gather(*update_tasks, return_exceptions=True)
-        successful_updates = 0
-        for i, result in enumerate(results):
-             update_info = updates_list[i]
-             if isinstance(result, Exception): func_logger.error(f"[{session_id}] Error processing update for {update_info.get('character_name', 'Unknown')}: {result}", exc_info=result)
-             elif result: successful_updates += 1
-        updates_processed_count = successful_updates
-        func_logger.info(f"[{session_id}] Processed {len(results)} update actions. Successful DB updates: {successful_updates}.")
+                if update_success:
+                    successful_updates_count += 1
+                else:
+                    func_logger.warning(f"[{session_id}] Failed to process update for {char_name} ({action} {item_name}).")
+            except Exception as e_process:
+                 # Catch exceptions from the helper itself
+                 func_logger.error(f"[{session_id}] Error processing update for {char_name} ({action} {item_name}): {e_process}", exc_info=True)
+
+        # --- MODIFICATION END: Sequential Loop ---
+
+        # No need for gather or processing results list
+        updates_processed_count = successful_updates_count # Use the counter from the loop
+        func_logger.info(f"[{session_id}] Processed {total_actions_processed} update actions sequentially. Successful DB updates: {successful_updates_count}.")
+
     except json.JSONDecodeError as e: func_logger.error(f"[{session_id}] Failed to decode JSON response from Inventory LLM after cleanup: {e}. String was: '{json_string_to_parse[:500]}...'"); return False
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error processing Inventory LLM response: {e}", exc_info=True); return False
-    return updates_processed_count > 0
-
+    # Return True if at least one update was successfully processed
+    return successful_updates_count > 0
 
 # --- Helper for processing a single update action (Corrected Definition) ---
 async def _process_single_inventory_update(
-    # --- Definition CORRECTED to accept 9 arguments ---
-    cursor: sqlite3.Cursor,           # Arg 1
-    session_id: str,                # Arg 2
-    db_get_func: Callable[..., Coroutine[Any, Any, Optional[str]]], # Arg 3
-    db_update_func: Callable[..., Coroutine[Any, Any, bool]],      # Arg 4
-    char_name: str,                 # Arg 5
-    action: str,                    # Arg 6
-    item_name: str,                 # Arg 7
-    quantity: int,                  # Arg 8
-    description: Optional[str]      # Arg 9
+    cursor: sqlite3.Cursor,
+    session_id: str,
+    db_get_func: Callable[..., Coroutine[Any, Any, Optional[str]]],
+    db_update_func: Callable[..., Coroutine[Any, Any, bool]],
+    char_name: str,
+    action: str,
+    item_name: str,
+    quantity: int,
+    description: Optional[str]
 ) -> bool:
     """ Fetches current state, modifies JSON, saves new state for one update. """
     func_logger = logging.getLogger(__name__ + '._process_single_inventory_update')

@@ -1283,12 +1283,11 @@ class SessionPipeOrchestrator:
             return output_body
 
 
-# [[START MODIFIED process_turn METHOD - FULL with Cursor Fix]]
-# --- Method Replacement 3: process_turn (Complete Implementation with Cursor Fix) ---
+
     async def process_turn(
         self,
-        session_id: str, # Now passed directly
-        user_id: str,    # Now passed directly
+        session_id: str,
+        user_id: str,
         body: Dict,
         user_valves: Any,
         event_emitter: Optional[Callable],
@@ -1433,64 +1432,61 @@ class SessionPipeOrchestrator:
 
             # --- 11. Post-Turn Inventory Update (With Config Loading & Cursor Fix) ---
             if inventory_enabled and self._update_inventories_func:
-                 if isinstance(final_result, dict) and "error" in final_result:
-                     self.logger.warning(f"[{session_id}] Skipping post-turn inventory update due to upstream error: {final_result.get('error')}")
-                 elif isinstance(final_result, AsyncGenerator):
-                      self.logger.warning(f"[{session_id}] Skipping post-turn inventory update: Streaming response detected. Update logic needs adjustment for streams.")
-                 elif isinstance(final_result, str):
-                      self.logger.info(f"[{session_id}] Performing post-turn inventory update (Non-Streaming Final LLM response received)...")
-                      await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
-                      try:
-                          # Read Valves for Inventory LLM Config
-                          inv_llm_url = getattr(self.config, 'inv_llm_api_url', None)
-                          inv_llm_key = getattr(self.config, 'inv_llm_api_key', None)
-                          inv_llm_temp = getattr(self.config, 'inv_llm_temperature', 0.3)
-                          inv_llm_prompt_template = getattr(self.config, 'inv_llm_prompt_template', None)
+                    if isinstance(final_result, dict) and "error" in final_result:
+                        self.logger.warning(f"[{session_id}] Skipping post-turn inventory update due to upstream error: {final_result.get('error')}")
+                    elif isinstance(final_result, AsyncGenerator):
+                        self.logger.warning(f"[{session_id}] Skipping post-turn inventory update: Streaming response detected. Update logic needs adjustment for streams.")
+                    elif isinstance(final_result, str):
+                        self.logger.info(f"[{session_id}] Performing post-turn inventory update (Non-Streaming Final LLM response received)...")
+                        await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
+                        try:
+                            inv_llm_url = getattr(self.config, 'inv_llm_api_url', None)
+                            inv_llm_key = getattr(self.config, 'inv_llm_api_key', None)
+                            inv_llm_temp = getattr(self.config, 'inv_llm_temperature', 0.3)
+                            inv_llm_prompt_template = getattr(self.config, 'inv_llm_prompt_template', None)
 
-                          template_seems_valid = inv_llm_prompt_template and isinstance(inv_llm_prompt_template, str) and "[Library Default" not in inv_llm_prompt_template and len(inv_llm_prompt_template) > 50
-                          if not inv_llm_url or not inv_llm_key or not template_seems_valid:
-                               self.logger.error(f"[{session_id}] Inventory LLM config missing or invalid (URL: {bool(inv_llm_url)}, Key: {bool(inv_llm_key)}, Template Valid: {template_seems_valid}). Cannot perform update.")
-                               await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (config error).", done=True)
-                          elif not self.sqlite_cursor: # Check if cursor exists
-                               self.logger.error(f"[{session_id}] SQLite cursor unavailable. Cannot perform inventory update.")
-                               await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (DB cursor error).", done=True)
-                          else:
-                               # Assemble config dict
-                               inv_llm_config = { "url": inv_llm_url, "key": inv_llm_key, "temp": inv_llm_temp, "prompt_template": inv_llm_prompt_template, }
-                               # Prepare history string
-                               history_for_inv_update_list = self._get_recent_turns_func(current_active_history, 4, exclude_last=False)
-                               history_for_inv_update_str = self._format_history_func(history_for_inv_update_list)
+                            template_seems_valid = inv_llm_prompt_template and isinstance(inv_llm_prompt_template, str) and len(inv_llm_prompt_template) > 50
+                            if not inv_llm_url or not inv_llm_key or not template_seems_valid:
+                                self.logger.error(f"[{session_id}] Inventory LLM config missing or invalid. Cannot perform update.")
+                                await self._emit_status(event_emitter, session_id, "Status: Inventory update skipped (config error).", done=True)
+                            else:
+                                inv_llm_config = {"url": inv_llm_url, "key": inv_llm_key, "temp": inv_llm_temp, "prompt_template": inv_llm_prompt_template}
+                                history_for_inv_update_list = self._get_recent_turns_func(current_active_history, 4, exclude_last=False)
+                                history_for_inv_update_str = self._format_history_func(history_for_inv_update_list)
 
-                               # Call the update function, passing the cursor
-                               update_success = await self._update_inventories_func(
-                                   cursor=self.sqlite_cursor, # <<< Pass cursor here
-                                   session_id=session_id,
-                                   main_llm_response=final_result,
-                                   user_query=latest_user_query_str,
-                                   recent_history_str=history_for_inv_update_str,
-                                   llm_call_func=self._async_llm_call_wrapper,
-                                   db_get_inventory_func=self._get_char_inventory_db_func,
-                                   db_update_inventory_func=self._update_char_inventory_db_func,
-                                   inventory_llm_config=inv_llm_config
-                               )
+                                # Create a new cursor for inventory updates
+                                new_cursor = self.sqlite_cursor.connection.cursor()
+                                update_success = await self._update_inventories_func(
+                                    cursor=new_cursor,
+                                    session_id=session_id,
+                                    main_llm_response=final_result,
+                                    user_query=latest_user_query_str,
+                                    recent_history_str=history_for_inv_update_str,
+                                    llm_call_func=self._async_llm_call_wrapper,
+                                    db_get_inventory_func=self._get_char_inventory_db_func,
+                                    db_update_inventory_func=self._update_char_inventory_db_func,
+                                    inventory_llm_config=inv_llm_config
+                                )
+                                new_cursor.close()
 
-                               if update_success:
-                                   self.logger.info(f"[{session_id}] Post-turn inventory update successful.")
-                                   await self._emit_status(event_emitter, session_id, "Status: Inventory update complete.", done=True)
-                               else:
-                                   self.logger.warning(f"[{session_id}] Post-turn inventory update function returned False (no changes detected or saved).")
-                                   await self._emit_status(event_emitter, session_id, "Status: Inventory update check finished (no changes saved).", done=True)
+                                if update_success:
+                                    self.logger.info(f"[{session_id}] Post-turn inventory update successful.")
+                                    await self._emit_status(event_emitter, session_id, "Status: Inventory update complete.", done=True)
+                                else:
+                                    self.logger.warning(f"[{session_id}] Post-turn inventory update function returned False.")
+                                    await self._emit_status(event_emitter, session_id, "Status: Inventory update check finished.", done=True)
 
-                      except Exception as e_inv_update:
-                          self.logger.error(f"[{session_id}] Error during post-turn inventory update call: {e_inv_update}", exc_info=True)
-                          await self._emit_status(event_emitter, session_id, "Status: Error during inventory update.", done=True)
+                        except Exception as e_inv_update:
+                            self.logger.error(f"[{session_id}] Error during post-turn inventory update call: {e_inv_update}", exc_info=True)
+                            await self._emit_status(event_emitter, session_id, "Status: Error during inventory update.", done=True)
 
-                 elif isinstance(final_result, dict) and final_result.get("messages") == final_llm_payload_contents:
-                      self.logger.info(f"[{session_id}] Skipping post-turn inventory update: Final LLM call was disabled or payload unchanged.")
-                      if inventory_enabled:
-                           await self._emit_status(event_emitter, session_id, "Status: Processing complete (Inventory check skipped - Final LLM Off).", done=True)
-                 else:
-                      self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
+
+                    elif isinstance(final_result, dict) and final_result.get("messages") == final_llm_payload_contents:
+                        self.logger.info(f"[{session_id}] Skipping post-turn inventory update: Final LLM call was disabled or payload unchanged.")
+                        if inventory_enabled:
+                            await self._emit_status(event_emitter, session_id, "Status: Processing complete (Inventory check skipped - Final LLM Off).", done=True)
+                    else:
+                        self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
 
             elif not inventory_enabled:
                  self.logger.debug(f"[{session_id}] Skipping post-turn inventory update: Disabled by valve.")
