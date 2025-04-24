@@ -1,12 +1,10 @@
-# --- START OF FILE script.txt ---
-
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.18.8 - Corrected Defaults)
-author: Petr Jílek & Assistant Gemini 2.5
-version: 0.18.8
-description: Corrects default values for prompt template valves to use library defaults directly. Uses i4_llm_agent library (v0.1.5+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
+title: SESSION_MEMORY PIPE (v0.18.9 - Logging Fixes)
+author: Petr Jílek & Assistant Gemini
+version: 0.18.9
+description: Fixes status emission logic, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.5+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
 requirements: pydantic, chromadb, i4_llm_agent>=0.1.5, tiktoken, httpx, open_webui (internal utils)
 """
 # --- END HEADER ---
@@ -210,9 +208,9 @@ except ImportError:
 
 
 # === SECTION 3: CONSTANTS & DEFAULTS ===
-# (No changes needed in this section, ENV VAR names remain the same)
+# (No changes needed in this section)
 DEFAULT_LOG_DIR = r"C:\\Utils\\OpenWebUI"
-DEFAULT_LOG_FILE_NAME = "session_memory_v18_8_pipe_log.log"  # Version updated
+DEFAULT_LOG_FILE_NAME = "session_memory_v18_9_pipe_log.log"  # Version updated
 DEFAULT_LOG_LEVEL = "DEBUG"
 ENV_VAR_LOG_FILE_PATH = "SM_LOG_FILE_PATH"
 ENV_VAR_LOG_LEVEL = "SM_LOG_LEVEL"
@@ -298,13 +296,10 @@ ENV_VAR_INV_LLM_PROMPT_TEMPLATE = "SM_INV_LLM_PROMPT_TEMPLATE"
 DEFAULT_INV_LLM_API_URL = DEFAULT_REFINER_API_URL
 DEFAULT_INV_LLM_API_KEY = ""
 DEFAULT_INV_LLM_TEMPERATURE = DEFAULT_REFINER_TEMPERATURE
-# This VAL is only used if the library import fails
-DEFAULT_INV_LLM_PROMPT_TEMPLATE_VAL = (
-    DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT  # Reference imported constant
-)
+DEFAULT_INV_LLM_PROMPT_TEMPLATE_VAL = DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT
 
 # --- Logger Setup ---
-logger = logging.getLogger("SessionMemoryPipeV18_8Logger")  # Version updated
+logger = logging.getLogger("SessionMemoryPipeV18_9Logger")  # Version updated
 logging.basicConfig(level=logging.INFO)
 
 
@@ -356,9 +351,10 @@ class ChromaDBCompatibleEmbedder:
 
 # === SECTION 5: PIPE CLASS DEFINITION ===
 class Pipe:
-    version = "0.18.8"  # Version updated
+    version = "0.18.9"  # Version updated
 
-    # === SECTION 5.1: VALVES DEFINITION (Corrected Defaults) ===
+    # === SECTION 5.1: VALVES DEFINITION ===
+    # (No changes needed here)
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -434,7 +430,7 @@ class Pipe:
         )
         ragq_llm_prompt: str = Field(
             default=os.getenv(ENV_VAR_RAGQ_LLM_PROMPT, DEFAULT_RAGQ_LLM_PROMPT)
-        )  # Default is imported library const
+        )
         # --- RAG & T2 Chroma Config ---
         summary_collection_prefix: str = Field(
             default=os.getenv(
@@ -495,19 +491,17 @@ class Pipe:
                 os.getenv(ENV_VAR_REFINER_HISTORY_COUNT, DEFAULT_REFINER_HISTORY_COUNT)
             )
         )
-        # --- CORRECTED DEFAULTS for Prompt Templates ---
         cache_update_prompt_template: str = Field(
             default=os.getenv(ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE)
-            or DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,  # Use ENV or imported default
+            or DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
             description="Prompt template for RAG Cache Step 1 (Update).",
         )
         final_context_selection_prompt_template: str = Field(
             default=os.getenv(ENV_VAR_FINAL_SELECT_PROMPT_TEMPLATE)
-            or DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,  # Use ENV or imported default
+            or DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
             description="Prompt template for RAG Cache Step 2 (Select).",
         )
         stateless_refiner_prompt_template: Optional[str] = Field(
-            # For optional template, getenv returns None if not set, which works. Use library default if getenv is None *and* lib default exists
             default=(
                 os.getenv(ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE)
                 if os.getenv(ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE) is not None
@@ -519,7 +513,6 @@ class Pipe:
             ),
             description="Prompt template for Stateless Refinement (Optional).",
         )
-        # --- END CORRECTION ---
         CACHE_UPDATE_SKIP_OWI_THRESHOLD: int = Field(
             default=int(
                 os.getenv(
@@ -566,13 +559,11 @@ class Pipe:
                 os.getenv(ENV_VAR_INV_LLM_TEMPERATURE, DEFAULT_INV_LLM_TEMPERATURE)
             )
         )
-        # --- CORRECTED DEFAULT for Inventory Prompt Template ---
         inv_llm_prompt_template: str = Field(
             default=os.getenv(ENV_VAR_INV_LLM_PROMPT_TEMPLATE)
-            or DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,  # Use ENV or imported default
+            or DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
             description="Prompt template for the Inventory Update LLM.",
         )
-        # --- END CORRECTION ---
         # --- General & Debug ---
         include_ack_turns: bool = Field(
             default=str(
@@ -604,7 +595,7 @@ class Pipe:
 
         # --- Post Init Validation ---
         def model_post_init(self, __context: Any) -> None:
-            # (Validation logic remains the same, checks values after loading)
+            # (Validation logic remains the same)
             if self.t0_active_history_token_limit <= 0:
                 self.t0_active_history_token_limit = (
                     DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT
@@ -665,7 +656,6 @@ class Pipe:
             if not (0.0 <= self.inv_llm_temperature <= 2.0):
                 self.inv_llm_temperature = DEFAULT_INV_LLM_TEMPERATURE
                 logger.warning("Reset inv_llm_temperature to default.")
-            # No need to validate prompt templates here if using library defaults directly
             logger.info("Valves model_post_init validation complete.")
 
     # --- User Valves ---
@@ -685,10 +675,12 @@ class Pipe:
         )
 
     # === SECTION 5.2: INITIALIZATION METHOD ===
-    # (No changes needed here, uses corrected Valves)
+    # (No changes needed here)
     def __init__(self):
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Inventory)"
+        self.name = (
+            f"SESSION_MEMORY PIPE (v{self.version} - Logging Fixes)"  # Updated name
+        )
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
@@ -701,7 +693,7 @@ class Pipe:
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
                 if "api_key" not in k and "prompt" not in k
-            }  # Exclude long prompts from basic log
+            }
             init_log_valves["INIT_final_llm_url"] = getattr(
                 self.valves, "final_llm_api_url", "INIT_LOAD_FAILED"
             )
@@ -768,8 +760,7 @@ class Pipe:
             )
         except Exception as e:
             self.logger.error(f"SQLite init error: {e}", exc_info=True)
-            if self._sqlite_conn:
-                self._sqlite_conn.close()
+            self._sqlite_conn.close() if self._sqlite_conn else None
             self._sqlite_conn, self._sqlite_cursor = None, None
         self._chroma_client = None
         if CHROMADB_AVAILABLE:
@@ -861,7 +852,7 @@ class Pipe:
         self.logger.propagate = False
 
     # === SECTION 5.4: LIFECYCLE METHODS ===
-    # (Includes explicit inventory table check)
+    # (No changes needed here)
     async def on_startup(self):
         self.logger.info(f"on_startup: '{self.name}' (v{self.version}) starting...")
         init_success_main = False
@@ -873,14 +864,15 @@ class Pipe:
                 init_success_main = await asyncio.to_thread(
                     initialize_sqlite_tables, self._sqlite_cursor
                 )
-                if init_success_main:
+                (
                     self.logger.info(
                         "Main SQLite table initialization reported success."
                     )
-                else:
-                    self.logger.error(
+                    if init_success_main
+                    else self.logger.error(
                         "Main SQLite table initialization reported failure."
                     )
+                )
             except Exception as e:
                 self.logger.error(
                     f"Error during main SQLite table initialization: {e}", exc_info=True
@@ -893,14 +885,15 @@ class Pipe:
                 init_success_inv = await asyncio.to_thread(
                     _sync_initialize_inventory_table, self._sqlite_cursor
                 )
-                if init_success_inv:
+                (
                     self.logger.info(
                         "Explicit Inventory table initialization reported success."
                     )
-                else:
-                    self.logger.warning(
+                    if init_success_inv
+                    else self.logger.warning(
                         "Explicit Inventory table initialization reported failure (may already exist or error occurred)."
                     )
+                )
             except ImportError:
                 self.logger.error(
                     "Failed to import _sync_initialize_inventory_table for explicit check."
@@ -930,7 +923,6 @@ class Pipe:
         self.logger.info(f"'{self.name}' startup complete.")
 
     async def on_shutdown(self):
-        # (No changes needed here)
         self.logger.info(f"on_shutdown: '{self.name}' shutting down...")
         if self._sqlite_conn:
             try:
@@ -952,7 +944,6 @@ class Pipe:
         self.logger.info(f"'{self.name}' shutdown complete.")
 
     async def on_valves_updated(self):
-        # (No changes needed here, uses corrected Valves class)
         self.logger.info(
             f"on_valves_updated: Reloading global settings for '{self.name}'..."
         )
@@ -961,7 +952,7 @@ class Pipe:
         old_sqlite_path = getattr(self.valves, "sqlite_db_path", None)
         old_chromadb_path = getattr(self.valves, "chromadb_path", None)
         try:
-            self.valves = self.Valves()  # Reloads using corrected default logic
+            self.valves = self.Valves()
             update_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
@@ -1007,13 +998,8 @@ class Pipe:
         new_log_level = getattr(self.valves, "log_level", None)
         if old_log_path != new_log_path or old_log_level != new_log_level:
             self.logger.info("Log settings changed. Reconfiguring logger...")
-            try:
-                self.configure_logger()
-                self.logger.info("Logger reconfigured successfully.")
-            except Exception as e:
-                self.logger.error(
-                    f"Error during logger reconfiguration: {e}", exc_info=True
-                )
+            self.configure_logger()
+            self.logger.info("Logger reconfigured successfully.")
         new_sqlite_path = getattr(self.valves, "sqlite_db_path", None)
         if old_sqlite_path != new_sqlite_path:
             self.logger.warning(f"SQLite DB path changed. Restart might be required.")
@@ -1086,8 +1072,8 @@ class Pipe:
             self.logger.error(f"Embeddings: Error during retrieval: {e}", exc_info=True)
         return embedding_func
 
-    # === SECTION 5.8 & 5.9: HELPER - Debug Logging ===
-    # (No changes needed here)
+    # === SECTION 5.8 & 5.9: HELPER - Debug Logging (Modified) ===
+    # (No changes needed for _get_debug_log_path, _log_debug_raw_input)
     def _get_debug_log_path(self, suffix: str) -> Optional[str]:
         try:
             base_log_path = self.valves.log_file_path or os.path.join(
@@ -1125,9 +1111,11 @@ class Pipe:
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
             )
 
-    def _log_debug_final_payload(self, session_id: str, output_body: Dict):
-        if not getattr(self.valves, "debug_log_final_payload", False):
-            return
+    # --- Method Updated: _log_debug_final_payload ---
+    # This method is now simpler as it's called directly when payload is known
+    def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
+        """Logs the final payload dictionary if the debug valve is enabled."""
+        # Valve check happens before calling this method in Pipe.pipe
         debug_log_path = self._get_debug_log_path(".DEBUG_PAYLOAD")
         if not debug_log_path:
             logger.error(f"[{session_id}] Cannot log final payload: No path.")
@@ -1138,10 +1126,10 @@ class Pipe:
                 "ts": ts,
                 "pipe": self.version,
                 "sid": session_id,
-                "payload": output_body,
+                "payload": payload_body,
             }
             with open(debug_log_path, "a", encoding="utf-8") as f:
-                json.dump(log_entry, f)
+                json.dump(log_entry, f, indent=2)  # Add indent for readability
                 f.write("\n")
         except Exception as e:
             logger.error(
@@ -1149,8 +1137,43 @@ class Pipe:
                 exc_info=True,
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD ===
-    # (No changes needed here, orchestrator handles the logic)
+    # --- Method Added: _log_debug_inventory_llm ---
+    def _log_debug_inventory_llm(self, session_id: str, content: Any, is_prompt: bool):
+        """Logs Inventory LLM prompt or response if the debug valve is enabled."""
+        # Use the same valve as final payload debug logging for simplicity
+        if not getattr(self.valves, "debug_log_final_payload", False):
+            return
+        debug_log_path = self._get_debug_log_path(".DEBUG_INVENTORY")
+        if not debug_log_path:
+            logger.error(f"[{session_id}] Cannot log inventory LLM data: No path.")
+            return
+        log_type = "PROMPT" if is_prompt else "RESPONSE"
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            # Attempt to pretty-print if content looks like JSON string in response
+            log_content = content
+            if not is_prompt and isinstance(content, str):
+                try:
+                    parsed = json.loads(content)
+                    log_content = json.dumps(
+                        parsed, indent=2
+                    )  # Pretty print JSON string
+                except json.JSONDecodeError:
+                    pass  # Keep as original string if not valid JSON
+
+            with open(debug_log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} ---\n"
+                )
+                f.write(str(log_content))  # Write content (potentially pretty-printed)
+                f.write("\n\n")
+        except Exception as e:
+            logger.error(
+                f"[{session_id}] Failed write debug inventory LLM log ({log_type}): {e}",
+                exc_info=True,
+            )
+
+    # === SECTION 5.11: MAIN PIPE METHOD (Modified) ===
     async def pipe(
         self,
         body: dict,
@@ -1170,6 +1193,7 @@ class Pipe:
         user_id = "default_user"
 
         async def emit_status(description: str, done: bool = False):
+            # (Emit status logic unchanged)
             log_session_id_prefix = (
                 f"[{session_id}]"
                 if session_id != "uninitialized_session"
@@ -1200,6 +1224,7 @@ class Pipe:
                 )
 
         try:
+            # --- Input Validation and Setup ---
             await emit_status("Status: Pipe validating input...")
             if not isinstance(body, dict):
                 await emit_status("ERROR: Invalid input type.", done=True)
@@ -1225,23 +1250,24 @@ class Pipe:
             session_id = f"user_{user_id}_chat_{safe_chat_id_part}"
             self.logger.info(f"Pipe Session ID: {session_id}")
 
+            # --- Orchestrator Config Update ---
             if hasattr(self, "orchestrator") and hasattr(self, "valves"):
                 self.orchestrator.config = self.valves
                 self.logger.debug(
-                    f"[{session_id}] Pipe: Force-updated orchestrator config reference at start of pipe call."
+                    f"[{session_id}] Pipe: Force-updated orchestrator config reference."
                 )
             elif not hasattr(self, "orchestrator"):
-                self.logger.error(
-                    f"[{session_id}] Pipe: Orchestrator missing at start of pipe call!"
-                )
+                self.logger.error(f"[{session_id}] Pipe: Orchestrator missing!")
                 await emit_status("ERROR: Orchestrator Component Missing.", True)
                 return {
                     "error": "Internal Pipe Error: Orchestrator component failed.",
                     "status_code": 500,
                 }
 
+            # --- Debug Logging ---
             self._log_debug_raw_input(session_id, body)
 
+            # --- Session and Valves ---
             session_state = self.session_manager.get_or_create_session(session_id)
             user_valves_obj = None
             if isinstance(__user__, dict) and "valves" in __user__:
@@ -1253,7 +1279,7 @@ class Pipe:
                     self.logger.info(f"[{session_id}] Successfully parsed UserValves.")
                 except Exception as e_parse_uv:
                     self.logger.warning(
-                        f"[{session_id}] Failed to parse __user__['valves'] into UserValves model: {e_parse_uv}. Using defaults."
+                        f"[{session_id}] Failed to parse __user__['valves']: {e_parse_uv}. Using defaults."
                     )
                     user_valves_obj = self.UserValves()
             else:
@@ -1264,6 +1290,7 @@ class Pipe:
             self.session_manager.set_user_valves(session_id, user_valves_obj)
             self.logger.debug(f"[{session_id}] Stored UserValves in session state.")
 
+            # --- History & Regen Check ---
             await emit_status("Status: Pipe handling history...")
             incoming_messages = body.get("messages", [])
             previous_input = self.session_manager.get_previous_input_messages(
@@ -1275,14 +1302,16 @@ class Pipe:
                 and len(incoming_messages) > 0
             )
             log_msg = f"[{session_id}] Regeneration heuristic: {'DETECTED' if is_regeneration_heuristic else 'Not detected'}."
-            if is_regeneration_heuristic:
+            (
                 self.logger.info(log_msg)
-            else:
-                self.logger.debug(log_msg)
+                if is_regeneration_heuristic
+                else self.logger.debug(log_msg)
+            )
             self.session_manager.set_previous_input_messages(
                 session_id, incoming_messages.copy()
             )
 
+            # --- Embedding Setup ---
             await emit_status("Status: Pipe resolving embeddings...")
             owi_embed_func = None
             chroma_embed_wrapper = None
@@ -1314,6 +1343,7 @@ class Pipe:
                     f"[{session_id}] Skipping embedding setup: OWI Request context missing."
                 )
 
+            # --- Debug Info Before Orchestrator Call ---
             pipe_valves_url = getattr(
                 self.valves, "final_llm_api_url", "PipeValvesAttrMissing"
             )
@@ -1327,6 +1357,7 @@ class Pipe:
                 f"[{session_id}] Pipe Debug: Just BEFORE calling orchestrator. FinalURL='{str(pipe_valves_url)[:50]}...', FinalKey={pipe_valves_key_present}, InvEnable={pipe_inv_enable}"
             )
 
+            # --- Call Orchestrator ---
             await emit_status("Status: Pipe delegating to orchestrator...")
             self.logger.info(f"[{session_id}] Calling orchestrator.process_turn...")
             orchestrator_result = await self.orchestrator.process_turn(
@@ -1343,9 +1374,34 @@ class Pipe:
                 f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
             )
 
-            if isinstance(orchestrator_result, dict):
-                self._log_debug_final_payload(session_id, orchestrator_result)
+            # --- Log Final Payload (if applicable and enabled) ---
+            if getattr(self.valves, "debug_log_final_payload", False):
+                if (
+                    isinstance(orchestrator_result, dict)
+                    and "messages" in orchestrator_result
+                ):
+                    # Only log if orchestrator returned the payload dict (final LLM didn't run)
+                    self.logger.info(
+                        f"[{session_id}] Logging final payload due to debug valve."
+                    )
+                    self._log_debug_final_payload(session_id, orchestrator_result)
+                elif isinstance(orchestrator_result, str):
+                    self.logger.debug(
+                        f"[{session_id}] Skipping final payload log: Orchestrator returned string (final LLM likely ran)."
+                    )
+                elif isinstance(orchestrator_result, AsyncGenerator):
+                    self.logger.debug(
+                        f"[{session_id}] Skipping final payload log: Orchestrator returned generator (streaming)."
+                    )
+                elif (
+                    isinstance(orchestrator_result, dict)
+                    and "error" in orchestrator_result
+                ):
+                    self.logger.debug(
+                        f"[{session_id}] Skipping final payload log: Orchestrator returned error dict."
+                    )
 
+            # --- Final Cleanup & Return ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(
                 f"Pipe.pipe v{self.version} [{session_id}]: Finished at {pipe_end_time_iso}"
@@ -1356,25 +1412,17 @@ class Pipe:
             self.logger.info(
                 f"Pipe.pipe [{session_id}]: Processing cancelled by external signal."
             )
-            try:
-                await emit_status("Status: Processing stopped by user.", done=True)
-            except Exception:
-                pass
+            await emit_status("Status: Processing stopped by user.", done=True)
             raise
         except Exception as e_pipe_global:
             self.logger.critical(
                 f"Pipe.pipe [{session_id}]: UNHANDLED PIPE SETUP/WRAPPER EXCEPTION: {e_pipe_global}",
                 exc_info=True,
             )
-            try:
-                await emit_status(
-                    f"ERROR: Pipe Failed ({type(e_pipe_global).__name__})", done=True
-                )
-            except Exception:
-                pass
+            await emit_status(
+                f"ERROR: Pipe Failed ({type(e_pipe_global).__name__})", done=True
+            )
             return f"Apologies, a critical error occurred in the Session Memory Pipe: {type(e_pipe_global).__name__}."
 
 
 # === SECTION 6: END OF SCRIPT ===
-
-# --- END OF FILE script.txt ---
