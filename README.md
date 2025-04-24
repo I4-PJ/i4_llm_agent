@@ -218,6 +218,29 @@ These settings can be configured **per chat** within the Open WebUI "Chat Settin
 4.  **Select Pipe:** In Open WebUI, select the "SESSION\_MEMORY PIPE" in the chat settings or set it as a base model.
 5.  **Configure User Valves:** Adjust the session-specific User Valves (`long_term_goal`, etc.) in the Chat Settings -> Valves section as needed.
 
+for in case of issue with SQLLite database (to be executed manualy towards the database to create tables accordingly.):
+Cache table create query: CREATE TABLE session_rag_cache (
+                session_id TEXT PRIMARY KEY,
+                cached_context TEXT NOT NULL,
+                last_updated_utc REAL NOT NULL,
+                last_updated_iso TEXT
+            )
+TIER 1 memory table create query:
+CREATE TABLE tier1_text_summaries (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    user_id TEXT,
+                    summary_text TEXT NOT NULL,
+                    timestamp_utc REAL NOT NULL,
+                    timestamp_iso TEXT,
+                    turn_start_index INTEGER,
+                    turn_end_index INTEGER,
+                    char_length INTEGER,
+                    config_t0_token_limit INTEGER,
+                    config_t1_chunk_target INTEGER,
+                    calculated_prompt_tokens INTEGER,
+                    t0_end_index_at_summary INTEGER
+
 ---
 
 ## 💾 Storage
