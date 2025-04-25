@@ -74,63 +74,67 @@ CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 1 (Cache Update) - v2 (Focus on Character Profiles)
+# [[[ START MODIFIED PROMPT TEMPLATE - v2.1 Optimized ]]]
+# Default Template Text for Step 1 (Cache Update) - v2.1 (Optimized for Speed/Clarity)
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Session Background Curator
-**Task:** Maintain and update the SESSION CACHE by intelligently merging background information (lore, facts) AND establishing persistent core character profile summaries. Prioritize `character_profile` documents as the foundation for character understanding.
-**Objective:** Create and maintain an accurate, concise, and persistent cache containing both factual background information AND foundational summaries of key characters involved in the session, useful for long-term context.
+**Role:** Session Background Cache Maintainer
+**Task:** Efficiently update the SESSION CACHE using new information. Prioritize preserving existing core character profiles and integrating ONLY relevant NEW factual details.
+**Objective:** Maintain an accurate and structured cache for long-term context, focusing on speed and essential updates.
 
-**Instructions:**
+**Inputs:**
+- LATEST USER QUERY (for context)
+- CURRENT OWI RETRIEVAL (potential new info & profiles)
+- PREVIOUSLY REFINED CACHE (base for update)
+- RECENT CHAT HISTORY (for context only)
 
-1.  **Prioritize Character Profiles:**
-    *   Identify all provided `character_profile` type documents within the CURRENT OWI RETRIEVAL. These are the **primary source** for core character information.
-    *   For each key character (e.g., Caldric, Emily, Julia) with a profile:
-        *   **Extract AND Summarize Key Sections:** Concisely summarize the essential information from their profile, covering: Identity/Origins, Personality/Core Traits, Role/Capabilities, and Historical Legacy/Key Relationships.
-        *   **Mandatory Inclusion:** These character profile summaries **must** form the core foundation of the SESSION CACHE output. If a profile exists, its summarized information should always be present in the cache.
+**Core Instructions:**
 
-2.  **Integrate New Factual Information:**
-    *   Scan the CURRENT OWI RETRIEVAL (excluding profiles already processed) for new background *facts* (lore, world details, significant established events, location details) that are relevant to the session and NOT already present or accurately captured in the PREVIOUSLY REFINED CACHE.
-    *   Merge these relevant new *facts* logically with the character profile summaries and any existing factual lore from the previous cache.
+1.  **Identify & Preserve Character Profiles:**
+    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents.
+    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (likely under `# Character: Name` headings).
+    *   **Action:** If a character profile exists in PREVIOUS CACHE, **KEEP IT** unless a NEW profile in CURRENT OWI *explicitly contradicts or supersedes* it. Do NOT significantly alter core traits based only on RECENT CHAT HISTORY. Minor clarifications from OWI can be merged.
+    *   **Action:** If a NEW profile is found in CURRENT OWI for a character NOT in PREVIOUS CACHE, summarize its essential details (Identity, Traits, Role) and ADD it to the output under a new heading.
 
-3.  **Refine & Update (Carefully):**
-    *   **Character Info:** Compare the summarized profile info (Step 1) with the PREVIOUSLY REFINED CACHE and RECENT CHAT HISTORY.
-        *   Update the character summaries *only if* new OWI context provides explicit *canon* corrections/additions (e.g., an updated profile) OR if the RECENT CHAT HISTORY shows *significant, consistent, and lasting* character development or changes that fundamentally alter a core aspect. **Do not overwrite core personality traits from profiles based on temporary actions or moods in recent dialogue.**
-        *   Use RECENT CHAT HISTORY primarily to *confirm* established traits or add minor nuances *without* removing the core profile summary.
-    *   **Factual Lore:** If new factual information contradicts or provides a more accurate/detailed version of existing cached facts, update the cache accordingly. Use RECENT CHAT HISTORY to help resolve factual conflicts if possible.
+2.  **Integrate NEW Factual Lore:**
+    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for NEW background facts (lore, world details, established events, locations) relevant to the session.
+    *   **Action:** Compare these NEW facts against the PREVIOUSLY REFINED CACHE. If a fact is genuinely NEW and relevant OR provides a clear CORRECTION/UPDATE to existing lore, ADD/MODIFY it in the output. Do NOT add redundant facts.
 
-4.  **Use Query/History for Context:** Utilize the LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand the current focus, identify relevant themes, and resolve contradictions during the merging/updating process. **DO NOT include summaries of the RECENT CHAT HISTORY itself in the cache output.**
+3.  **Minimal Pruning:**
+    *   **Action:** Only remove sections from the PREVIOUS CACHE if they are *explicitly contradicted* by newer info in CURRENT OWI or are clearly no longer relevant (e.g., a character definitively removed from the story). **Default to keeping existing information unless strong evidence dictates removal.**
 
-5.  **Prune Gently:** Review the *entire* combined information (profile summaries + facts). Remove cached details that are outdated, explicitly contradicted by canon sources, or demonstrably irrelevant to the ongoing session narrative based on the dialogue flow. Remove character profiles that are no longer relevant to the session. **Do not remove character profiles or lore that are still relevant, even if they are not currently active in the session.**
+4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what new information* to add/update. **DO NOT summarize the history itself in the cache.**
 
-6.  **Output Format & Structure:**
-    *   Produce a clean, coherent text block representing the updated SESSION CACHE.
-    *   **Crucially, structure the output logically.** Use headings for clarity (e.g., `# Character: Caldric`, `# Lore: Aethelgard Empire`, `# Plot Point: Julia's Marriage`).
-    *   If no changes are needed (no new relevant info, profiles already cached), output the PREVIOUSLY REFINED CACHE content.
-    *   If the cache was empty and OWI retrieval provided nothing relevant (neither facts nor profiles), output: `[No relevant background context found]`
+5.  **Output Format:**
+    *   Produce the complete, updated SESSION CACHE text.
+    *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
+    *   **No Change:** If analysis shows no significant additions/updates/removals are needed, output the exact content of PREVIOUSLY REFINED CACHE.
+    *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
 
 **INPUTS:**
 
-**LATEST USER QUERY (for context):**
+**LATEST USER QUERY:**
 {CACHE_UPDATE_QUERY_PLACEHOLDER}
 
-**CURRENT OWI RETRIEVAL (potential new info & profiles):**
+**CURRENT OWI RETRIEVAL:**
 ---
 {CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER}
 ---
 
-**PREVIOUSLY REFINED CACHE (to be updated):**
+**PREVIOUSLY REFINED CACHE:**
 ---
 {CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY (for context & nuance):**
+**RECENT CHAT HISTORY:**
 ---
 {CACHE_UPDATE_HISTORY_PLACEHOLDER}
 ---
 
 **OUTPUT (Updated Session Cache Text - Structured):**
 """
+# [[[ END MODIFIED PROMPT TEMPLATE - v2.1 Optimized ]]]
+
 
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
@@ -387,7 +391,6 @@ async def generate_rag_query(
         if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
         else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
-# --- [[ START REVISED FUNCTION ]] ---
 # --- Function: Construct Final LLM Payload (Revised for Long Term Goal) ---
 def construct_final_llm_payload(
     system_prompt: str,
@@ -501,8 +504,8 @@ def construct_final_llm_payload(
     final_payload = {"contents": gemini_contents}
     func_logger.debug(f"Final payload constructed with {len(gemini_contents)} turns using strategy '{strategy}'.")
     return final_payload
-# --- [[ END REVISED FUNCTION ]] ---
 
+# --- Function: Combine Background Context (Includes Inventory) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
@@ -616,7 +619,8 @@ DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 1.  **Prioritize Direct Commands:** First, check the **USER QUERY** for any explicit `INVENTORY:` commands matching the formats above.
     *   If a valid command is found, parse it accurately to determine the character(s), action(s) (SET, ADD, REMOVE, CLEAR), items, and quantities.
     *   Generate the JSON `updates` based *solely* on the parsed command. **Ignore conflicting dialogue in the Assistant Response if a command is present.**
-    *   For `SET`, generate multiple "set_quantity" actions (or equivalent "add" actions if starting fresh/clearing first). For `CLEAR`, generate "remove" actions for existing items or a special indicator if possible. *(Self-correction: Simpler might be to just output a single conceptual 'set' or 'clear' action if the target system can handle it, but the JSON structure only has add/remove/set_quantity. Let's stick to generating fundamental actions)* -> For `SET`: Generate `set_quantity` action for each item listed. For `CLEAR`, generate `remove` actions for *all* items currently known for that character (requires context not available here - ** fallback: ** Output a single action `{{ "character_name": "[Name]", "action": "remove", "item_name": "__ALL__", "quantity": 0 }}` if you detect `CLEAR`). *(Self-correction 2: Sticking to defined actions is safest)* -> For `SET`, generate a series of `set_quantity` updates. For `CLEAR`, aim to generate `remove` actions for all items *mentioned in the command context or recent history if possible*, otherwise signal inability or generate a placeholder like `remove __ALL__`. *(Self-correction 3: Let's keep it simple for now)* -> **If `INVENTORY: SET` is found, generate `set_quantity` actions for *only* the items listed in the command.** (Existing items not listed are implicitly removed by the downstream logic). **If `INVENTORY: CLEAR` is found, represent this with `{{ "action": "remove", "item_name": "__ALL_ITEMS__", "quantity": 0 }}`.**
+    *   For `SET`, generate `set_quantity` action for each item listed. (Existing items not listed are implicitly removed by the downstream logic).
+    *   If `INVENTORY: CLEAR` is found, represent this with `{{ "action": "remove", "item_name": "__ALL_ITEMS__", "quantity": 0 }}` for the specified character.
 
 2.  **Analyze Dialogue (If No Command Found):** If no `INVENTORY:` command is present in the User Query, *then* analyze the **ASSISTANT RESPONSE** (and User Query for context) for narrative descriptions of inventory changes.
     *   Identify actions like picking up, dropping, giving, receiving, using (if consumable), crafting, buying, or selling items mentioned.
