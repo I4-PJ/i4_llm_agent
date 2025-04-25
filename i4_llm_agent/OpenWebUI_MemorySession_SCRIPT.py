@@ -361,11 +361,12 @@ class ChromaDBCompatibleEmbedder:
         return embeddings
 
 
-# === SECTION 5: PIPE CLASS DEFINITION ===
+# === SECTION 5: PIPE CLASS DEFINITION (WITH ENHANCED DEBUG LOGGING) ===
 class Pipe:
     version = "0.18.10"  # Version updated
 
     # === SECTION 5.1: VALVES DEFINITION ===
+    # (Valves class definition remains unchanged - MAKE SURE debug_log_final_payload is True here or via ENV)
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -576,7 +577,7 @@ class Pipe:
             description="Prompt template for the Inventory Update LLM.",
         )
 
-        # --- <<< NEW: Event Hint Feature >>> ---
+        # --- Event Hint Feature ---
         enable_event_hints: bool = Field(
             default=str(
                 os.getenv(ENV_VAR_ENABLE_EVENT_HINTS, str(DEFAULT_ENABLE_EVENT_HINTS))
@@ -614,7 +615,6 @@ class Pipe:
                 )
             )
         )
-        # --- <<< END NEW: Event Hint Feature >>> ---
 
         # --- General & Debug ---
         include_ack_turns: bool = Field(
@@ -629,7 +629,7 @@ class Pipe:
             ).lower()
             == "true"
         )
-        debug_log_final_payload: bool = Field(
+        debug_log_final_payload: bool = Field(  # <<< ENSURE THIS IS TRUE
             default=str(
                 os.getenv(
                     ENV_VAR_DEBUG_LOG_FINAL_PAYLOAD,
@@ -647,7 +647,7 @@ class Pipe:
 
         # --- Post Init Validation ---
         def model_post_init(self, __context: Any) -> None:
-            # (Validation logic remains the same, but add Event Hint Temp)
+            # (Validation logic remains the same)
             if self.t0_active_history_token_limit <= 0:
                 self.t0_active_history_token_limit = (
                     DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT
@@ -708,7 +708,6 @@ class Pipe:
             if not (0.0 <= self.inv_llm_temperature <= 2.0):
                 self.inv_llm_temperature = DEFAULT_INV_LLM_TEMPERATURE
                 logger.warning("Reset inv_llm_temperature to default.")
-            # <<< NEW Validation for Event Hint Temp >>>
             if not (0.0 <= self.event_hint_llm_temperature <= 2.0):
                 self.event_hint_llm_temperature = DEFAULT_EVENT_HINT_LLM_TEMPERATURE
                 logger.warning("Reset event_hint_llm_temperature to default.")
@@ -734,10 +733,9 @@ class Pipe:
 
     # === SECTION 5.2: INITIALIZATION METHOD ===
     def __init__(self):
+        # (Initialization logic remains unchanged)
         self.type = "pipe"
-        self.name = (
-            f"SESSION_MEMORY PIPE (v{self.version} - Event Hints)"  # Updated name
-        )
+        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Event Hints)"
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
@@ -751,15 +749,18 @@ class Pipe:
                 for k, v in self.valves.model_dump().items()
                 if "api_key" not in k and "prompt" not in k
             }
-            # Add more specific logs for new features if needed
             init_log_valves["INIT_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
-            init_log_valves["INIT_enable_event_hints"] = getattr(  # <<< Log Event Hints
+            init_log_valves["INIT_enable_event_hints"] = getattr(
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
+            init_log_valves["INIT_debug_log_final_payload"] = (
+                getattr(  # <<< Log debug setting
+                    self.valves, "debug_log_final_payload", "LOAD_FAILED"
+                )
+            )
             self.logger.info(f"Pipe.__init__: self.valves loaded: {init_log_valves}")
-            # Warnings for missing keys remain important
             if not self.valves.summarizer_api_key:
                 self.logger.warning("Global Summarizer API Key MISSING.")
             if not self.valves.ragq_llm_api_key:
@@ -783,7 +784,7 @@ class Pipe:
             ):
                 self.logger.warning(
                     "Event Hints ENABLED but Event Hint LLM API Key MISSING!"
-                )  # <<< Warning for Event Hints
+                )
         except Exception as e:
             self.logger.error(f"CRITICAL Global Valve init error: {e}", exc_info=True)
             raise RuntimeError("Failed to initialize pipe Global Valves") from e
@@ -1011,13 +1012,15 @@ class Pipe:
                 for k, v in self.valves.model_dump().items()
                 if "api_key" not in k and "prompt" not in k
             }
-            # Add more specific logs for new features if needed
             update_log_valves["UPDATE_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
-            update_log_valves["UPDATE_enable_event_hints"] = (
-                getattr(  # <<< Log Event Hints
-                    self.valves, "enable_event_hints", "LOAD_FAILED"
+            update_log_valves["UPDATE_enable_event_hints"] = getattr(
+                self.valves, "enable_event_hints", "LOAD_FAILED"
+            )
+            update_log_valves["UPDATE_debug_log_final_payload"] = (
+                getattr(  # <<< Log debug setting
+                    self.valves, "debug_log_final_payload", "LOAD_FAILED"
                 )
             )
             self.logger.info(
@@ -1113,29 +1116,59 @@ class Pipe:
             self.logger.error(f"Embeddings: Error during retrieval: {e}", exc_info=True)
         return embedding_func
 
-    # === SECTION 5.8 & 5.9: HELPER - Debug Logging ===
+    # === SECTION 5.8 & 5.9: HELPER - Debug Logging (ADDED LOGGING) ===
     def _get_debug_log_path(self, suffix: str) -> Optional[str]:
-        # (No changes needed here)
+        # <<< ADDED LOGGING HERE >>>
+        func_logger = self.logger  # Use the main pipe logger
+        func_logger.debug(f"_get_debug_log_path called with suffix: '{suffix}'")
         try:
-            base_log_path = self.valves.log_file_path or os.path.join(
-                DEFAULT_LOG_DIR, DEFAULT_LOG_FILE_NAME
-            )
+            base_log_path = self.valves.log_file_path
+            if not base_log_path:
+                func_logger.error(
+                    "Cannot get debug path: Main log_file_path valve is empty."
+                )
+                return None
+            func_logger.debug(f"Base log path from valves: '{base_log_path}'")
             log_dir = os.path.dirname(base_log_path)
-            os.makedirs(log_dir, exist_ok=True)
+            func_logger.debug(f"Target log directory: '{log_dir}'")
+            try:
+                func_logger.debug(
+                    f"Attempting os.makedirs for: '{log_dir}' (exist_ok=True)"
+                )
+                os.makedirs(log_dir, exist_ok=True)
+                func_logger.debug(f"os.makedirs command finished for: '{log_dir}'")
+            except PermissionError as pe:
+                func_logger.error(
+                    f"PERMISSION ERROR creating log directory '{log_dir}': {pe}"
+                )
+                return None
+            except Exception as e_mkdir:
+                func_logger.error(
+                    f"Error creating log directory '{log_dir}': {e_mkdir}",
+                    exc_info=True,
+                )
+                return None
+
             base_name, _ = os.path.splitext(os.path.basename(base_log_path))
             debug_filename = f"{base_name}{suffix}.log"
-            return os.path.join(log_dir, debug_filename)
+            final_path = os.path.join(log_dir, debug_filename)
+            func_logger.info(
+                f"Constructed debug log path: '{final_path}'"
+            )  # Use INFO level for path visibility
+            return final_path
         except Exception as e:
-            logger.error(f"Failed get debug path '{suffix}': {e}")
+            func_logger.error(f"Failed get debug path '{suffix}': {e}", exc_info=True)
             return None
 
     def _log_debug_raw_input(self, session_id: str, body: Dict):
-        # (No changes needed here)
+        # (No logic changes, just uses the updated path getter)
         if not getattr(self.valves, "debug_log_raw_input", False):
             return
         debug_log_path = self._get_debug_log_path(".DEBUG_INPUT")
         if not debug_log_path:
-            logger.error(f"[{session_id}] Cannot log raw input: No path.")
+            self.logger.error(
+                f"[{session_id}] Cannot log raw input: No path determined."
+            )
             return
         try:
             ts = datetime.now(timezone.utc).isoformat()
@@ -1145,19 +1178,26 @@ class Pipe:
                 "sid": session_id,
                 "body": body,
             }
+            # <<< ADDED LOGGING HERE >>>
+            self.logger.debug(
+                f"[{session_id}] Attempting to write RAW INPUT debug log to: {debug_log_path}"
+            )
             with open(debug_log_path, "a", encoding="utf-8") as f:
                 json.dump(log_entry, f)
                 f.write("\n")
+            self.logger.debug(f"[{session_id}] Successfully wrote RAW INPUT debug log.")
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
             )
 
     def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
-        # (No changes needed here)
+        # (No logic changes, just uses the updated path getter & ADDED LOGGING)
         debug_log_path = self._get_debug_log_path(".DEBUG_PAYLOAD")
         if not debug_log_path:
-            logger.error(f"[{session_id}] Cannot log final payload: No path.")
+            self.logger.error(
+                f"[{session_id}] Cannot log final payload: No path determined."
+            )
             return
         try:
             ts = datetime.now(timezone.utc).isoformat()
@@ -1167,22 +1207,33 @@ class Pipe:
                 "sid": session_id,
                 "payload": payload_body,
             }
+            # <<< ADDED LOGGING HERE >>>
+            self.logger.info(
+                f"[{session_id}] Attempting to write FINAL PAYLOAD debug log to: {debug_log_path}"
+            )  # INFO level
             with open(debug_log_path, "a", encoding="utf-8") as f:
                 json.dump(log_entry, f, indent=2)
                 f.write("\n")
+            self.logger.info(
+                f"[{session_id}] Successfully wrote FINAL PAYLOAD debug log."
+            )  # INFO level
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 f"[{session_id}] Failed write debug final payload log: {e}",
                 exc_info=True,
             )
 
     def _log_debug_inventory_llm(self, session_id: str, content: Any, is_prompt: bool):
-        # (No changes needed here)
-        if not getattr(self.valves, "debug_log_final_payload", False):
+        # (No logic changes, just uses the updated path getter & ADDED LOGGING)
+        if not getattr(
+            self.valves, "debug_log_final_payload", False
+        ):  # Controlled by same valve
             return
         debug_log_path = self._get_debug_log_path(".DEBUG_INVENTORY")
         if not debug_log_path:
-            logger.error(f"[{session_id}] Cannot log inventory LLM data: No path.")
+            self.logger.error(
+                f"[{session_id}] Cannot log inventory LLM data: No path determined."
+            )
             return
         log_type = "PROMPT" if is_prompt else "RESPONSE"
         try:
@@ -1194,19 +1245,26 @@ class Pipe:
                     log_content = json.dumps(parsed, indent=2)
                 except json.JSONDecodeError:
                     pass
+            # <<< ADDED LOGGING HERE >>>
+            self.logger.debug(
+                f"[{session_id}] Attempting to write INVENTORY LLM ({log_type}) debug log to: {debug_log_path}"
+            )
             with open(debug_log_path, "a", encoding="utf-8") as f:
                 f.write(
                     f"--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} ---\n"
                 )
                 f.write(str(log_content))
                 f.write("\n\n")
+            self.logger.debug(
+                f"[{session_id}] Successfully wrote INVENTORY LLM ({log_type}) debug log."
+            )
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 f"[{session_id}] Failed write debug inventory LLM log ({log_type}): {e}",
                 exc_info=True,
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD ===
+    # === SECTION 5.11: MAIN PIPE METHOD (ADDED LOGGING) ===
     async def pipe(
         self,
         body: dict,
@@ -1219,8 +1277,7 @@ class Pipe:
         __task__=None,
         __task_body__: Optional[dict] = None,
     ) -> Union[dict, AsyncGenerator[str, None], str]:
-        # (No changes needed in the main pipe method logic itself,
-        # the orchestrator now handles the event hint logic internally)
+        # (Logic unchanged, just uses the updated debug helpers)
         pipe_start_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Pipe.pipe v{self.version}: Entered at {pipe_start_time_iso}")
         self._current_event_emitter = __event_emitter__
@@ -1462,32 +1519,34 @@ class Pipe:
                 f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
             )
 
-            # --- Log Final Payload ---
-            if getattr(self.valves, "debug_log_final_payload", False):
-                if (
-                    isinstance(orchestrator_result, dict)
-                    and "messages" in orchestrator_result
-                ):
+            # --- START Enhanced Payload Debug Logging Check ---
+            # <<< Log the valve value and result type >>>
+            debug_payload_valve_value = getattr(
+                self.valves, "debug_log_final_payload", False
+            )
+            result_is_payload_dict = (
+                isinstance(orchestrator_result, dict)
+                and "messages" in orchestrator_result
+            )
+            self.logger.debug(
+                f"[{session_id}] Debug Payload Check: Valve Value={debug_payload_valve_value}, Result Is Payload Dict={result_is_payload_dict}"
+            )
+
+            if debug_payload_valve_value:
+                if result_is_payload_dict:
                     self.logger.info(
-                        f"[{session_id}] Logging final payload due to debug valve."
+                        f"[{session_id}] Calling _log_debug_final_payload (debug valve ON, result is dict)."
                     )
                     self._log_debug_final_payload(session_id, orchestrator_result)
-                # (other skipping conditions remain the same)
-                elif isinstance(orchestrator_result, str):
+                else:
                     self.logger.debug(
-                        f"[{session_id}] Skipping final payload log: Orchestrator returned string (final LLM likely ran)."
+                        f"[{session_id}] Skipping final payload log: Debug valve ON, but result is not a payload dict (type: {type(orchestrator_result).__name__})."
                     )
-                elif isinstance(orchestrator_result, AsyncGenerator):
-                    self.logger.debug(
-                        f"[{session_id}] Skipping final payload log: Orchestrator returned generator (streaming)."
-                    )
-                elif (
-                    isinstance(orchestrator_result, dict)
-                    and "error" in orchestrator_result
-                ):
-                    self.logger.debug(
-                        f"[{session_id}] Skipping final payload log: Orchestrator returned error dict."
-                    )
+            else:
+                self.logger.debug(
+                    f"[{session_id}] Skipping final payload log: Debug valve is OFF."
+                )
+            # --- END Enhanced Payload Debug Logging Check ---
 
             # --- Final Cleanup & Return ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
