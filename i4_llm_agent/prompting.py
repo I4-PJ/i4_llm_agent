@@ -16,6 +16,13 @@ except ImportError:
      logging.getLogger(__name__).critical("Failed to import history utils in prompting.py")
 
 
+try:
+    from .event_hints import EVENT_HANDLING_GUIDELINE_TEXT, format_hint_for_query
+except ImportError:
+    EVENT_HANDLING_GUIDELINE_TEXT = "[EVENT GUIDELINE LOAD FAILED]"
+    def format_hint_for_query(hint): return f"[[Hint Load Failed: {hint}]]"
+    logging.getLogger(__name__).error("Failed to import event_hints utils in prompting.py")
+
 logger = logging.getLogger(__name__) # 'i4_llm_agent.prompting'
 
 # --- Constants for Context Tags (Existing) ---
@@ -391,19 +398,20 @@ async def generate_rag_query(
         if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
         else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
-# --- Function: Construct Final LLM Payload (Revised for Long Term Goal) ---
+# --- Function: Construct Final LLM Payload (MODIFIED for Event Hints) ---
 def construct_final_llm_payload(
     system_prompt: str,
     history: List[Dict],
     context: Optional[str],
     query: str,
-    long_term_goal: Optional[str] = None, # <<< New parameter
+    long_term_goal: Optional[str] = None,
+    event_hint: Optional[str] = None, # <<< New parameter
     strategy: str = 'standard',
     include_ack_turns: bool = True
 ) -> Dict[str, Any]:
     """
     Constructs the final payload for the LLM in Google's 'contents' format,
-    injecting the long-term goal into the system prompt text.
+    injecting the long-term goal and event hint/guideline into the payload.
 
     Args:
         system_prompt (str): The base system instructions (without OWI context tags).
@@ -411,6 +419,7 @@ def construct_final_llm_payload(
         context (Optional[str]): Combined background information string.
         query (str): The latest user query.
         long_term_goal (Optional[str]): A session-specific goal instruction.
+        event_hint (Optional[str]): A dynamically generated event suggestion. <<< ADDED
         strategy (str): Payload construction strategy ('standard' or 'advanced').
         include_ack_turns (bool): Whether to include "Understood" turns.
 
@@ -421,25 +430,25 @@ def construct_final_llm_payload(
     func_logger = logging.getLogger(__name__ + '.construct_final_llm_payload')
     func_logger.debug(
         f"Constructing final LLM payload. Strategy: {strategy}, ACKs: {include_ack_turns}, "
-        f"Goal Provided: {bool(long_term_goal)}"
+        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}" # <<< Log hint status
     )
 
     gemini_contents = []
 
-    # 1. Prepare the combined system instructions including the goal
+    # 1. Prepare the combined system instructions including goal and event guideline
     base_system_prompt_text = system_prompt.strip() if system_prompt else "You are a helpful assistant."
     final_system_instructions = base_system_prompt_text
 
+    # --- Append Long Term Goal (if provided) ---
     safe_long_term_goal = long_term_goal.strip() if isinstance(long_term_goal, str) else None
     if safe_long_term_goal:
-        # Revised guideline based on user feedback
         goal_handling_guideline = (
-            "This is the persistent, overarching goal guiding the direction of the current session. "
-            "**There is no specific deadline or requirement to achieve this goal within a short timeframe; focus on gradual progress and ensuring actions/dialogue remain coherent with this long-term objective.** "
-            "Evaluate NPC actions, dialogue, and narrative developments against this objective. Ensure they generally align with or progress towards achieving this goal, "
-            "unless immediate context or character realism strongly necessitates a temporary deviation. This goal remains active until explicitly changed in the session settings."
+            # ... (guideline text as before)
+             "This is the persistent, overarching goal guiding the direction of the current session. "
+             "**There is no specific deadline or requirement to achieve this goal within a short timeframe; focus on gradual progress and ensuring actions/dialogue remain coherent with this long-term objective.** "
+             "Evaluate NPC actions, dialogue, and narrative developments against this objective. Ensure they generally align with or progress towards achieving this goal, "
+             "unless immediate context or character realism strongly necessitates a temporary deviation. This goal remains active until explicitly changed in the session settings."
         )
-        # Append goal and guideline block to the base prompt text
         goal_block = f"""
 
 --- [ SESSION GOAL ] ---
@@ -454,16 +463,26 @@ def construct_final_llm_payload(
         final_system_instructions += goal_block
         func_logger.debug(f"Appended long term goal to system instructions text.")
 
+    # --- Append Event Handling Guideline (if hint provided) ---
+    if event_hint and isinstance(event_hint, str) and event_hint.strip():
+        # Only append the guideline if a non-empty hint string is passed
+        final_system_instructions += EVENT_HANDLING_GUIDELINE_TEXT
+        func_logger.debug(f"Appended event handling guideline to system instructions text.")
+
     # 2. Add the combined System Instructions turn and optional ACK
     if final_system_instructions:
         gemini_contents.append({"role": "user", "parts": [{"text": f"System Instructions:\n{final_system_instructions}"}]})
         if include_ack_turns:
             ack_text = "Understood. I will follow these instructions."
             if safe_long_term_goal:
-                 ack_text = "Understood. I will follow these instructions and the long-term goal." # Modified ACK
+                 ack_text += " I will also keep the long-term goal in mind."
+            # Modify ACK further if hint guideline was added? Maybe not necessary.
+            # if event_hint and isinstance(event_hint, str) and event_hint.strip():
+            #    ack_text += " I will consider any event suggestions provided."
             gemini_contents.append({"role": "model", "parts": [{"text": ack_text}]})
 
     # 3. Prepare History Turns (Filter for valid roles/content)
+    # ... (no changes needed here)
     history_turns = []
     for msg in history:
         role = msg.get("role")
@@ -472,7 +491,9 @@ def construct_final_llm_payload(
         elif role == "assistant" and content: history_turns.append({"role": "model", "parts": [{"text": content}]})
         elif role == "model" and content: history_turns.append({"role": "model", "parts": [{"text": content}]})
 
+
     # 4. Prepare Context Turn (if context exists) and optional ACK
+    # ... (no changes needed here)
     context_turn = None; ack_turn = None
     has_real_context = bool(context and context.strip() and context.strip() != EMPTY_CONTEXT_PLACEHOLDER)
     if has_real_context:
@@ -481,12 +502,22 @@ def construct_final_llm_payload(
         context_turn = {"role": "user", "parts": [{"text": context_injection_text}]}
         if include_ack_turns: ack_turn = {"role": "model", "parts": [{"text": "Understood. I have reviewed the background information."}]}
 
-    # 5. Prepare Final Query Turn
+
+    # 5. Prepare Final Query Turn (Inject event hint if provided)
     safe_query = query.strip().replace("---", "===") if query and query.strip() else "[User query not provided]"
-    final_query_turn = {"role": "user", "parts": [{"text": safe_query}]}
+    final_query_text = safe_query # Start with the base query
+
+    # --- Inject Event Hint into Query Text ---
+    if event_hint and isinstance(event_hint, str) and event_hint.strip():
+        formatted_hint = format_hint_for_query(event_hint) # e.g., "[[Event Suggestion: ...]]"
+        if formatted_hint:
+            final_query_text = f"{formatted_hint}\n\n{safe_query}" # Prepend the hint
+            func_logger.debug(f"Prepended event hint to final query text.")
+
+    final_query_turn = {"role": "user", "parts": [{"text": final_query_text}]} # Use the potentially modified text
 
     # 6. Assemble Payload based on Strategy
-    # (Order: [Sys+Goal] -> [depends on strategy] -> Query)
+    # ... (no changes needed here)
     if strategy == 'standard': # [Sys+Goal] -> Hist -> [Ctx] -> Query
         gemini_contents.extend(history_turns)
         if context_turn: gemini_contents.append(context_turn)
@@ -504,6 +535,7 @@ def construct_final_llm_payload(
     final_payload = {"contents": gemini_contents}
     func_logger.debug(f"Final payload constructed with {len(gemini_contents)} turns using strategy '{strategy}'.")
     return final_payload
+
 
 # --- Function: Combine Background Context (Includes Inventory) ---
 def combine_background_context(
@@ -600,43 +632,42 @@ INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Post-Turn Inventory Update LLM (Revised for Commands)
+# --- START REVISED TEMPLATE (Hybrid Approach) ---
 DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Inventory Log Keeper
-**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) in a roleplaying session to identify any explicit changes to character inventories, either described in dialogue OR stated via direct commands.
+**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
 **Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
 
-**Supported Direct Command Formats (Expected in User Query):**
-*   `INVENTORY: SET [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Replaces entire inventory for the character)
-*   `INVENTORY: ADD [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Adds specified items/quantities)
-*   `INVENTORY: REMOVE [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Removes specified items/quantities)
-*   `INVENTORY: CLEAR [Character Name]` (Removes all items for the character)
-*(Note: Use `__USER__` for the player character if their specific name isn't provided in the command)*
+**Supported Direct Command Formats (Priority 1):**
+*   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: CLEAR CharacterName`
+*(Note: Use `__USER__` for the player character if their specific name isn't provided)*
 
-**Instructions:**
+**Instructions (Follow in Order):**
 
-1.  **Prioritize Direct Commands:** First, check the **USER QUERY** for any explicit `INVENTORY:` commands matching the formats above.
-    *   If a valid command is found, parse it accurately to determine the character(s), action(s) (SET, ADD, REMOVE, CLEAR), items, and quantities.
-    *   Generate the JSON `updates` based *solely* on the parsed command. **Ignore conflicting dialogue in the Assistant Response if a command is present.**
-    *   For `SET`, generate `set_quantity` action for each item listed. (Existing items not listed are implicitly removed by the downstream logic).
-    *   If `INVENTORY: CLEAR` is found, represent this with `{{ "action": "remove", "item_name": "__ALL_ITEMS__", "quantity": 0 }}` for the specified character.
+1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 2.
 
-2.  **Analyze Dialogue (If No Command Found):** If no `INVENTORY:` command is present in the User Query, *then* analyze the **ASSISTANT RESPONSE** (and User Query for context) for narrative descriptions of inventory changes.
-    *   Identify actions like picking up, dropping, giving, receiving, using (if consumable), crafting, buying, or selling items mentioned.
-    *   Determine the character(s) involved. Use `__USER__` for the player character if their specific name isn't mentioned or easily inferred from history. Identify NPCs by name. Use history context to resolve pronouns ("he", "she", "they").
-    *   Determine the action ("add", "remove", "set_quantity").
-    *   Extract the item name and quantity (default 1 if unspecified).
-    *   Extract an optional description for added items if clearly provided.
+2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 3.
 
-3.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
+    *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
+    *   Generate JSON `updates` based *only* on these dialogue events.
+
+4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
     ```json
     {{
       "updates": [
         // One entry for each detected change (from command OR dialogue)
         {{
           "character_name": "Name or __USER__",
-          "action": "add | remove | set_quantity",
+          "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
           "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
           "quantity": <integer>,
           "description": "<optional string>" // Typically only for 'add' from dialogue
@@ -645,8 +676,10 @@ DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
       ]
     }}
     ```
-4.  **Accuracy is Key:** Only report changes explicitly stated in commands or directly and unambiguously implied by the dialogue. Do NOT infer changes.
-5.  **No Change:** If NO commands are found AND NO inventory changes are detected in the dialogue, output `{{"updates": []}}`.
+    *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
+
+5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
+6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
 
 **INPUTS:**
 
@@ -658,13 +691,14 @@ DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 {INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY (For context, especially pronoun resolution):**
+**RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
 ---
 {INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
 ---
 
 **OUTPUT (JSON object with detected inventory updates):**
 """
+# --- END REVISED TEMPLATE (Hybrid Approach) ---
 
 # --- Function: Format Inventory Update Prompt (No code changes needed here) ---
 def format_inventory_update_prompt(

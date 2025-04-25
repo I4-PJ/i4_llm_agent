@@ -1,6 +1,4 @@
-# --- START OF FILE orchestration.py ---
-
-# [[START MODIFIED orchestration.py - FULL V2 - Fix Circular Import]]
+# === START OF FILE i4_llm_agent/orchestration.py ===
 # i4_llm_agent/orchestration.py
 
 import logging
@@ -9,16 +7,16 @@ import re
 import sqlite3
 import json
 import uuid
+import os # <<< Added for path manipulation in helpers
 from datetime import datetime, timezone
-from typing import (
+from typing import ( # Ensure Coroutine is imported
     Tuple, Union, List, Dict, Optional, Any, Callable, Coroutine, AsyncGenerator
 )
 
 # --- Standard Library Imports ---
-# (Add others as needed)
+import urllib.parse
 
 # --- i4_llm_agent Imports (Careful with internal package imports) ---
-# Import specific modules directly to avoid __init__.py dependency during load
 from .session import SessionManager
 from .database import (
     add_tier1_summary, get_recent_tier1_summaries, get_tier1_summary_count,
@@ -36,36 +34,47 @@ from .history import (
 )
 from .memory import manage_tier1_summarization
 from .prompting import (
-    construct_final_llm_payload, clean_context_tags, generate_rag_query,
+    # format functions (used by aliases or directly)
+    format_inventory_update_prompt,
+    # standalone functions (used by aliases)
+    construct_final_llm_payload as standalone_construct_payload, # Alias the standalone one
+    clean_context_tags, generate_rag_query,
     combine_background_context, process_system_prompt,
     refine_external_context, format_stateless_refiner_prompt,
-    DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
     format_cache_update_prompt, format_final_context_selection_prompt,
+    # Default templates (used by aliases or config)
+    DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
     DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
     DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
-    format_inventory_update_prompt, DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
+    DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
 )
 from .cache import update_rag_cache, select_final_context
 from .api_client import call_google_llm_api, _convert_google_to_openai_payload # Import converter too
 from .utils import count_tokens, calculate_string_similarity, TIKTOKEN_AVAILABLE
 
+# --- NEW: Import Event Hint logic ---
+try:
+    from .event_hints import generate_event_hint, EVENT_HANDLING_GUIDELINE_TEXT, format_hint_for_query
+except ImportError:
+    # Define fallbacks if import fails
+    async def generate_event_hint(*args, **kwargs): return None
+    EVENT_HANDLING_GUIDELINE_TEXT = "[EVENT GUIDELINE LOAD FAILED]"
+    def format_hint_for_query(hint): return f"[[Hint Load Failed: {hint}]]"
+    logging.getLogger(__name__).error("Failed to import event_hints utils in orchestration.py")
 
 # --- Inventory Module Import (LOCAL TO ORCHESTRATION) ---
-# This block determines inventory availability *within this module*
-# without relying on the top-level __init__.py during initial load.
 try:
     from .inventory import (
         format_inventory_for_prompt as _real_format_inventory_func,
         update_inventories_from_llm as _real_update_inventories_func,
     )
     _ORCH_INVENTORY_MODULE_AVAILABLE = True
-    _dummy_format_inventory = None # Not needed if import succeeds
-    _dummy_update_inventories = None # Not needed if import succeeds
+    _dummy_format_inventory = None
+    _dummy_update_inventories = None
 except ImportError:
     _ORCH_INVENTORY_MODULE_AVAILABLE = False
-    _real_format_inventory_func = None # Not available
-    _real_update_inventories_func = None # Not available
-    # Define dummy functions *here* if module not available
+    _real_format_inventory_func = None
+    _real_update_inventories_func = None
     def _dummy_format_inventory(*args, **kwargs): return "[Inventory Module Unavailable]"
     async def _dummy_update_inventories(*args, **kwargs): await asyncio.sleep(0); return False
     logging.getLogger(__name__).warning(
@@ -83,8 +92,6 @@ except ImportError:
     HTTPX_AVAILABLE = False
     # Logging handled by Pipe startup
 
-import urllib.parse
-
 
 logger = logging.getLogger(__name__) # i4_llm_agent.orchestration
 
@@ -99,7 +106,8 @@ class SessionPipeOrchestrator:
     """
     Orchestrates the core processing logic of the Session Memory Pipe.
     Encapsulates logic in helper methods for clarity and maintainability.
-    Includes inventory management features.
+    Includes inventory management and event hint features.
+    Handles final payload debug logging.
     """
 
     def __init__(
@@ -115,7 +123,9 @@ class SessionPipeOrchestrator:
         self.session_manager = session_manager
         self.sqlite_cursor = sqlite_cursor
         self.chroma_client = chroma_client if CHROMADB_AVAILABLE else None
-        self.logger = logger_instance or logger
+        self.logger = logger_instance or logger # Use passed logger or default
+        self.pipe_logger = logger_instance or logger # Explicitly store pipe logger if passed
+        self.pipe_debug_path_getter = None # Placeholder for path getter from Pipe
 
         self._tokenizer = None
         if TIKTOKEN_AVAILABLE and hasattr(self.config, 'tokenizer_encoding_name'):
@@ -135,7 +145,7 @@ class SessionPipeOrchestrator:
         self._format_history_func = format_history_for_llm
         self._get_recent_turns_func = get_recent_turns
         self._manage_memory_func = manage_tier1_summarization
-        self._construct_payload_func = construct_final_llm_payload
+        # Use the standalone payload constructor from prompting.py directly
         self._count_tokens_func = count_tokens
         self._calculate_similarity_func = calculate_string_similarity
         self._dialogue_roles = DIALOGUE_ROLES
@@ -155,7 +165,6 @@ class SessionPipeOrchestrator:
         self._update_char_inventory_db_func = add_or_update_character_inventory
 
         # Inventory Module Functions
-        # Assign functions based on the *local* flag determined above
         if _ORCH_INVENTORY_MODULE_AVAILABLE:
             self._format_inventory_func = _real_format_inventory_func
             self._update_inventories_func = _real_update_inventories_func
@@ -198,7 +207,6 @@ class SessionPipeOrchestrator:
         caller_info: str = "Orchestrator_LLM",
     ) -> Tuple[bool, Union[str, Dict]]:
         """ Wraps the library's LLM call function for error handling. """
-        # (Code remains the same as previous version)
         if not self._llm_call_func:
             self.logger.error(f"[{caller_info}] LLM func unavailable in orchestrator.")
             return False, {"error_type": "SetupError", "message": "LLM func unavailable"}
@@ -234,7 +242,6 @@ class SessionPipeOrchestrator:
         event_emitter: Optional[Callable] = None
     ) -> AsyncGenerator[str, None]:
         """ Handles streaming calls to OpenAI-compatible endpoints. """
-        # (Code remains the same as previous version)
         log_session_id = caller_info
         session_id_match = re.search(r'_(user_.*|chat_.*)', log_session_id)
         extracted_session_id = session_id_match.group(1) if session_id_match else "unknown_session"
@@ -332,6 +339,66 @@ class SessionPipeOrchestrator:
              status_to_emit = final_status_message + ("" if stream_successful else " (Stream Interrupted or Failed)")
              await self._emit_status(event_emitter=event_emitter, session_id=extracted_session_id, description=status_to_emit, done=True)
 
+    # --- START NEW DEBUG LOGGING HELPERS (adapted from Pipe) ---
+    def _orchestrator_get_debug_log_path(self, suffix: str) -> Optional[str]:
+        """Gets the debug log path using config and logger passed from Pipe."""
+        func_logger = getattr(self, 'pipe_logger', self.logger) # Use pipe logger if available
+        func_logger.debug(f"_orchestrator_get_debug_log_path called with suffix: '{suffix}'")
+        try:
+            base_log_path = getattr(self.config, "log_file_path", None)
+            if not base_log_path:
+                func_logger.error("Orch Debug Path: Main log_file_path config is empty.")
+                return None
+            # func_logger.debug(f"Orch Debug Path: Base log path from config: '{base_log_path}'")
+            log_dir = os.path.dirname(base_log_path)
+            func_logger.debug(f"Orch Debug Path: Target log directory: '{log_dir}'")
+            try:
+                # func_logger.debug(f"Orch Debug Path: Attempting os.makedirs for: '{log_dir}' (exist_ok=True)")
+                os.makedirs(log_dir, exist_ok=True)
+                # func_logger.debug(f"Orch Debug Path: os.makedirs command finished for: '{log_dir}'")
+            except PermissionError as pe:
+                func_logger.error(f"Orch Debug Path: PERMISSION ERROR creating log directory '{log_dir}': {pe}")
+                return None
+            except Exception as e_mkdir:
+                func_logger.error(f"Orch Debug Path: Error creating log directory '{log_dir}': {e_mkdir}", exc_info=True)
+                return None
+
+            base_name, _ = os.path.splitext(os.path.basename(base_log_path))
+            debug_filename = f"{base_name}{suffix}.log"
+            final_path = os.path.join(log_dir, debug_filename)
+            func_logger.info(f"Orch Debug Path: Constructed debug log path: '{final_path}'")
+            return final_path
+        except AttributeError as ae:
+            func_logger.error(f"Orch Debug Path: Config object missing attribute ('log_file_path'?): {ae}")
+            return None
+        except Exception as e:
+            func_logger.error(f"Orch Debug Path: Failed get debug path '{suffix}': {e}", exc_info=True)
+            return None
+
+    def _orchestrator_log_debug_payload(self, session_id: str, payload_body: Dict):
+        """Logs the final payload dictionary to the designated debug file."""
+        # Use the internal path getter
+        debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_PAYLOAD")
+        if not debug_log_path:
+            self.logger.error(f"[{session_id}] Orch: Cannot log final payload: No path determined.")
+            return
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            log_entry = {
+                "ts": ts,
+                "pipe_version": getattr(self.config, "version", "unknown"), # Get version from config if possible
+                "sid": session_id,
+                "payload": payload_body,
+            }
+            self.logger.info(f"[{session_id}] Orch: Attempting write FINAL PAYLOAD debug log to: {debug_log_path}")
+            with open(debug_log_path, "a", encoding="utf-8") as f:
+                 f.write(f"--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- START ---\n")
+                 json.dump(log_entry, f, indent=2)
+                 f.write(f"\n--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- END ---\n\n")
+            self.logger.info(f"[{session_id}] Orch: Successfully wrote FINAL PAYLOAD debug log.")
+        except Exception as e:
+            self.logger.error(f"[{session_id}] Orch: Failed write debug final payload log: {e}", exc_info=True)
+    # --- END NEW DEBUG LOGGING HELPERS ---
 
     # --- Helper Methods for process_turn ---
 
@@ -339,7 +406,6 @@ class SessionPipeOrchestrator:
         self, session_id: str, current_active_history: List[Dict], is_regeneration_heuristic: bool
     ) -> Tuple[str, List[Dict]]:
         """ Determines the effective user query and the history slice preceding it. """
-        # (Code remains the same as previous version)
         effective_user_message_index = -1
         user_message_indices = [i for i, msg in enumerate(current_active_history) if isinstance(msg, dict) and msg.get("role") == "user"]
         if not user_message_indices: self.logger.error(f"[{session_id}] No user messages found."); return "", []
@@ -362,7 +428,6 @@ class SessionPipeOrchestrator:
         self, session_id: str, user_id: str, current_active_history: List[Dict], is_regeneration_heuristic: bool, event_emitter: Optional[Callable]
     ) -> Tuple[bool, Optional[str], int, int]:
         """ Checks and performs T1 summarization. """
-        # (Code remains the same as previous version)
         await self._emit_status(event_emitter, session_id, "Status: Checking summarization...")
         summarization_performed_successfully = False; generated_summary = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1
         can_summarize = all([ self._manage_memory_func, self._tokenizer, self._count_tokens_func, self.sqlite_cursor, self._async_llm_call_wrapper, hasattr(self.config, 'summarizer_api_url') and self.config.summarizer_api_url, hasattr(self.config, 'summarizer_api_key') and self.config.summarizer_api_key, current_active_history,])
@@ -402,7 +467,6 @@ class SessionPipeOrchestrator:
         self, session_id: str, t1_success: bool, chroma_embed_wrapper: Optional[Any], event_emitter: Optional[Callable]
     ) -> None:
         """ Handles the transition of the oldest T1 summary to T2 if needed. """
-        # (Code remains the same as previous version)
         await self._emit_status(event_emitter, session_id, "Status: Checking long-term memory capacity...")
         tier2_collection = None
         max_t1_blocks = getattr(self.config, 'max_stored_summary_blocks', 0)
@@ -449,7 +513,6 @@ class SessionPipeOrchestrator:
 
     async def _get_t1_summaries(self, session_id: str) -> Tuple[List[str], int]:
         """ Fetches recent T1 summaries from the database. """
-        # (Code remains the same as previous version)
         recent_t1_summaries = []; t1_retrieved_count = 0; max_blocks_t1 = getattr(self.config, 'max_stored_summary_blocks', 0)
         if self.sqlite_cursor and max_blocks_t1 > 0:
              try: recent_t1_summaries = await get_recent_tier1_summaries(self.sqlite_cursor, session_id, max_blocks_t1); t1_retrieved_count = len(recent_t1_summaries)
@@ -465,7 +528,6 @@ class SessionPipeOrchestrator:
         embedding_func: Optional[Callable], chroma_embed_wrapper: Optional[Any], event_emitter: Optional[Callable]
     ) -> Tuple[List[str], int]:
         """ Performs T2 RAG lookup based on a generated query. """
-        # (Code remains the same as previous version)
         await self._emit_status(event_emitter, session_id, "Status: Searching long-term memory...")
         retrieved_rag_summaries = []; t2_retrieved_count = 0; tier2_collection = None; n_results_t2 = getattr(self.config, 'rag_summary_results_count', 0)
         can_rag = all([ self.chroma_client is not None, chroma_embed_wrapper is not None, latest_user_query_str, embedding_func is not None, self._generate_rag_query_func is not None, self._async_llm_call_wrapper is not None, getattr(self.config, 'ragq_llm_api_url', None), getattr(self.config, 'ragq_llm_api_key', None), getattr(self.config, 'ragq_llm_prompt', None), n_results_t2 > 0 ])
@@ -521,7 +583,6 @@ class SessionPipeOrchestrator:
         event_emitter: Optional[Callable]
     ) -> Tuple[str, str, int, int, bool, bool, bool, bool, str]: # Return includes formatted inventory
         """ Processes system prompt, refines context, includes inventory. """
-        # (Code remains the same as previous version)
         await self._emit_status(event_emitter, session_id, "Status: Preparing context...")
         base_system_prompt_text = "You are helpful."; extracted_owi_context = None; initial_owi_context_tokens = -1; current_output_messages = body.get("messages", [])
         if self._process_system_prompt_func:
@@ -546,7 +607,6 @@ class SessionPipeOrchestrator:
         if not session_process_owi_rag: self.logger.info(f"[{session_id}] Session valve 'process_owi_rag=False'. Discarding OWI context."); extracted_owi_context = None; initial_owi_context_tokens = 0
 
         formatted_inventory_string = "[Inventory Management Disabled]"; raw_session_inventories = {}; inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
-        # Use the *local* flag determined during module load
         if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._get_all_inventories_db_func and self._format_inventory_func and self.sqlite_cursor:
             self.logger.debug(f"[{session_id}] Inventory enabled, fetching data...")
             try:
@@ -585,7 +645,7 @@ class SessionPipeOrchestrator:
                  if cache_update_skipped: await self._emit_status(event_emitter, session_id, "Status: Skipping cache update (redundant OWI)."); updated_cache_text_intermediate = previous_cache_text
 
             cache_update_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'cache_update_prompt_template', DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT),}
-            final_select_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,}
+            final_select_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'final_context_selection_prompt_template', DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT),} # Use valve/default
             configs_ok_step1 = all([cache_update_llm_config["url"], cache_update_llm_config["key"], cache_update_llm_config["prompt_template"]])
             configs_ok_step2 = all([final_select_llm_config["url"], final_select_llm_config["key"], final_select_llm_config["prompt_template"]])
 
@@ -648,7 +708,6 @@ class SessionPipeOrchestrator:
 
     async def _select_t0_history_slice(self, session_id: str, history_for_processing: List[Dict]) -> Tuple[List[Dict], int]:
         """ Selects the T0 history slice based on token limit and dialogue roles. """
-        # (Code remains the same as previous version)
         t0_raw_history_slice = []; t0_dialogue_tokens = -1; t0_token_limit = getattr(self.config, 't0_active_history_token_limit', 4000)
         try:
              if self._tokenizer:
@@ -666,28 +725,6 @@ class SessionPipeOrchestrator:
         return t0_raw_history_slice, t0_dialogue_tokens
 
 
-    async def _construct_final_payload(
-        self, session_id: str, base_system_prompt_text: str, t0_raw_history_slice: List[Dict],
-        combined_context_string: str, latest_user_query_str: str, user_valves: Any
-    ) -> Optional[List[Dict]]:
-        """ Constructs the final payload contents list for the LLM. """
-        # (Code remains the same as previous version)
-        await self._emit_status(event_emitter=None, session_id=session_id, description="Status: Constructing final request...") # Emitter not needed here
-        final_llm_payload_contents = None
-        if self._construct_payload_func:
-            try:
-                memory_guidance = "\n\n--- Memory Guidance ---\nUse the dialogue history and the background information provided (if any) to inform your response and maintain context."
-                enhanced_system_prompt = base_system_prompt_text.strip() + memory_guidance
-                session_long_term_goal = str(getattr(user_valves, 'long_term_goal', ''))
-                include_acks = getattr(self.config, 'include_ack_turns', True)
-                payload_dict = self._construct_payload_func( system_prompt=enhanced_system_prompt, history=t0_raw_history_slice, context=combined_context_string, query=latest_user_query_str, long_term_goal=session_long_term_goal, strategy="standard", include_ack_turns=include_acks,)
-                if isinstance(payload_dict, dict) and "contents" in payload_dict and isinstance(payload_dict["contents"], list): final_llm_payload_contents = payload_dict["contents"]; self.logger.info(f"[{session_id}] Constructed final payload ({len(final_llm_payload_contents)} turns).")
-                else: self.logger.error(f"[{session_id}] Payload constructor returned invalid structure: {type(payload_dict)}. Payload: {payload_dict}")
-            except Exception as e_payload: self.logger.error(f"[{session_id}] EXCEPTION during payload construction: {e_payload}", exc_info=True)
-        else: self.logger.error(f"[{session_id}] Cannot construct final payload: Function unavailable.")
-        return final_llm_payload_contents
-
-
     async def _calculate_and_format_status(
         self, session_id: str, t1_retrieved_count: int, t2_retrieved_count: int,
         session_process_owi_rag: bool, final_context_selection_performed: bool,
@@ -698,7 +735,6 @@ class SessionPipeOrchestrator:
         final_llm_payload_contents: Optional[List[Dict]]
     ) -> Tuple[str, int]:
         """ Calculates final payload tokens and formats the status message string. """
-        # (Code remains the same as previous version)
         final_payload_tokens = -1
         if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
             try: final_payload_tokens = sum( self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents if isinstance(turn, dict) for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str))
@@ -728,41 +764,76 @@ class SessionPipeOrchestrator:
         event_emitter: Optional[Callable], status_message: str, final_payload_tokens: int
     ) -> OrchestratorResult:
         """ Executes the final LLM call or prepares the output body. """
-        # (Code remains the same as previous version)
         output_body = body.copy() if isinstance(body, dict) else {}
-        if not final_llm_payload_contents: self.logger.error(f"[{session_id}] Final payload construction failed."); await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True); return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
-        output_body["messages"] = final_llm_payload_contents; preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"]; keys_preserved = [k for k in preserved_keys if k in body]; [output_body.update({k: body[k]}) for k in keys_preserved]; self.logger.info(f"[{session_id}] Output body updated. Preserved keys: {keys_preserved}.")
-        final_url = getattr(self.config, 'final_llm_api_url', None); final_key = getattr(self.config, 'final_llm_api_key', None); url_present = bool(final_url and isinstance(final_url, str) and final_url.strip()); key_present = bool(final_key and isinstance(final_key, str) and final_key.strip()); self.logger.debug(f"[{session_id}] Checking Final LLM Trigger. URL Present:{url_present}, Key Present:{key_present}"); final_llm_triggered = url_present and key_present
+        if not final_llm_payload_contents:
+            self.logger.error(f"[{session_id}] Final payload construction failed.");
+            await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True);
+            return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
+
+        output_body["messages"] = final_llm_payload_contents
+        preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"];
+        keys_preserved = [k for k in preserved_keys if k in body];
+        [output_body.update({k: body[k]}) for k in keys_preserved];
+        self.logger.info(f"[{session_id}] Output body updated. Preserved keys: {keys_preserved}.")
+
+        # --- START MODIFIED: Final Payload Logging ---
+        # Log the payload HERE before deciding whether to call the final LLM or return.
+        if getattr(self.config, 'debug_log_final_payload', False):
+            self.logger.info(f"[{session_id}] Logging final payload dict due to debug valve.")
+            self._orchestrator_log_debug_payload(session_id, output_body) # Use the orchestrator's helper
+        else:
+            self.logger.debug(f"[{session_id}] Skipping final payload log: Debug valve is OFF.")
+        # --- END MODIFIED: Final Payload Logging ---
+
+        final_url = getattr(self.config, 'final_llm_api_url', None)
+        final_key = getattr(self.config, 'final_llm_api_key', None)
+        url_present = bool(final_url and isinstance(final_url, str) and final_url.strip())
+        key_present = bool(final_key and isinstance(final_key, str) and final_key.strip())
+        self.logger.debug(f"[{session_id}] Checking Final LLM Trigger. URL Present:{url_present}, Key Present:{key_present}")
+        final_llm_triggered = url_present and key_present
 
         if final_llm_triggered:
-            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming)."); await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call...", done=False)
-            final_temp = getattr(self.config, 'final_llm_temperature', 0.7); final_timeout = getattr(self.config, 'final_llm_timeout', 120); final_call_payload_google_fmt = {"contents": final_llm_payload_contents}
-            success, response_or_error = await self._async_llm_call_wrapper( api_url=final_url, api_key=final_key, payload=final_call_payload_google_fmt, temperature=final_temp, timeout=final_timeout, caller_info=f"Orch_FinalLLM_{session_id}" )
-            intermediate_status = "Status: Final LLM Complete" + (" (Success)" if success else " (Failed)"); await self._emit_status(event_emitter, session_id, intermediate_status, done=False)
-            if success and isinstance(response_or_error, str): self.logger.info(f"[{session_id}] Final LLM call successful. Returning response string."); return response_or_error
-            elif not success and isinstance(response_or_error, dict): self.logger.error(f"[{session_id}] Final LLM call failed. Returning error dict: {response_or_error}"); return response_or_error
-            else: self.logger.error(f"[{session_id}] Final LLM call returned unexpected format. Success={success}, Type={type(response_or_error)}"); return {"error": "Final LLM call returned unexpected result format.", "status_code": 500}
+            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming).")
+            await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call...", done=False)
+            final_temp = getattr(self.config, 'final_llm_temperature', 0.7);
+            final_timeout = getattr(self.config, 'final_llm_timeout', 120);
+            final_call_payload_google_fmt = {"contents": final_llm_payload_contents} # Use the constructed contents
+
+            success, response_or_error = await self._async_llm_call_wrapper(
+                api_url=final_url,
+                api_key=final_key,
+                payload=final_call_payload_google_fmt,
+                temperature=final_temp,
+                timeout=final_timeout,
+                caller_info=f"Orch_FinalLLM_{session_id}"
+            )
+            intermediate_status = "Status: Final LLM Complete" + (" (Success)" if success else " (Failed)")
+            await self._emit_status(event_emitter, session_id, intermediate_status, done=False)
+
+            if success and isinstance(response_or_error, str):
+                self.logger.info(f"[{session_id}] Final LLM call successful. Returning response string.")
+                return response_or_error
+            elif not success and isinstance(response_or_error, dict):
+                self.logger.error(f"[{session_id}] Final LLM call failed. Returning error dict: {response_or_error}")
+                return response_or_error
+            else:
+                self.logger.error(f"[{session_id}] Final LLM call returned unexpected format. Success={success}, Type={type(response_or_error)}")
+                return {"error": "Final LLM call returned unexpected result format.", "status_code": 500}
         else:
             self.logger.info(f"[{session_id}] Final LLM Call disabled. Passing modified payload downstream.")
-            if getattr(self.config, 'debug_log_final_payload', False):
-                try: payload_str = json.dumps(output_body, indent=2)
-                except Exception: payload_str = str(output_body)
-                self.logger.debug(f"[{session_id}] Returning Payload:\n{payload_str}")
+            # Payload logging already happened above
             return output_body
 
-    # --- LOGGING HELPER ---
-    def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
-        """Logs the final payload if the debug valve is enabled."""
-        # This is a helper; the logic to get the path is usually in the Pipe class
-        # For now, just log to the main logger if enabled.
-        if getattr(self.config, 'debug_log_final_payload', False):
-             try: payload_str = json.dumps(payload_body, indent=2)
-             except Exception: payload_str = str(payload_body)
-             self.logger.debug(f"[{session_id}] DEBUG_FINAL_PAYLOAD:\n{payload_str}")
+
+    # --- REMOVED OLD/UNUSED DEBUG HELPER ---
+    # def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
+    #    # This helper was not used correctly before and is now replaced by
+    #    # _orchestrator_log_debug_payload which uses the correct path getter.
+    #    pass
 
 
     # ==========================================================================
-    # === Main Process Turn Method                                           ===
+    # === Main Process Turn Method (MODIFIED for Event Hints)                ===
     # ==========================================================================
     async def process_turn(
         self,
@@ -779,12 +850,20 @@ class SessionPipeOrchestrator:
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
 
+        # Update logger/path getter refs from Pipe if they were updated
+        self.pipe_logger = getattr(self, 'pipe_logger', self.logger)
+        self.pipe_debug_path_getter = getattr(self, 'pipe_debug_path_getter', None)
+
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
+        event_hints_enabled = getattr(self.config, 'enable_event_hints', False) # <<< Check event hint valve
+
         self.logger.info(f"[{session_id}] Inventory Management Enabled (Global Valve): {inventory_enabled}")
+        self.logger.info(f"[{session_id}] Event Hints Enabled (Global Valve): {event_hints_enabled}") # <<< Log event hint status
         self.logger.info(f"[{session_id}] Inventory Module Available (Local Import Check): {_ORCH_INVENTORY_MODULE_AVAILABLE}")
 
         # Initialize variables
         summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False
+        generated_event_hint: Optional[str] = None # <<< Variable for the generated hint
 
         try:
             # 1. History Sync
@@ -796,34 +875,94 @@ class SessionPipeOrchestrator:
             current_active_history = self.session_manager.get_active_history(session_id) or []
             if not current_active_history: raise ValueError("Active history is empty after sync.")
 
+
             # 2. Determine Query
             latest_user_query_str, history_for_processing = await self._determine_effective_query( session_id, current_active_history, is_regeneration_heuristic )
             if not latest_user_query_str and not is_regeneration_heuristic: raise ValueError("Cannot proceed without an effective user query (and not regeneration).")
 
+
             # 3. Tier 1 Summarization
             (summarization_performed, new_t1_summary_text, summarization_prompt_tokens, summarization_output_tokens) = await self._handle_tier1_summarization( session_id, user_id, current_active_history, is_regeneration_heuristic, event_emitter )
 
+
             # 4. Tier 1 -> T2 Transition
             await self._handle_tier2_transition( session_id, summarization_performed, chroma_embed_wrapper, event_emitter )
+
 
             # 5. Get Context Sources
             recent_t1_summaries, t1_retrieved_count = await self._get_t1_summaries(session_id)
             retrieved_rag_summaries, t2_retrieved_count = await self._get_t2_rag_results( session_id, history_for_processing, latest_user_query_str, embedding_func, chroma_embed_wrapper, event_emitter )
 
+
             # 6. Prepare & Refine Background
             (combined_context_string, base_system_prompt_text, initial_owi_context_tokens, refined_context_tokens, cache_update_performed, cache_update_skipped, final_context_selection_performed, stateless_refinement_performed, formatted_inventory_string_for_status ) = await self._prepare_and_refine_background( session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries, current_active_history, latest_user_query_str, event_emitter )
+
 
             # 7. Select T0 History
             t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
 
-            # 8. Construct Payload
-            final_llm_payload_contents = await self._construct_final_payload( session_id, base_system_prompt_text, t0_raw_history_slice, combined_context_string, latest_user_query_str, user_valves )
+
+            # <<< START Event Hint Generation >>>
+            # 7.5. Generate Event Hint (If Enabled)
+            if event_hints_enabled:
+                self.logger.info(f"[{session_id}] Event Hints feature enabled. Attempting generation...")
+                await self._emit_status(event_emitter, session_id, "Status: Checking for dynamic event hints...")
+                try:
+                    generated_event_hint = await generate_event_hint(
+                        config=self.config, # Pass the main config object
+                        history_messages=current_active_history, # Use full history for context
+                        background_context=combined_context_string, # Use the combined context
+                        llm_call_func=self._async_llm_call_wrapper, # Pass the LLM caller
+                        logger_instance=self.logger,
+                        session_id=session_id
+                    )
+                    if generated_event_hint:
+                         await self._emit_status(event_emitter, session_id, "Status: Event hint generated.")
+                    else:
+                         await self._emit_status(event_emitter, session_id, "Status: No event hint suggested.")
+
+                except Exception as e_hint_gen:
+                    self.logger.error(f"[{session_id}] Error during event hint generation call: {e_hint_gen}", exc_info=True)
+                    generated_event_hint = None # Ensure it's None on error
+            else:
+                self.logger.debug(f"[{session_id}] Event Hints feature disabled. Skipping hint generation.")
+            # <<< END Event Hint Generation >>>
+
+            # 8. Construct Payload (Uses standalone function now)
+            await self._emit_status(event_emitter, session_id, "Status: Constructing final request...")
+            # Call the standalone function from prompting.py
+            payload_dict_or_error = standalone_construct_payload(
+                system_prompt=base_system_prompt_text,
+                history=t0_raw_history_slice,
+                context=combined_context_string,
+                query=latest_user_query_str,
+                long_term_goal=getattr(user_valves, 'long_term_goal', ''),
+                event_hint=generated_event_hint, # <<< Pass the hint here
+                strategy="standard", # Or load from config if needed
+                include_ack_turns=getattr(self.config, 'include_ack_turns', True),
+            )
+            if isinstance(payload_dict_or_error, dict) and "contents" in payload_dict_or_error:
+                final_llm_payload_contents = payload_dict_or_error["contents"]
+                self.logger.info(f"[{session_id}] Constructed final payload using standalone function ({len(final_llm_payload_contents)} turns).")
+            else:
+                error_msg = payload_dict_or_error.get("error", "Unknown payload construction error") if isinstance(payload_dict_or_error, dict) else "Invalid return type"
+                self.logger.error(f"[{session_id}] Standalone payload constructor failed: {error_msg}")
+                final_llm_payload_contents = None
+
 
             # 9. Execute/Prepare Output
-            final_result = await self._execute_or_prepare_output( session_id=session_id, body=body, final_llm_payload_contents=final_llm_payload_contents, event_emitter=event_emitter, status_message="Status: Core processing complete.", final_payload_tokens=-1 )
+            final_result = await self._execute_or_prepare_output(
+                 session_id=session_id,
+                 body=body,
+                 final_llm_payload_contents=final_llm_payload_contents,
+                 event_emitter=event_emitter,
+                 status_message="Status: Core processing complete.",
+                 final_payload_tokens=-1 # Token count calculated later
+            )
+
 
             # 10. Post-Turn Inventory Update
-            # Check BOTH global valve AND local module availability
+            # (No changes needed here)
             if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._update_inventories_func:
                 inventory_update_completed = True
                 if isinstance(final_result, dict) and "error" in final_result: self.logger.warning(f"[{session_id}] Skipping inventory update due to upstream error: {final_result.get('error')}")
@@ -847,13 +986,22 @@ class SessionPipeOrchestrator:
                                  new_cursor = None
                                  try:
                                      new_cursor = self.sqlite_cursor.connection.cursor()
-                                     # *** Pass the *locally determined* DB access functions ***
+                                     # Log inventory prompt/response using Pipe's helper
+                                     if getattr(self.config, 'debug_log_final_payload', False):
+                                         if hasattr(self, 'pipe_logger') and hasattr(self.pipe_logger, '_log_debug_inventory_llm'):
+                                             self.logger.debug(f"[{session_id}] Calling Pipe's inventory logger for PROMPT.")
+                                             self.pipe_logger._log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
+                                         else:
+                                             self.logger.warning(f"[{session_id}] Cannot log inventory prompt: Pipe logger or method missing.")
+
                                      update_success = await self._update_inventories_func(
                                          cursor=new_cursor, session_id=session_id, main_llm_response=final_result, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str,
-                                         llm_call_func=self._async_llm_call_wrapper, # Pass wrapper
-                                         db_get_inventory_func=get_character_inventory_data, # Pass direct DB func
-                                         db_update_inventory_func=add_or_update_character_inventory, # Pass direct DB func
-                                         inventory_llm_config=inv_llm_config
+                                         llm_call_func=self._async_llm_call_wrapper,
+                                         db_get_inventory_func=get_character_inventory_data,
+                                         db_update_inventory_func=add_or_update_character_inventory,
+                                         inventory_llm_config=inv_llm_config,
+                                         # Pass Pipe's logger for inventory LLM response logging if needed within the function
+                                         # inventory_llm_debug_logger=getattr(self, 'pipe_logger', None)
                                      )
                                      inventory_update_success_flag = update_success
                                      if update_success: self.logger.info(f"[{session_id}] Post-turn inventory update successful.")
@@ -868,19 +1016,20 @@ class SessionPipeOrchestrator:
                 else: self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
             elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE:
                  self.logger.warning(f"[{session_id}] Skipping inventory update: Module import failed.")
-                 inventory_update_completed = False; # Mark as not completed if module missing
+                 inventory_update_completed = False;
                  inventory_update_success_flag = False;
             elif inventory_enabled and not self._update_inventories_func:
                  self.logger.error(f"[{session_id}] Skipping inventory update: Update function alias is None.")
                  inventory_update_completed = False;
                  inventory_update_success_flag = False;
-            else: # Inventory disabled globally
+            else:
                  self.logger.debug(f"[{session_id}] Skipping inventory update: Disabled by global valve.")
                  inventory_update_completed = False;
                  inventory_update_success_flag = False;
 
+
             # 11. Calculate FINAL Status
-            # (Recalculate final tokens just in case)
+            # (No changes needed here)
             if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
                 try: final_payload_tokens = sum(self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents if isinstance(turn, dict) for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str))
                 except Exception: final_payload_tokens = -1
@@ -889,34 +1038,32 @@ class SessionPipeOrchestrator:
 
             final_status_string_base, _ = await self._calculate_and_format_status( session_id=session_id, t1_retrieved_count=t1_retrieved_count, t2_retrieved_count=t2_retrieved_count, session_process_owi_rag=bool(getattr(user_valves, 'process_owi_rag', True)), final_context_selection_performed=final_context_selection_performed, cache_update_skipped=cache_update_skipped, stateless_refinement_performed=stateless_refinement_performed, initial_owi_context_tokens=initial_owi_context_tokens, refined_context_tokens=refined_context_tokens, summarization_prompt_tokens=summarization_prompt_tokens, summarization_output_tokens=summarization_output_tokens, t0_dialogue_tokens=t0_dialogue_tokens, inventory_prompt_tokens=inventory_prompt_tokens, final_llm_payload_contents=final_llm_payload_contents)
 
-            # Append Inventory Status
             inv_stat_indicator = "Inv=OFF";
             if inventory_enabled:
-                 # Check local flag first
                  if not _ORCH_INVENTORY_MODULE_AVAILABLE: inv_stat_indicator = "Inv=MISSING"
                  else:
-                     inv_stat_indicator = "Inv=ON" # Assume ON if enabled and module present
-                     if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP" # Skipped due to error/streaming etc.
-                     elif not inventory_update_success_flag: inv_stat_indicator = "Inv=FAIL" # Attempted but failed
+                     inv_stat_indicator = "Inv=ON"
+                     if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP"
+                     elif not inventory_update_success_flag: inv_stat_indicator = "Inv=FAIL"
             final_status_string = final_status_string_base + f" {inv_stat_indicator}"
             self.logger.debug(f"[{session_id}] Orchestrator: About to emit FINAL status: '{final_status_string}'")
             await self._emit_status(event_emitter, session_id, final_status_string, done=True)
 
-            # 12. Log Final Payload (if applicable and debug enabled)
-            if getattr(self.config, 'debug_log_final_payload', False):
-                if isinstance(final_result, dict) and "messages" in final_result:
-                     final_url = getattr(self.config, 'final_llm_api_url', None); final_key = getattr(self.config, 'final_llm_api_key', None); final_llm_triggered = bool(final_url and final_key)
-                     if not final_llm_triggered: self.logger.info(f"[{session_id}] Logging final payload dict due to debug valve (Final LLM Off)."); self._log_debug_final_payload(session_id, final_result)
-                     else: self.logger.debug(f"[{session_id}] Skipping final payload log: Final LLM was triggered.")
+
+            # 12. Log Final Payload (Handled inside _execute_or_prepare_output now)
+            # (No changes needed here)
+
 
             # 13. Return
+            # (No changes needed here)
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(f"Orchestrator process_turn [{session_id}]: Finished at {pipe_end_time_iso}")
             if final_result is None: raise RuntimeError("Internal processing error, final result was None.")
             return final_result
 
-        except asyncio.CancelledError: self.logger.info(f"[{session_id or 'unknown'}] Orchestrator process_turn cancelled."); await self._emit_status(event_emitter, session_id or 'unknown', "Status: Processing cancelled.", done=True); raise
-        except ValueError as ve: # Catch specific errors like history empty or query missing
+        except asyncio.CancelledError:
+            self.logger.info(f"[{session_id or 'unknown'}] Orchestrator process_turn cancelled."); await self._emit_status(event_emitter, session_id or 'unknown', "Status: Processing cancelled.", done=True); raise
+        except ValueError as ve:
              session_id_for_log = session_id if 'session_id' in locals() else 'unknown'
              self.logger.error(f"[{session_id_for_log}] Orchestrator ValueError in process_turn: {ve}")
              try: await self._emit_status(event_emitter, session_id_for_log, f"ERROR: {ve}", done=True)

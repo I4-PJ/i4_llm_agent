@@ -24,6 +24,7 @@
   <ItemGroup>
     <Compile Include="api_client.py" />
     <Compile Include="cache.py" />
+    <Compile Include="event_hints.py" />
     <Compile Include="history.py" />
     <Compile Include="inventory.py" />
     <Compile Include="memory.py" />
@@ -34,6 +35,9 @@
     <Compile Include="session.py" />
     <Compile Include="utils.py" />
     <Compile Include="__init__.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="ToDo.txt" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in
