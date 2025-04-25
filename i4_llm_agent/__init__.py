@@ -1,6 +1,6 @@
 # --- START OF FILE __init__.py ---
 
-# [[START MODIFIED __init__.py]]
+# [[START MODIFIED __init__.py - Added Event Hint Constant]]
 # i4_llm_agent/__init__.py
 import logging
 
@@ -16,13 +16,13 @@ from .prompting import (
     # Default Templates
     DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
     DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
-    DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT, # Updated template
-    DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,        # <<< NEW Inventory Update Template
+    DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
+    DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
     # Formatting Functions
     format_stateless_refiner_prompt,
     format_cache_update_prompt,
     format_final_context_selection_prompt,
-    format_inventory_update_prompt,                # <<< NEW Inventory Update Formatter
+    format_inventory_update_prompt,
     # Other Prompting Utilities
     refine_external_context, # Stateless orchestrator
     construct_final_llm_payload,
@@ -70,27 +70,31 @@ from .orchestration import SessionPipeOrchestrator
 # --- Utilities (Existing) ---
 from .utils import count_tokens, calculate_string_similarity
 
-# --- Inventory Management (NEW Module Import) ---
+# --- Inventory Management (Existing Module Import) ---
 try:
     from .inventory import (
         format_inventory_for_prompt,
         update_inventories_from_llm,
-        # _modify_inventory_json is internal, typically not exported
     )
     INVENTORY_MODULE_AVAILABLE = True
 except ImportError as e:
     logging.getLogger(__name__).error(f"Failed to import inventory module: {e}", exc_info=True)
     INVENTORY_MODULE_AVAILABLE = False
-    # Define dummy functions if import fails
     def format_inventory_for_prompt(*args, **kwargs) -> str: return "[Inventory Module Error]"
     async def update_inventories_from_llm(*args, **kwargs) -> bool: return False
 
+# --- Event Hints (NEW Module Import for Constant) ---
+try:
+    from .event_hints import DEFAULT_EVENT_HINT_TEMPLATE_TEXT
+except ImportError as e:
+    logging.getLogger(__name__).error(f"Failed to import event_hints module: {e}", exc_info=True)
+    DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Template Load Error]"
 
 # --- Configure basic logging for the library ---
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-# --- Define __all__ (Consolidated) ---
+# --- Define __all__ (Consolidated & Updated) ---
 # List all functions/constants intended for public use by consumers
 __all__ = [
     # api_client
@@ -101,12 +105,12 @@ __all__ = [
     # prompting
     "DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE",
     "DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT",
-    "DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT", # Updated template
-    "DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT",        # <<< NEW Inventory Update Template
+    "DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT",
+    "DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT",
     "format_stateless_refiner_prompt",
     "format_cache_update_prompt",
     "format_final_context_selection_prompt",
-    "format_inventory_update_prompt",                # <<< NEW Inventory Update Formatter
+    "format_inventory_update_prompt",
     "refine_external_context",
     "construct_final_llm_payload",
     "assemble_tagged_context", "extract_tagged_context",
@@ -147,6 +151,8 @@ __all__ = [
     "format_inventory_for_prompt",
     "update_inventories_from_llm",
     "INVENTORY_MODULE_AVAILABLE", # Flag
+    # event_hints (Constants Only)
+    "DEFAULT_EVENT_HINT_TEMPLATE_TEXT", # <<< ADDED
 ]
-# [[END MODIFIED __init__.py]]
+# [[END MODIFIED __init__.py - Added Event Hint Constant]]
 # --- END OF FILE __init__.py ---

@@ -24,6 +24,7 @@
   <ItemGroup>
     <Compile Include="api_client.py" />
     <Compile Include="cache.py" />
+    <Compile Include="event_hints.py" />
     <Compile Include="history.py" />
     <Compile Include="inventory.py" />
     <Compile Include="memory.py" />
