@@ -818,6 +818,7 @@ class SessionPipeOrchestrator:
         """
         Processes system prompt, applies refinement/cache logic, combines context (now including inventory).
         MODIFIED to fetch, format, and include inventory data if enabled.
+        ADDED DEBUG LOGGING for user_valves and cache update return.
         """
         await self._emit_status(event_emitter, session_id, "Status: Preparing context...")
 
@@ -838,15 +839,24 @@ class SessionPipeOrchestrator:
         else: self.logger.error(f"[{session_id}] process_system_prompt unavailable."); base_system_prompt_text = "You are helpful."
 
         # --- 2. Remove Text Block from System Prompt ---
-        session_text_block_to_remove = str(getattr(user_valves, 'text_block_to_remove', ''))
+        # --- <<< START DEBUG LOGGING: Text Block Removal >>> ---
+        session_text_block_to_remove = "[Error Reading User Valve]"
+        if user_valves and hasattr(user_valves, 'text_block_to_remove'):
+             session_text_block_to_remove = str(getattr(user_valves, 'text_block_to_remove', ''))
+             self.logger.debug(f"[{session_id}] Debug: Checking text_block_to_remove. Found value: '{session_text_block_to_remove[:100]}...'")
+        else:
+             self.logger.warning(f"[{session_id}] Debug: user_valves object or 'text_block_to_remove' attribute missing when checking.")
+             session_text_block_to_remove = '' # Ensure it's a string for the 'if' check
+
         if session_text_block_to_remove:
-            self.logger.info(f"[{session_id}] Removing text block from base system prompt...")
+            self.logger.info(f"[{session_id}] Attempting removal of text block from base system prompt...")
             original_len = len(base_system_prompt_text)
             temp_prompt = base_system_prompt_text.replace(session_text_block_to_remove, "")
             if len(temp_prompt) < original_len:
                 base_system_prompt_text = temp_prompt; self.logger.info(f"[{session_id}] Removed text block ({original_len - len(temp_prompt)} chars).")
-            else: self.logger.warning(f"[{session_id}] Text block for removal '{session_text_block_to_remove[:50]}...' NOT FOUND.")
-        else: self.logger.debug(f"[{session_id}] No text block for removal specified.")
+            else: self.logger.warning(f"[{session_id}] Text block for removal '{session_text_block_to_remove[:50]}...' NOT FOUND in system prompt.")
+        else: self.logger.debug(f"[{session_id}] No text block for removal specified (value was empty or missing).")
+        # --- <<< END DEBUG LOGGING >>> ---
 
         # --- 3. Apply OWI RAG Processing Valve ---
         session_process_owi_rag = bool(getattr(user_valves, 'process_owi_rag', True))
@@ -953,32 +963,38 @@ class SessionPipeOrchestrator:
             else:
                  if run_step1:
                       await self._emit_status(event_emitter, session_id, "Status: Updating background cache...")
-                      updated_cache_text_intermediate = await self._cache_update_func(
-                           session_id=session_id, current_owi_context=extracted_owi_context,
-                           history_messages=current_active_history, latest_user_query=latest_user_query_str,
-                           llm_call_func=self._async_llm_call_wrapper, sqlite_cursor=self.sqlite_cursor,
-                           cache_update_llm_config=cache_update_llm_config,
-                           history_count=getattr(self.config, 'refiner_history_count', 6),
-                           dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CacheUpdate_{session_id}",
-                      )
-                      cache_update_performed = True
+                      self.logger.info(f"[{session_id}] Executing RAG Cache Step 1 (Update)...") # <<< DEBUG
+                      try:
+                          updated_cache_text_intermediate = await self._cache_update_func(
+                               session_id=session_id, current_owi_context=extracted_owi_context,
+                               history_messages=current_active_history, latest_user_query=latest_user_query_str,
+                               llm_call_func=self._async_llm_call_wrapper, sqlite_cursor=self.sqlite_cursor,
+                               cache_update_llm_config=cache_update_llm_config,
+                               history_count=getattr(self.config, 'refiner_history_count', 6),
+                               dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CacheUpdate_{session_id}",
+                          )
+                          cache_update_performed = True
+                          self.logger.info(f"[{session_id}] RAG Cache Step 1 (Update) completed.") # <<< DEBUG
+                      except Exception as e_cache_update:
+                          self.logger.error(f"[{session_id}] EXCEPTION during RAG Cache Step 1 (Update): {e_cache_update}", exc_info=True)
+                          # Potentially retain previous cache text on error?
+                          updated_cache_text_intermediate = previous_cache_text
 
             # Execute Step 2 (Select Final Context)
             if configs_ok_step2:
                  await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context...")
                  # --- TEMPORARY WORKAROUND: Inject inventory into OWI context for selection ---
-                 # TODO: Refactor cache.py to accept inventory string explicitly via prompt formatting args
                  temp_owi_for_select = extracted_owi_context or ""
-                 inv_context_to_inject = formatted_inventory_string # Use the string fetched earlier
+                 inv_context_to_inject = formatted_inventory_string
                  if inventory_enabled and inv_context_to_inject and "[Error" not in inv_context_to_inject and "[Inventory Management Disabled]" not in inv_context_to_inject and "[No Inventory Data Available]" not in inv_context_to_inject:
-                      # Only inject if inventory is enabled and formatted string seems valid
                       temp_owi_for_select += f"\n\n--- Current Inventory ---\n{inv_context_to_inject}"
                       self.logger.info(f"[{session_id}] TEMPORARY: Injected formatted inventory into OWI context for selection step.")
 
-                 # Call the selection function (from cache.py)
+                 # Call the selection function
+                 self.logger.info(f"[{session_id}] Executing RAG Cache Step 2 (Select)...") # <<< DEBUG
                  final_selected_context = await self._cache_select_func(
                       updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""),
-                      current_owi_context=temp_owi_for_select, # Pass potentially augmented OWI
+                      current_owi_context=temp_owi_for_select,
                       history_messages=current_active_history,
                       latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper,
                       context_selection_llm_config=final_select_llm_config,
@@ -986,7 +1002,7 @@ class SessionPipeOrchestrator:
                       dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CtxSelect_{session_id}",
                  )
                  final_context_selection_performed = True
-                 context_for_prompt = final_selected_context # Use the output of selection
+                 context_for_prompt = final_selected_context
                  log_step1_status = "Performed" if cache_update_performed else ("Skipped" if cache_update_skipped else "Not Run")
                  self.logger.info(f"[{session_id}] RAG Cache Step 2 complete. Context len: {len(context_for_prompt)}. Step 1: {log_step1_status}")
                  await self._emit_status(event_emitter, session_id, "Status: Context selection complete.", done=False)
@@ -995,6 +1011,7 @@ class SessionPipeOrchestrator:
                  context_for_prompt = updated_cache_text_intermediate
 
         # --- ELSE IF: Stateless Refinement Path ---
+        # (No changes here, assuming cache path is the one potentially hanging)
         elif enable_stateless_refin_global and self._stateless_refine_func:
             self.logger.info(f"[{session_id}] Stateless Refinement ENABLED.")
             await self._emit_status(event_emitter, session_id, "Status: Refining OWI context (stateless)...")
@@ -1004,14 +1021,13 @@ class SessionPipeOrchestrator:
                  stateless_refiner_config = {
                      "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None),
                      "temp": getattr(self.config, 'refiner_llm_temperature', 0.3),
-                     "prompt_template": getattr(self.config, 'stateless_refiner_prompt_template', None), # Use template from valve
+                     "prompt_template": getattr(self.config, 'stateless_refiner_prompt_template', None),
                  }
                  if not stateless_refiner_config["url"] or not stateless_refiner_config["key"]:
                       self.logger.error(f"[{session_id}] Skipping stateless refinement: Refiner URL/Key missing.")
                       await self._emit_status(event_emitter, session_id, "ERROR: Stateless Refiner config incomplete.", done=False)
                  else:
                       try:
-                          # Note: Inventory is NOT currently passed into stateless refinement
                           refined_stateless_context = await self._stateless_refine_func(
                                external_context=extracted_owi_context, history_messages=current_active_history,
                                latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper,
@@ -1020,60 +1036,54 @@ class SessionPipeOrchestrator:
                                history_count=getattr(self.config, 'refiner_history_count', 6),
                                dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_StatelessRef_{session_id}",
                           )
-                          # Check if refinement actually changed the context
                           if refined_stateless_context != extracted_owi_context:
-                               context_for_prompt = refined_stateless_context # Use refined context
+                               context_for_prompt = refined_stateless_context
                                stateless_refinement_performed = True
                                self.logger.info(f"[{session_id}] Stateless refinement successful (Length: {len(context_for_prompt)}).")
                                await self._emit_status(event_emitter, session_id, "Status: OWI context refined (stateless).", done=False)
                           else:
                                self.logger.info(f"[{session_id}] Stateless refinement resulted in no change or was skipped by length.")
-                               # Keep context_for_prompt as original extracted_owi_context
                       except Exception as e_refine_stateless:
                           self.logger.error(f"[{session_id}] EXCEPTION during stateless refinement: {e_refine_stateless}", exc_info=True)
-                          # Keep context_for_prompt as original extracted_owi_context on error
 
         # --- 6. Calculate Refined Context Tokens ---
-        # Calculate tokens based on whatever ended up in context_for_prompt
+        # (No changes needed here)
         if self._count_tokens_func and self._tokenizer:
             try:
-                token_source = context_for_prompt # This holds the result of refinement or the original OWI context
+                token_source = context_for_prompt
                 if token_source and isinstance(token_source, str):
                      refined_context_tokens = self._count_tokens_func(token_source, self._tokenizer)
-                else: refined_context_tokens = 0 # No context to count
+                else: refined_context_tokens = 0
                 self.logger.debug(f"[{session_id}] Refined context tokens (RefOUT): {refined_context_tokens}")
             except Exception as e_tok_ref:
                 refined_context_tokens = -1; self.logger.error(f"[{session_id}] Error calculating refined tokens: {e_tok_ref}")
-        else: # Tokenizer unavailable
+        else:
              refined_context_tokens = -1
 
-        # --- 7. Combine Context Sources (Includes Inventory via Formatted String) ---
+        # --- 7. Combine Context Sources ---
+        # (No changes needed here)
         combined_context_string = "[No background context generated]"
         if self._combine_context_func:
             try:
-                # Pass the final selected/refined context and other sources
-                # `formatted_inventory_string` was fetched earlier in this method
                 combined_context_string = self._combine_context_func(
                     final_selected_context=(context_for_prompt if isinstance(context_for_prompt, str) else None),
                     t1_summaries=retrieved_t1_summaries,
                     t2_rag_results=retrieved_rag_summaries,
-                    # Pass formatted inventory if enabled and valid
                     inventory_context=(formatted_inventory_string if inventory_enabled and formatted_inventory_string and "[Error" not in formatted_inventory_string and "[Disabled]" not in formatted_inventory_string else None)
                 )
             except Exception as e_combine:
                  self.logger.error(f"[{session_id}] Error combining context: {e_combine}", exc_info=True); combined_context_string = "[Error combining context]"
         else:
             self.logger.error(f"[{session_id}] Cannot combine context: Function unavailable.")
-            # Fallback: manually assemble if combine func missing? Or just use refined?
-            # For now, stick with error placeholder.
         self.logger.debug(f"[{session_id}] Combined background context length: {len(combined_context_string)}.")
 
         # --- 8. Return relevant state ---
+        # (No changes needed here)
         return (
             combined_context_string,
             base_system_prompt_text,
             initial_owi_context_tokens,
-            refined_context_tokens, # Tokens of the context *before* combining with T1/T2/Inventory
+            refined_context_tokens,
             cache_update_performed,
             cache_update_skipped,
             final_context_selection_performed,
@@ -1301,7 +1311,7 @@ class SessionPipeOrchestrator:
         session_id: str,
         user_id: str,
         body: Dict,
-        user_valves: Any,
+        user_valves: Any, # Receives the parsed object from Pipe.pipe
         event_emitter: Optional[Callable],
         embedding_func: Optional[Callable] = None,
         chroma_embed_wrapper: Optional[Any] = None,
@@ -1311,10 +1321,19 @@ class SessionPipeOrchestrator:
         Processes a single turn by calling helper methods in sequence.
         Includes inventory management enable check and post-turn update call.
         Correctly orders status emission for final concise message.
-        (Reverted: Includes early history check. Uses concise status format. Corrected Syntax).
+        ADDED DEBUG LOGGING before final status emit.
         """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
+
+        # --- <<< START DEBUG LOGGING: User Valves Received by Orchestrator >>> ---
+        if user_valves:
+            uv_text_block = getattr(user_valves, 'text_block_to_remove', 'ATTR_MISSING_IN_ORCH')
+            self.logger.debug(f"[{session_id}] Orchestrator received user_valves.text_block_to_remove = '{uv_text_block}'")
+        else:
+            self.logger.warning(f"[{session_id}] Orchestrator received None or invalid user_valves object.")
+        # --- <<< END DEBUG LOGGING >>> ---
+
 
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
         self.logger.info(f"[{session_id}] Inventory Management Enabled: {inventory_enabled}")
@@ -1324,6 +1343,7 @@ class SessionPipeOrchestrator:
 
         try:
             # --- 1. Initialization & History Handling ---
+            # (No changes needed here)
             await self._emit_status(event_emitter, session_id, "Status: Orchestrator syncing history...")
             incoming_messages = body.get("messages", [])
             stored_history = self.session_manager.get_active_history(session_id) or []
@@ -1332,34 +1352,40 @@ class SessionPipeOrchestrator:
                 else: self.logger.debug(f"[{session_id}] Updating active history (Len: {len(incoming_messages)})."); self.session_manager.set_active_history(session_id, incoming_messages.copy())
             else: self.logger.debug(f"[{session_id}] Incoming history matches stored.")
             current_active_history = self.session_manager.get_active_history(session_id) or []
-            # *** REVERTED: Includes the early check for empty history ***
             if not current_active_history: self.logger.error(f"[{session_id}] Active history is empty after sync. Cannot proceed."); await self._emit_status(event_emitter, session_id, "ERROR: History synchronization failed.", done=True); return {"error": "Active history is empty.", "status_code": 500}
 
             # --- 2. Determine Effective Query ---
+            # (No changes needed here)
             latest_user_query_str, history_for_processing = await self._determine_effective_query( session_id, current_active_history, is_regeneration_heuristic )
             if not latest_user_query_str and not is_regeneration_heuristic: self.logger.error(f"[{session_id}] Cannot proceed without an effective user query (and not regeneration)."); await self._emit_status(event_emitter, session_id, "ERROR: Could not determine user query.", done=True); return {"error": "Could not determine user query.", "status_code": 400}
 
             # --- 3. Tier 1 Summarization ---
+            # (No changes needed here)
             (summarization_performed, new_t1_summary_text, summarization_prompt_tokens, summarization_output_tokens) = await self._handle_tier1_summarization( session_id, user_id, current_active_history, is_regeneration_heuristic, event_emitter )
 
             # --- 4. Tier 1 -> T2 Transition ---
+            # (No changes needed here)
             await self._handle_tier2_transition( session_id, summarization_performed, chroma_embed_wrapper, event_emitter )
 
             # --- 5. Prepare Context Sources (T1 & T2 RAG) ---
+            # (No changes needed here)
             recent_t1_summaries, t1_retrieved_count = await self._get_t1_summaries(session_id)
             retrieved_rag_summaries, t2_retrieved_count = await self._get_t2_rag_results( session_id, history_for_processing, latest_user_query_str, embedding_func, chroma_embed_wrapper, event_emitter )
 
             # --- 6. Prepare & Refine Background Context ---
+            # (No changes needed here - relies on _prepare_and_refine_background modifications)
             (combined_context_string, base_system_prompt_text, initial_owi_context_tokens, refined_context_tokens, cache_update_performed, cache_update_skipped, final_context_selection_performed, stateless_refinement_performed, formatted_inventory_string_for_status ) = await self._prepare_and_refine_background( session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries, current_active_history, latest_user_query_str, event_emitter )
 
             # --- 7. Select T0 History Slice ---
+            # (No changes needed here)
             t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
 
             # --- 8. Construct Final Payload ---
+            # (No changes needed here)
             final_llm_payload_contents = await self._construct_final_payload( session_id, base_system_prompt_text, t0_raw_history_slice, combined_context_string, latest_user_query_str, user_valves )
 
             # --- 9. Execute Final LLM or Prepare Output ---
-            # Status calculation/emission moved AFTER inventory
+            # (No changes needed here)
             final_result = await self._execute_or_prepare_output(
                 session_id=session_id, body=body, final_llm_payload_contents=final_llm_payload_contents,
                 event_emitter=event_emitter, status_message="Status: Core processing complete.", # Intermediate status (ignored by method now)
@@ -1367,6 +1393,7 @@ class SessionPipeOrchestrator:
             )
 
             # --- 10. Post-Turn Inventory Update ---
+            # (No changes needed here)
             if inventory_enabled and self._update_inventories_func:
                 inventory_update_completed = True
                 if isinstance(final_result, dict) and "error" in final_result:
@@ -1375,10 +1402,8 @@ class SessionPipeOrchestrator:
                      self.logger.warning(f"[{session_id}] Skipping post-turn inventory update: Streaming response detected.")
                 elif isinstance(final_result, str):
                     self.logger.info(f"[{session_id}] Performing post-turn inventory update...")
-                    await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False) # Intermediate status
+                    await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
                     try:
-                        # *** SYNTAX CORRECTION START ***
-                        # Get config values separately
                         inv_llm_url = getattr(self.config, 'inv_llm_api_url', None)
                         inv_llm_key = getattr(self.config, 'inv_llm_api_key', None)
                         inv_llm_temp = getattr(self.config, 'inv_llm_temperature', 0.3)
@@ -1397,10 +1422,9 @@ class SessionPipeOrchestrator:
                                 main_llm_response=final_result,
                                 user_query=latest_user_query_str,
                                 recent_history_str=history_for_inv_update_str,
-                                template=inv_llm_config['prompt_template'] # Corrected key
+                                template=inv_llm_config['prompt_template']
                             )
 
-                            # Calculate tokens
                             if inv_prompt_text and not inv_prompt_text.startswith("[Error") and self._count_tokens_func and self._tokenizer:
                                 try:
                                     inventory_prompt_tokens = self._count_tokens_func(inv_prompt_text, self._tokenizer)
@@ -1411,12 +1435,10 @@ class SessionPipeOrchestrator:
                             else:
                                 inventory_prompt_tokens = -1
 
-                            # Check DB connection
                             if not self.sqlite_cursor or not self.sqlite_cursor.connection:
                                 self.logger.error(f"[{session_id}] Cannot update inventory: SQLite cursor invalid.")
                                 inventory_update_success_flag = False
                             else:
-                                 # Execute update with new cursor
                                  new_cursor = None
                                  try:
                                      new_cursor = self.sqlite_cursor.connection.cursor()
@@ -1441,24 +1463,19 @@ class SessionPipeOrchestrator:
                                      inventory_update_success_flag = False
                                  finally:
                                       if new_cursor:
-                                          try:
-                                              new_cursor.close()
-                                              self.logger.debug(f"[{session_id}] Inventory update cursor closed.")
-                                          except Exception as e_close_cursor:
-                                              self.logger.error(f"[{session_id}] Error closing inventory update cursor: {e_close_cursor}")
-                        # *** SYNTAX CORRECTION END ***
+                                          try: new_cursor.close(); self.logger.debug(f"[{session_id}] Inventory update cursor closed.")
+                                          except Exception as e_close_cursor: self.logger.error(f"[{session_id}] Error closing inventory update cursor: {e_close_cursor}")
                     except Exception as e_inv_update_outer:
                         self.logger.error(f"[{session_id}] Outer error during post-turn inventory update setup: {e_inv_update_outer}", exc_info=True)
-                        inventory_update_success_flag = False # Mark as failed on outer error
+                        inventory_update_success_flag = False
                 elif isinstance(final_result, dict) and final_result.get("messages") == final_llm_payload_contents:
                      self.logger.info(f"[{session_id}] Skipping post-turn inventory update: Final LLM call was disabled or payload unchanged.")
                 else:
                      self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
             # --- END of Inventory Update Block ---
 
-            # --- 11. Calculate and Emit FINAL Status Message (Moved to End) ---
-            # Recalculate final_payload_tokens if needed
-            # *** SYNTAX CORRECTION START ***
+            # --- 11. Calculate and Emit FINAL Status Message ---
+            # Recalculate final_payload_tokens if needed (e.g., if inventory modified it?) - Current logic recalculates regardless
             if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
                 try:
                     final_payload_tokens = sum(
@@ -1472,10 +1489,9 @@ class SessionPipeOrchestrator:
                  final_payload_tokens = 0
             else:
                  final_payload_tokens = -1
-            # *** SYNTAX CORRECTION END ***
 
-            # Call the concise status formatter
-            final_status_string, _ = await self._calculate_and_format_status(
+            # Call the concise status formatter (which now has its own debug logs)
+            final_status_string_base, _ = await self._calculate_and_format_status(
                 session_id=session_id, t1_retrieved_count=t1_retrieved_count, t2_retrieved_count=t2_retrieved_count,
                 session_process_owi_rag=bool(getattr(user_valves, 'process_owi_rag', True)),
                 final_context_selection_performed=final_context_selection_performed, cache_update_skipped=cache_update_skipped,
@@ -1485,22 +1501,25 @@ class SessionPipeOrchestrator:
                 inventory_prompt_tokens=inventory_prompt_tokens, final_llm_payload_contents=final_llm_payload_contents
             )
 
-            # Append Inventory Status indicator based on flags
-            inv_stat_indicator = "Inv=OFF"; # Default if disabled
+            # Append Inventory Status indicator
+            inv_stat_indicator = "Inv=OFF";
             if inventory_enabled:
-                 inv_stat_indicator = "Inv=ON"
-                 if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP" # If step didn't run (e.g., stream, error)
-                 elif not inventory_update_success_flag: inv_stat_indicator = "Inv=FAIL" # If step ran but failed
-            final_status_string += f" {inv_stat_indicator}" # Append indicator
+                 inv_stat_indicator = "Inv=ON" # Default if enabled and successful
+                 if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP"
+                 elif not inventory_update_success_flag: inv_stat_indicator = "Inv=FAIL"
+            final_status_string = final_status_string_base + f" {inv_stat_indicator}"
+
+            self.logger.debug(f"[{session_id}] Orchestrator: About to emit FINAL status: '{final_status_string}'")
 
             await self._emit_status(event_emitter, session_id, final_status_string, done=True) # Emit FINAL status
 
-            # --- 12. Log Final Payload (if enabled and applicable) ---
+            # --- 12. Log Final Payload ---
+            # (No changes needed here)
             if getattr(self.config, 'debug_log_final_payload', False):
                 if (isinstance(final_result, dict) and "messages" in final_result):
                      final_url = getattr(self.config, 'final_llm_api_url', None); final_key = getattr(self.config, 'final_llm_api_key', None)
                      final_llm_triggered = bool(final_url and final_key)
-                     if not final_llm_triggered: # Only log if we are returning the payload dict
+                     if not final_llm_triggered:
                          self.logger.info(f"[{session_id}] Logging final payload dict due to debug valve (Final LLM Off).")
                          self._log_debug_final_payload(session_id, final_result)
                      else: self.logger.debug(f"[{session_id}] Skipping final payload log: Final LLM was triggered.")
@@ -1517,7 +1536,7 @@ class SessionPipeOrchestrator:
             session_id_for_log = session_id if 'session_id' in locals() and session_id != "uninitialized_session" else 'unknown'
             self.logger.critical(f"[{session_id_for_log}] Orchestrator UNHANDLED EXCEPTION in process_turn: {e_orch}", exc_info=True)
             try: await self._emit_status(event_emitter, session_id_for_log, f"ERROR: Orchestrator Failed ({type(e_orch).__name__})", done=True)
-            except: pass # Ignore errors during final error emission
+            except: pass
             return {"error": f"Orchestrator failed: {type(e_orch).__name__}", "status_code": 500}
 
 # === END OF FILE i4_llm_agent/orchestration.py ===

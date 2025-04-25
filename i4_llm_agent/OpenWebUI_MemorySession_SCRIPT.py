@@ -1173,7 +1173,7 @@ class Pipe:
                 exc_info=True,
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD (Modified) ===
+    # === SECTION 5.11: MAIN PIPE METHOD (Revised Valve Parsing) ===
     async def pipe(
         self,
         body: dict,
@@ -1231,12 +1231,26 @@ class Pipe:
                 return {"error": "Invalid input body type.", "status_code": 400}
             if not __request__:
                 self.logger.warning("__request__ context missing.")
-            if isinstance(__user__, dict) and "id" in __user__:
-                user_id = __user__["id"]
-            else:
-                self.logger.warning(
-                    f"User info/ID missing in __user__. Using '{user_id}'."
+
+            # --- User Info Extraction ---
+            raw_user_valves_data = None
+            if __user__ and isinstance(__user__, dict):
+                user_id = __user__.get("id", "missing_id")
+                user_info_log = {k: v for k, v in __user__.items() if k != "valves"}
+                self.logger.debug(
+                    f"Pipe.pipe: Received __user__ info (excluding valves): {user_info_log}"
                 )
+                raw_user_valves_data = __user__.get("valves")
+                self.logger.debug(
+                    f"Pipe.pipe: Received __user__['valves'] raw data: {raw_user_valves_data}"
+                )
+            else:
+                user_id = "default_user"
+                self.logger.warning(
+                    f"User info/ID missing in __user__. Using '{user_id}'. Received: {__user__}"
+                )
+
+            # --- Session ID ---
             chat_id = __chat_id__
             if not chat_id or not isinstance(chat_id, str) or len(chat_id.strip()) == 0:
                 await emit_status(
@@ -1264,32 +1278,107 @@ class Pipe:
                     "status_code": 500,
                 }
 
-            # --- Debug Logging ---
+            # --- Debug Logging Raw Input ---
             self._log_debug_raw_input(session_id, body)
 
-            # --- Session and Valves ---
+            # --- Session State ---
             session_state = self.session_manager.get_or_create_session(session_id)
-            user_valves_obj = None
-            if isinstance(__user__, dict) and "valves" in __user__:
-                raw_user_valves = __user__["valves"]
-                try:
-                    user_valves_obj = self.UserValves(
-                        **(raw_user_valves if isinstance(raw_user_valves, dict) else {})
-                    )
-                    self.logger.info(f"[{session_id}] Successfully parsed UserValves.")
-                except Exception as e_parse_uv:
-                    self.logger.warning(
-                        f"[{session_id}] Failed to parse __user__['valves']: {e_parse_uv}. Using defaults."
-                    )
-                    user_valves_obj = self.UserValves()
-            else:
+
+            # [[START MODIFIED pipe method - User Valves Parsing Block v5 - Accept Object]]
+            # --- <<<< START REVISED User Valves Parsing (v5 - Accept Object) >>>> ---
+            # Get data potentially pre-processed by OWI/FastAPI
+            valves_data_from_user = (
+                __user__.get("valves") if isinstance(__user__, dict) else None
+            )
+            user_valves_obj = None  # Final object to be used
+
+            # Log the received data and type
+            data_type = type(valves_data_from_user)
+            data_value_str = str(valves_data_from_user)
+            self.logger.debug(
+                f"[{session_id}] PRE-CHECK: Received valves_data_from_user Type={data_type}, Value='{data_value_str[:150]}...'"
+            )
+
+            # Check if OWI/FastAPI provided a UserValves object
+            if isinstance(valves_data_from_user, self.UserValves):
+                self.logger.info(
+                    f"[{session_id}] Received UserValves object directly. Using it."
+                )
+                user_valves_obj = valves_data_from_user
+                # Log values received from the object
+                parsed_text_block = getattr(
+                    user_valves_obj, "text_block_to_remove", "ATTR_MISSING"
+                )
+                parsed_process_rag = getattr(
+                    user_valves_obj, "process_owi_rag", "ATTR_MISSING"
+                )
+                parsed_long_term = getattr(
+                    user_valves_obj, "long_term_goal", "ATTR_MISSING"
+                )
+                log_text_block = parsed_text_block[:100] + (
+                    "..." if len(parsed_text_block) > 100 else ""
+                )
+                log_long_term = parsed_long_term[:100] + (
+                    "..." if len(parsed_long_term) > 100 else ""
+                )
                 self.logger.debug(
-                    f"[{session_id}] No __user__['valves'] found. Using default UserValves."
+                    f"[{session_id}] Values from received UserValves object: "
+                    f"text_block_to_remove='{log_text_block}', "
+                    f"process_owi_rag={parsed_process_rag}, "
+                    f"long_term_goal='{log_long_term}'"
+                )
+                # Optionally, add a check/warning if it matches defaults, indicating potential pre-parsing failure
+                if (
+                    user_valves_obj.long_term_goal == ""
+                    and user_valves_obj.process_owi_rag is True
+                    and user_valves_obj.text_block_to_remove == ""
+                ):
+                    self.logger.warning(
+                        f"[{session_id}] Received UserValves object matches defaults. Original string input might have failed OWI pre-parsing."
+                    )
+
+            # Optional: Handle if OWI *did* manage to send a dict (unlikely based on logs, but possible)
+            elif isinstance(valves_data_from_user, dict):
+                self.logger.info(
+                    f"[{session_id}] Received valves data as dict. Initializing UserValves model."
+                )
+                try:
+                    user_valves_obj = self.UserValves(**valves_data_from_user)
+                    # Log values after initialization
+                    # (Logging code similar to above could be added here)
+                except Exception as e_init_dict:
+                    self.logger.error(
+                        f"[{session_id}] Failed to initialize UserValves from dict {valves_data_from_user}: {e_init_dict}. Using defaults.",
+                        exc_info=True,
+                    )
+                    user_valves_obj = self.UserValves()  # Fallback
+
+            else:
+                # If it's None or some other unexpected type (like the raw string, which we now know doesn't happen here)
+                log_reason = (
+                    "not provided"
+                    if valves_data_from_user is None
+                    else f"unexpected Type={data_type}"
+                )
+                self.logger.warning(
+                    f"[{session_id}] User valves data {log_reason}. Using default UserValves object."
+                )
+                user_valves_obj = self.UserValves()  # Use defaults
+
+            # Ensure user_valves_obj is always a valid UserValves instance
+            if user_valves_obj is None:
+                self.logger.error(
+                    f"[{session_id}] user_valves_obj was None after checks. Forcing defaults."
                 )
                 user_valves_obj = self.UserValves()
-            self.session_manager.set_user_valves(session_id, user_valves_obj)
-            self.logger.debug(f"[{session_id}] Stored UserValves in session state.")
 
+            # Store the resulting object (either from __user__ or default fallback)
+            self.session_manager.set_user_valves(session_id, user_valves_obj)
+            self.logger.debug(
+                f"[{session_id}] Stored final UserValves object in session state."
+            )
+            # --- <<<< END REVISED User Valves Parsing (v5 - Accept Object) >>>> ---
+            # [[END MODIFIED pipe method - User Valves Parsing Block v5 - Accept Object]]
             # --- History & Regen Check ---
             await emit_status("Status: Pipe handling history...")
             incoming_messages = body.get("messages", [])
@@ -1364,7 +1453,7 @@ class Pipe:
                 session_id=session_id,
                 user_id=user_id,
                 body=body,
-                user_valves=user_valves_obj,
+                user_valves=user_valves_obj,  # Pass the correctly initialized object
                 event_emitter=self._current_event_emitter,
                 embedding_func=owi_embed_func,
                 chroma_embed_wrapper=chroma_embed_wrapper,
@@ -1374,13 +1463,13 @@ class Pipe:
                 f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
             )
 
-            # --- Log Final Payload (if applicable and enabled) ---
+            # --- Log Final Payload ---
+            # (No changes needed here)
             if getattr(self.valves, "debug_log_final_payload", False):
                 if (
                     isinstance(orchestrator_result, dict)
                     and "messages" in orchestrator_result
                 ):
-                    # Only log if orchestrator returned the payload dict (final LLM didn't run)
                     self.logger.info(
                         f"[{session_id}] Logging final payload due to debug valve."
                     )

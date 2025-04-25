@@ -28,7 +28,6 @@
     <Compile Include="inventory.py" />
     <Compile Include="memory.py" />
     <Compile Include="OpenWebUI_MemorySession_SCRIPT.py" />
-    <Compile Include="OpenWebUI_ParameterInspectorPipe_SCRIPT.py" />
     <Compile Include="database.py" />
     <Compile Include="orchestration.py" />
     <Compile Include="prompting.py" />
