@@ -1179,13 +1179,14 @@ class SessionPipeOrchestrator:
         stateless_refinement_performed: bool, initial_owi_context_tokens: int,
         refined_context_tokens: int, summarization_prompt_tokens: int, # Kept for potential future use, not in current string
         summarization_output_tokens: int, # Kept for potential future use, not in current string
-        t0_dialogue_tokens: int, # Kept for potential future use, not in current string
+        t0_dialogue_tokens: int, # <<< THIS IS THE HISTORY TOKEN VALUE
         inventory_prompt_tokens: int, # Accepts inv tokens
         final_llm_payload_contents: Optional[List[Dict]]
     ) -> Tuple[str, int]: # Returns status string and final token count
         """ Calculates final payload tokens and formats the status message string
             according to the concise format including conditional token counts.
             Includes debug logging for token values.
+            MODIFIED: Added Hist= token count.
         """
         final_payload_tokens = -1
         # Calculate final payload tokens (logic unchanged)
@@ -1222,7 +1223,7 @@ class SessionPipeOrchestrator:
             status_parts.append(refinement_indicator)
 
         # --- <<< START DEBUG LOGGING >>> ---
-        self.logger.debug(f"[{session_id}] Status Tokens Check: OWI={initial_owi_context_tokens}, Ref={refined_context_tokens}, Inv={inventory_prompt_tokens}, Final={final_payload_tokens}")
+        self.logger.debug(f"[{session_id}] Status Tokens Check: OWI={initial_owi_context_tokens}, Ref={refined_context_tokens}, Hist={t0_dialogue_tokens}, Inv={inventory_prompt_tokens}, Final={final_payload_tokens}") # Added Hist here for debug log
         # --- <<< END DEBUG LOGGING >>> ---
 
         # 3. Token Counts Section (Conditional)
@@ -1232,6 +1233,10 @@ class SessionPipeOrchestrator:
             token_parts.append(f"OWI={initial_owi_context_tokens}")
         if refined_context_tokens >= 0:
              token_parts.append(f"Ref={refined_context_tokens}")
+        # --- >>> START CHANGE <<< ---
+        if t0_dialogue_tokens >= 0: # Add the history token count if valid
+             token_parts.append(f"Hist={t0_dialogue_tokens}")
+        # --- >>> END CHANGE <<< ---
         if inventory_prompt_tokens >= 0:
              token_parts.append(f"Inv={inventory_prompt_tokens}")
         if final_payload_tokens >= 0:
@@ -1243,7 +1248,7 @@ class SessionPipeOrchestrator:
             # --- <<< START DEBUG LOGGING >>> ---
             self.logger.debug(f"[{session_id}] Status Tokens: Adding token section: {token_parts}")
             # --- <<< END DEBUG LOGGING >>> ---
-            token_string = f" | Tok: {' '.join(token_parts)}"
+            token_string = f" | Tok: {' '.join(token_parts)}" # Join logic remains the same
         else:
             # --- <<< START DEBUG LOGGING >>> ---
             self.logger.debug(f"[{session_id}] Status Tokens: Skipping token section (no valid tokens >= 0).")
