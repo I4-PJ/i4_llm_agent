@@ -1,10 +1,12 @@
+# === START OF FILE script.txt ===
+
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.18.10 - Event Hints)
+title: SESSION_MEMORY PIPE (v0.18.11 - Log Consolidation)
 author: Petr Jilek & Assistant Gemini
-version: 0.18.10
-description: Adds dynamic Event Hint generation via secondary LLM. Fixes status emission logic, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.6+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
+version: 0.18.11
+description: Consolidates Inventory LLM debug logs into the Final Payload debug log file. Moves final payload logging into the orchestrator. Fixes status emission logic, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.6+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
 requirements: pydantic, chromadb, i4_llm_agent>=0.1.6, tiktoken, httpx, open_webui (internal utils)
 """
 # --- END HEADER ---
@@ -153,7 +155,7 @@ try:
         DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
         DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
         DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
-        DEFAULT_EVENT_HINT_TEMPLATE_TEXT,  # <<< Import NEW Event Hint Template
+        DEFAULT_EVENT_HINT_TEMPLATE_TEXT,
         # --- END IMPORT ---
     )
 
@@ -211,7 +213,7 @@ except ImportError:
 
 # === SECTION 3: CONSTANTS & DEFAULTS ===
 DEFAULT_LOG_DIR = r"C:\\Utils\\OpenWebUI"
-DEFAULT_LOG_FILE_NAME = "session_memory_v18_10_pipe_log.log"  # Version updated
+DEFAULT_LOG_FILE_NAME = "session_memory_v18_11_pipe_log.log"  # Version updated
 DEFAULT_LOG_LEVEL = "DEBUG"
 ENV_VAR_LOG_FILE_PATH = "SM_LOG_FILE_PATH"
 ENV_VAR_LOG_LEVEL = "SM_LOG_LEVEL"
@@ -312,7 +314,7 @@ DEFAULT_EVENT_HINT_HISTORY_COUNT = 6
 # Default template comes from library import
 
 # --- Logger Setup ---
-logger = logging.getLogger("SessionMemoryPipeV18_10Logger")  # Version updated
+logger = logging.getLogger("SessionMemoryPipeV18_11Logger")  # Version updated
 logging.basicConfig(level=logging.INFO)
 
 
@@ -363,10 +365,10 @@ class ChromaDBCompatibleEmbedder:
 
 # === SECTION 5: PIPE CLASS DEFINITION (WITH ENHANCED DEBUG LOGGING) ===
 class Pipe:
-    version = "0.18.10"  # Version updated
+    version = "0.18.11"  # Version updated
 
     # === SECTION 5.1: VALVES DEFINITION ===
-    # (Valves class definition remains unchanged - MAKE SURE debug_log_final_payload is True here or via ENV)
+    # (Valves class definition remains unchanged)
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -629,14 +631,16 @@ class Pipe:
             ).lower()
             == "true"
         )
-        debug_log_final_payload: bool = Field(  # <<< ENSURE THIS IS TRUE
-            default=str(
-                os.getenv(
-                    ENV_VAR_DEBUG_LOG_FINAL_PAYLOAD,
-                    str(DEFAULT_DEBUG_LOG_FINAL_PAYLOAD),
-                )
-            ).lower()
-            == "true"
+        debug_log_final_payload: bool = (
+            Field(  # <<< This enables logging in orchestrator now
+                default=str(
+                    os.getenv(
+                        ENV_VAR_DEBUG_LOG_FINAL_PAYLOAD,
+                        str(DEFAULT_DEBUG_LOG_FINAL_PAYLOAD),
+                    )
+                ).lower()
+                == "true"
+            )
         )
         debug_log_raw_input: bool = Field(
             default=str(
@@ -735,7 +739,7 @@ class Pipe:
     def __init__(self):
         # (Initialization logic remains unchanged)
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Event Hints)"
+        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Log Consolidation)"  # Version updated
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
@@ -755,10 +759,8 @@ class Pipe:
             init_log_valves["INIT_enable_event_hints"] = getattr(
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
-            init_log_valves["INIT_debug_log_final_payload"] = (
-                getattr(  # <<< Log debug setting
-                    self.valves, "debug_log_final_payload", "LOAD_FAILED"
-                )
+            init_log_valves["INIT_debug_log_final_payload"] = getattr(
+                self.valves, "debug_log_final_payload", "LOAD_FAILED"
             )
             self.logger.info(f"Pipe.__init__: self.valves loaded: {init_log_valves}")
             if not self.valves.summarizer_api_key:
@@ -1118,8 +1120,8 @@ class Pipe:
 
     # === SECTION 5.8 & 5.9: HELPER - Debug Logging (ADDED LOGGING) ===
     def _get_debug_log_path(self, suffix: str) -> Optional[str]:
-        # <<< ADDED LOGGING HERE >>>
-        func_logger = self.logger  # Use the main pipe logger
+        # (No changes needed here)
+        func_logger = self.logger
         func_logger.debug(f"_get_debug_log_path called with suffix: '{suffix}'")
         try:
             base_log_path = self.valves.log_file_path
@@ -1152,16 +1154,14 @@ class Pipe:
             base_name, _ = os.path.splitext(os.path.basename(base_log_path))
             debug_filename = f"{base_name}{suffix}.log"
             final_path = os.path.join(log_dir, debug_filename)
-            func_logger.info(
-                f"Constructed debug log path: '{final_path}'"
-            )  # Use INFO level for path visibility
+            func_logger.info(f"Constructed debug log path: '{final_path}'")
             return final_path
         except Exception as e:
             func_logger.error(f"Failed get debug path '{suffix}': {e}", exc_info=True)
             return None
 
     def _log_debug_raw_input(self, session_id: str, body: Dict):
-        # (No logic changes, just uses the updated path getter)
+        # (No changes needed here)
         if not getattr(self.valves, "debug_log_raw_input", False):
             return
         debug_log_path = self._get_debug_log_path(".DEBUG_INPUT")
@@ -1178,7 +1178,6 @@ class Pipe:
                 "sid": session_id,
                 "body": body,
             }
-            # <<< ADDED LOGGING HERE >>>
             self.logger.debug(
                 f"[{session_id}] Attempting to write RAW INPUT debug log to: {debug_log_path}"
             )
@@ -1191,50 +1190,24 @@ class Pipe:
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
             )
 
-    def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
-        # (No logic changes, just uses the updated path getter & ADDED LOGGING)
-        debug_log_path = self._get_debug_log_path(".DEBUG_PAYLOAD")
-        if not debug_log_path:
-            self.logger.error(
-                f"[{session_id}] Cannot log final payload: No path determined."
-            )
-            return
-        try:
-            ts = datetime.now(timezone.utc).isoformat()
-            log_entry = {
-                "ts": ts,
-                "pipe": self.version,
-                "sid": session_id,
-                "payload": payload_body,
-            }
-            # <<< ADDED LOGGING HERE >>>
-            self.logger.info(
-                f"[{session_id}] Attempting to write FINAL PAYLOAD debug log to: {debug_log_path}"
-            )  # INFO level
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                json.dump(log_entry, f, indent=2)
-                f.write("\n")
-            self.logger.info(
-                f"[{session_id}] Successfully wrote FINAL PAYLOAD debug log."
-            )  # INFO level
-        except Exception as e:
-            self.logger.error(
-                f"[{session_id}] Failed write debug final payload log: {e}",
-                exc_info=True,
-            )
+    # <<< FUNCTION REMOVED >>> - Handled by orchestrator now
+    # def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
+    #     ...
 
+    # --- MODIFIED: Inventory Log uses .DEBUG_PAYLOAD file ---
     def _log_debug_inventory_llm(self, session_id: str, content: Any, is_prompt: bool):
-        # (No logic changes, just uses the updated path getter & ADDED LOGGING)
-        if not getattr(
-            self.valves, "debug_log_final_payload", False
-        ):  # Controlled by same valve
-            return
-        debug_log_path = self._get_debug_log_path(".DEBUG_INVENTORY")
+        # <<< MODIFIED HERE >>>
+        # Log to the same file as the final payload for consolidation.
+        debug_log_path = self._get_debug_log_path(".DEBUG_PAYLOAD")
         if not debug_log_path:
             self.logger.error(
                 f"[{session_id}] Cannot log inventory LLM data: No path determined."
             )
             return
+        # Only log if the main debug payload logging is enabled
+        if not getattr(self.valves, "debug_log_final_payload", False):
+            return
+
         log_type = "PROMPT" if is_prompt else "RESPONSE"
         try:
             ts = datetime.now(timezone.utc).isoformat()
@@ -1244,17 +1217,19 @@ class Pipe:
                     parsed = json.loads(content)
                     log_content = json.dumps(parsed, indent=2)
                 except json.JSONDecodeError:
-                    pass
-            # <<< ADDED LOGGING HERE >>>
+                    pass  # Keep as string if not valid JSON
+
             self.logger.debug(
                 f"[{session_id}] Attempting to write INVENTORY LLM ({log_type}) debug log to: {debug_log_path}"
             )
             with open(debug_log_path, "a", encoding="utf-8") as f:
                 f.write(
-                    f"--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} ---\n"
+                    f"\n--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- START ---\n"
                 )
                 f.write(str(log_content))
-                f.write("\n\n")
+                f.write(
+                    f"\n--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- END ---\n\n"
+                )
             self.logger.debug(
                 f"[{session_id}] Successfully wrote INVENTORY LLM ({log_type}) debug log."
             )
@@ -1264,7 +1239,9 @@ class Pipe:
                 exc_info=True,
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD (ADDED LOGGING) ===
+    # --- END MODIFICATION ---
+
+    # === SECTION 5.11: MAIN PIPE METHOD (Payload Logging Removed) ===
     async def pipe(
         self,
         body: dict,
@@ -1277,7 +1254,7 @@ class Pipe:
         __task__=None,
         __task_body__: Optional[dict] = None,
     ) -> Union[dict, AsyncGenerator[str, None], str]:
-        # (Logic unchanged, just uses the updated debug helpers)
+        # (Logic mostly unchanged, just removed the final payload logging block)
         pipe_start_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Pipe.pipe v{self.version}: Entered at {pipe_start_time_iso}")
         self._current_event_emitter = __event_emitter__
@@ -1359,8 +1336,14 @@ class Pipe:
             # --- Orchestrator Config Update ---
             if hasattr(self, "orchestrator") and hasattr(self, "valves"):
                 self.orchestrator.config = self.valves
+                self.orchestrator.pipe_logger = (
+                    self.logger
+                )  # Pass logger for debug helpers
+                self.orchestrator.pipe_debug_path_getter = (
+                    self._get_debug_log_path
+                )  # Pass path getter
                 self.logger.debug(
-                    f"[{session_id}] Pipe: Force-updated orchestrator config reference."
+                    f"[{session_id}] Pipe: Force-updated orchestrator config, logger, and path getter refs."
                 )
             elif not hasattr(self, "orchestrator"):
                 self.logger.error(f"[{session_id}] Pipe: Orchestrator missing!")
@@ -1519,34 +1502,8 @@ class Pipe:
                 f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
             )
 
-            # --- START Enhanced Payload Debug Logging Check ---
-            # <<< Log the valve value and result type >>>
-            debug_payload_valve_value = getattr(
-                self.valves, "debug_log_final_payload", False
-            )
-            result_is_payload_dict = (
-                isinstance(orchestrator_result, dict)
-                and "messages" in orchestrator_result
-            )
-            self.logger.debug(
-                f"[{session_id}] Debug Payload Check: Valve Value={debug_payload_valve_value}, Result Is Payload Dict={result_is_payload_dict}"
-            )
-
-            if debug_payload_valve_value:
-                if result_is_payload_dict:
-                    self.logger.info(
-                        f"[{session_id}] Calling _log_debug_final_payload (debug valve ON, result is dict)."
-                    )
-                    self._log_debug_final_payload(session_id, orchestrator_result)
-                else:
-                    self.logger.debug(
-                        f"[{session_id}] Skipping final payload log: Debug valve ON, but result is not a payload dict (type: {type(orchestrator_result).__name__})."
-                    )
-            else:
-                self.logger.debug(
-                    f"[{session_id}] Skipping final payload log: Debug valve is OFF."
-                )
-            # --- END Enhanced Payload Debug Logging Check ---
+            # --- REMOVED: Final Payload Debug Logging Check ---
+            # (This logic is now inside the orchestrator)
 
             # --- Final Cleanup & Return ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()

@@ -7,6 +7,7 @@ import re
 import sqlite3
 import json
 import uuid
+import os # <<< Added for path manipulation in helpers
 from datetime import datetime, timezone
 from typing import ( # Ensure Coroutine is imported
     Tuple, Union, List, Dict, Optional, Any, Callable, Coroutine, AsyncGenerator
@@ -106,6 +107,7 @@ class SessionPipeOrchestrator:
     Orchestrates the core processing logic of the Session Memory Pipe.
     Encapsulates logic in helper methods for clarity and maintainability.
     Includes inventory management and event hint features.
+    Handles final payload debug logging.
     """
 
     def __init__(
@@ -121,7 +123,9 @@ class SessionPipeOrchestrator:
         self.session_manager = session_manager
         self.sqlite_cursor = sqlite_cursor
         self.chroma_client = chroma_client if CHROMADB_AVAILABLE else None
-        self.logger = logger_instance or logger
+        self.logger = logger_instance or logger # Use passed logger or default
+        self.pipe_logger = logger_instance or logger # Explicitly store pipe logger if passed
+        self.pipe_debug_path_getter = None # Placeholder for path getter from Pipe
 
         self._tokenizer = None
         if TIKTOKEN_AVAILABLE and hasattr(self.config, 'tokenizer_encoding_name'):
@@ -142,7 +146,6 @@ class SessionPipeOrchestrator:
         self._get_recent_turns_func = get_recent_turns
         self._manage_memory_func = manage_tier1_summarization
         # Use the standalone payload constructor from prompting.py directly
-        # self._construct_payload_func no longer needed as an alias if we remove the internal method
         self._count_tokens_func = count_tokens
         self._calculate_similarity_func = calculate_string_similarity
         self._dialogue_roles = DIALOGUE_ROLES
@@ -336,6 +339,66 @@ class SessionPipeOrchestrator:
              status_to_emit = final_status_message + ("" if stream_successful else " (Stream Interrupted or Failed)")
              await self._emit_status(event_emitter=event_emitter, session_id=extracted_session_id, description=status_to_emit, done=True)
 
+    # --- START NEW DEBUG LOGGING HELPERS (adapted from Pipe) ---
+    def _orchestrator_get_debug_log_path(self, suffix: str) -> Optional[str]:
+        """Gets the debug log path using config and logger passed from Pipe."""
+        func_logger = getattr(self, 'pipe_logger', self.logger) # Use pipe logger if available
+        func_logger.debug(f"_orchestrator_get_debug_log_path called with suffix: '{suffix}'")
+        try:
+            base_log_path = getattr(self.config, "log_file_path", None)
+            if not base_log_path:
+                func_logger.error("Orch Debug Path: Main log_file_path config is empty.")
+                return None
+            # func_logger.debug(f"Orch Debug Path: Base log path from config: '{base_log_path}'")
+            log_dir = os.path.dirname(base_log_path)
+            func_logger.debug(f"Orch Debug Path: Target log directory: '{log_dir}'")
+            try:
+                # func_logger.debug(f"Orch Debug Path: Attempting os.makedirs for: '{log_dir}' (exist_ok=True)")
+                os.makedirs(log_dir, exist_ok=True)
+                # func_logger.debug(f"Orch Debug Path: os.makedirs command finished for: '{log_dir}'")
+            except PermissionError as pe:
+                func_logger.error(f"Orch Debug Path: PERMISSION ERROR creating log directory '{log_dir}': {pe}")
+                return None
+            except Exception as e_mkdir:
+                func_logger.error(f"Orch Debug Path: Error creating log directory '{log_dir}': {e_mkdir}", exc_info=True)
+                return None
+
+            base_name, _ = os.path.splitext(os.path.basename(base_log_path))
+            debug_filename = f"{base_name}{suffix}.log"
+            final_path = os.path.join(log_dir, debug_filename)
+            func_logger.info(f"Orch Debug Path: Constructed debug log path: '{final_path}'")
+            return final_path
+        except AttributeError as ae:
+            func_logger.error(f"Orch Debug Path: Config object missing attribute ('log_file_path'?): {ae}")
+            return None
+        except Exception as e:
+            func_logger.error(f"Orch Debug Path: Failed get debug path '{suffix}': {e}", exc_info=True)
+            return None
+
+    def _orchestrator_log_debug_payload(self, session_id: str, payload_body: Dict):
+        """Logs the final payload dictionary to the designated debug file."""
+        # Use the internal path getter
+        debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_PAYLOAD")
+        if not debug_log_path:
+            self.logger.error(f"[{session_id}] Orch: Cannot log final payload: No path determined.")
+            return
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            log_entry = {
+                "ts": ts,
+                "pipe_version": getattr(self.config, "version", "unknown"), # Get version from config if possible
+                "sid": session_id,
+                "payload": payload_body,
+            }
+            self.logger.info(f"[{session_id}] Orch: Attempting write FINAL PAYLOAD debug log to: {debug_log_path}")
+            with open(debug_log_path, "a", encoding="utf-8") as f:
+                 f.write(f"--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- START ---\n")
+                 json.dump(log_entry, f, indent=2)
+                 f.write(f"\n--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- END ---\n\n")
+            self.logger.info(f"[{session_id}] Orch: Successfully wrote FINAL PAYLOAD debug log.")
+        except Exception as e:
+            self.logger.error(f"[{session_id}] Orch: Failed write debug final payload log: {e}", exc_info=True)
+    # --- END NEW DEBUG LOGGING HELPERS ---
 
     # --- Helper Methods for process_turn ---
 
@@ -662,10 +725,6 @@ class SessionPipeOrchestrator:
         return t0_raw_history_slice, t0_dialogue_tokens
 
 
-    # === REMOVED: Internal _construct_final_payload ===
-    # We will now rely solely on the standalone function imported from prompting.py
-
-
     async def _calculate_and_format_status(
         self, session_id: str, t1_retrieved_count: int, t2_retrieved_count: int,
         session_process_owi_rag: bool, final_context_selection_performed: bool,
@@ -706,33 +765,71 @@ class SessionPipeOrchestrator:
     ) -> OrchestratorResult:
         """ Executes the final LLM call or prepares the output body. """
         output_body = body.copy() if isinstance(body, dict) else {}
-        if not final_llm_payload_contents: self.logger.error(f"[{session_id}] Final payload construction failed."); await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True); return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
-        output_body["messages"] = final_llm_payload_contents; preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"]; keys_preserved = [k for k in preserved_keys if k in body]; [output_body.update({k: body[k]}) for k in keys_preserved]; self.logger.info(f"[{session_id}] Output body updated. Preserved keys: {keys_preserved}.")
-        final_url = getattr(self.config, 'final_llm_api_url', None); final_key = getattr(self.config, 'final_llm_api_key', None); url_present = bool(final_url and isinstance(final_url, str) and final_url.strip()); key_present = bool(final_key and isinstance(final_key, str) and final_key.strip()); self.logger.debug(f"[{session_id}] Checking Final LLM Trigger. URL Present:{url_present}, Key Present:{key_present}"); final_llm_triggered = url_present and key_present
+        if not final_llm_payload_contents:
+            self.logger.error(f"[{session_id}] Final payload construction failed.");
+            await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True);
+            return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
+
+        output_body["messages"] = final_llm_payload_contents
+        preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"];
+        keys_preserved = [k for k in preserved_keys if k in body];
+        [output_body.update({k: body[k]}) for k in keys_preserved];
+        self.logger.info(f"[{session_id}] Output body updated. Preserved keys: {keys_preserved}.")
+
+        # --- START MODIFIED: Final Payload Logging ---
+        # Log the payload HERE before deciding whether to call the final LLM or return.
+        if getattr(self.config, 'debug_log_final_payload', False):
+            self.logger.info(f"[{session_id}] Logging final payload dict due to debug valve.")
+            self._orchestrator_log_debug_payload(session_id, output_body) # Use the orchestrator's helper
+        else:
+            self.logger.debug(f"[{session_id}] Skipping final payload log: Debug valve is OFF.")
+        # --- END MODIFIED: Final Payload Logging ---
+
+        final_url = getattr(self.config, 'final_llm_api_url', None)
+        final_key = getattr(self.config, 'final_llm_api_key', None)
+        url_present = bool(final_url and isinstance(final_url, str) and final_url.strip())
+        key_present = bool(final_key and isinstance(final_key, str) and final_key.strip())
+        self.logger.debug(f"[{session_id}] Checking Final LLM Trigger. URL Present:{url_present}, Key Present:{key_present}")
+        final_llm_triggered = url_present and key_present
 
         if final_llm_triggered:
-            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming)."); await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call...", done=False)
-            final_temp = getattr(self.config, 'final_llm_temperature', 0.7); final_timeout = getattr(self.config, 'final_llm_timeout', 120); final_call_payload_google_fmt = {"contents": final_llm_payload_contents}
-            success, response_or_error = await self._async_llm_call_wrapper( api_url=final_url, api_key=final_key, payload=final_call_payload_google_fmt, temperature=final_temp, timeout=final_timeout, caller_info=f"Orch_FinalLLM_{session_id}" )
-            intermediate_status = "Status: Final LLM Complete" + (" (Success)" if success else " (Failed)"); await self._emit_status(event_emitter, session_id, intermediate_status, done=False)
-            if success and isinstance(response_or_error, str): self.logger.info(f"[{session_id}] Final LLM call successful. Returning response string."); return response_or_error
-            elif not success and isinstance(response_or_error, dict): self.logger.error(f"[{session_id}] Final LLM call failed. Returning error dict: {response_or_error}"); return response_or_error
-            else: self.logger.error(f"[{session_id}] Final LLM call returned unexpected format. Success={success}, Type={type(response_or_error)}"); return {"error": "Final LLM call returned unexpected result format.", "status_code": 500}
+            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming).")
+            await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call...", done=False)
+            final_temp = getattr(self.config, 'final_llm_temperature', 0.7);
+            final_timeout = getattr(self.config, 'final_llm_timeout', 120);
+            final_call_payload_google_fmt = {"contents": final_llm_payload_contents} # Use the constructed contents
+
+            success, response_or_error = await self._async_llm_call_wrapper(
+                api_url=final_url,
+                api_key=final_key,
+                payload=final_call_payload_google_fmt,
+                temperature=final_temp,
+                timeout=final_timeout,
+                caller_info=f"Orch_FinalLLM_{session_id}"
+            )
+            intermediate_status = "Status: Final LLM Complete" + (" (Success)" if success else " (Failed)")
+            await self._emit_status(event_emitter, session_id, intermediate_status, done=False)
+
+            if success and isinstance(response_or_error, str):
+                self.logger.info(f"[{session_id}] Final LLM call successful. Returning response string.")
+                return response_or_error
+            elif not success and isinstance(response_or_error, dict):
+                self.logger.error(f"[{session_id}] Final LLM call failed. Returning error dict: {response_or_error}")
+                return response_or_error
+            else:
+                self.logger.error(f"[{session_id}] Final LLM call returned unexpected format. Success={success}, Type={type(response_or_error)}")
+                return {"error": "Final LLM call returned unexpected result format.", "status_code": 500}
         else:
             self.logger.info(f"[{session_id}] Final LLM Call disabled. Passing modified payload downstream.")
-            if getattr(self.config, 'debug_log_final_payload', False):
-                try: payload_str = json.dumps(output_body, indent=2)
-                except Exception: payload_str = str(output_body)
-                self.logger.debug(f"[{session_id}] Returning Payload:\n{payload_str}")
+            # Payload logging already happened above
             return output_body
 
-    # --- LOGGING HELPER ---
-    def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
-        """Logs the final payload if the debug valve is enabled."""
-        if getattr(self.config, 'debug_log_final_payload', False):
-             try: payload_str = json.dumps(payload_body, indent=2)
-             except Exception: payload_str = str(payload_body)
-             self.logger.debug(f"[{session_id}] DEBUG_FINAL_PAYLOAD:\n{payload_str}")
+
+    # --- REMOVED OLD/UNUSED DEBUG HELPER ---
+    # def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
+    #    # This helper was not used correctly before and is now replaced by
+    #    # _orchestrator_log_debug_payload which uses the correct path getter.
+    #    pass
 
 
     # ==========================================================================
@@ -752,6 +849,10 @@ class SessionPipeOrchestrator:
         """ Processes a single turn by calling helper methods in sequence. """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
+
+        # Update logger/path getter refs from Pipe if they were updated
+        self.pipe_logger = getattr(self, 'pipe_logger', self.logger)
+        self.pipe_debug_path_getter = getattr(self, 'pipe_debug_path_getter', None)
 
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
         event_hints_enabled = getattr(self.config, 'enable_event_hints', False) # <<< Check event hint valve
@@ -850,7 +951,14 @@ class SessionPipeOrchestrator:
 
 
             # 9. Execute/Prepare Output
-            final_result = await self._execute_or_prepare_output( session_id=session_id, body=body, final_llm_payload_contents=final_llm_payload_contents, event_emitter=event_emitter, status_message="Status: Core processing complete.", final_payload_tokens=-1 )
+            final_result = await self._execute_or_prepare_output(
+                 session_id=session_id,
+                 body=body,
+                 final_llm_payload_contents=final_llm_payload_contents,
+                 event_emitter=event_emitter,
+                 status_message="Status: Core processing complete.",
+                 final_payload_tokens=-1 # Token count calculated later
+            )
 
 
             # 10. Post-Turn Inventory Update
@@ -878,12 +986,22 @@ class SessionPipeOrchestrator:
                                  new_cursor = None
                                  try:
                                      new_cursor = self.sqlite_cursor.connection.cursor()
+                                     # Log inventory prompt/response using Pipe's helper
+                                     if getattr(self.config, 'debug_log_final_payload', False):
+                                         if hasattr(self, 'pipe_logger') and hasattr(self.pipe_logger, '_log_debug_inventory_llm'):
+                                             self.logger.debug(f"[{session_id}] Calling Pipe's inventory logger for PROMPT.")
+                                             self.pipe_logger._log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
+                                         else:
+                                             self.logger.warning(f"[{session_id}] Cannot log inventory prompt: Pipe logger or method missing.")
+
                                      update_success = await self._update_inventories_func(
                                          cursor=new_cursor, session_id=session_id, main_llm_response=final_result, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str,
                                          llm_call_func=self._async_llm_call_wrapper,
                                          db_get_inventory_func=get_character_inventory_data,
                                          db_update_inventory_func=add_or_update_character_inventory,
-                                         inventory_llm_config=inv_llm_config
+                                         inventory_llm_config=inv_llm_config,
+                                         # Pass Pipe's logger for inventory LLM response logging if needed within the function
+                                         # inventory_llm_debug_logger=getattr(self, 'pipe_logger', None)
                                      )
                                      inventory_update_success_flag = update_success
                                      if update_success: self.logger.info(f"[{session_id}] Post-turn inventory update successful.")
@@ -932,13 +1050,8 @@ class SessionPipeOrchestrator:
             await self._emit_status(event_emitter, session_id, final_status_string, done=True)
 
 
-            # 12. Log Final Payload
+            # 12. Log Final Payload (Handled inside _execute_or_prepare_output now)
             # (No changes needed here)
-            if getattr(self.config, 'debug_log_final_payload', False):
-                if isinstance(final_result, dict) and "messages" in final_result:
-                     final_url = getattr(self.config, 'final_llm_api_url', None); final_key = getattr(self.config, 'final_llm_api_key', None); final_llm_triggered = bool(final_url and final_key)
-                     if not final_llm_triggered: self.logger.info(f"[{session_id}] Logging final payload dict due to debug valve (Final LLM Off)."); self._log_debug_final_payload(session_id, final_result)
-                     else: self.logger.debug(f"[{session_id}] Skipping final payload log: Final LLM was triggered.")
 
 
             # 13. Return
