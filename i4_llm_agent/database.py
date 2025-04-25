@@ -1,3 +1,5 @@
+# --- START OF FILE database.py ---
+
 # [[START MODIFIED database.py]]
 # i4_llm_agent/database.py
 
@@ -6,6 +8,7 @@ import sqlite3
 import asyncio
 import re
 import os
+from datetime import datetime, timezone # <<< ADDED for inventory timestamp
 from typing import (
     Optional, Dict, List, Tuple, Union, Any, Callable, Coroutine, Sequence
 )
@@ -31,19 +34,61 @@ logger = logging.getLogger(__name__) # i4_llm_agent.database
 # --- Constants ---
 T1_SUMMARY_TABLE_NAME = "tier1_text_summaries"
 RAG_CACHE_TABLE_NAME = "session_rag_cache"
+INVENTORY_TABLE_NAME = "character_inventory" # <<< NEW: Inventory Table Name
 
 # ==============================================================================
-# === SQLite Initialization                                                  ===
+# === 1. SQLite Initialization (Modified)                                    ===
 # ==============================================================================
 
+# --- 1.1: Sync - Initialize Inventory Table ---
+def _sync_initialize_inventory_table(cursor: sqlite3.Cursor) -> bool:
+    """
+    Synchronously initializes the character_inventory table.
+    Stores inventory data as JSON per character per session.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_initialize_inventory_table')
+    if not cursor:
+        func_logger.error("SQLite cursor is not available for inventory table init.")
+        return False
+    try:
+        cursor.execute(f"""CREATE TABLE IF NOT EXISTS {INVENTORY_TABLE_NAME} (
+                session_id TEXT NOT NULL,
+                character_name TEXT NOT NULL,
+                inventory_data TEXT,
+                last_updated_utc REAL NOT NULL,
+                PRIMARY KEY (session_id, character_name)
+            )""")
+        # Optional: Index on session_id for faster lookup of all inventories in a session
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_inv_session ON {INVENTORY_TABLE_NAME} (session_id)"
+        )
+        func_logger.debug(f"Table '{INVENTORY_TABLE_NAME}' initialized successfully.")
+        return True
+    except sqlite3.Error as e:
+        func_logger.error(f"SQLite error initializing table '{INVENTORY_TABLE_NAME}': {e}")
+        return False
+    except Exception as e:
+        func_logger.error(f"Unexpected error initializing table '{INVENTORY_TABLE_NAME}': {e}")
+        return False
+
+# --- 1.2: Async - Initialize Inventory Table ---
+async def initialize_inventory_table(cursor: sqlite3.Cursor) -> bool:
+    """Async wrapper to initialize the character_inventory table."""
+    return await asyncio.to_thread(_sync_initialize_inventory_table, cursor)
+
+
+# --- 1.3: Sync - Initialize ALL Tables (MODIFIED) ---
 def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
-    """Initializes all necessary SQLite tables."""
+    """
+    Initializes all necessary SQLite tables (T1 Summaries, RAG Cache, Inventory).
+    MODIFIED to include inventory table initialization.
+    """
     func_logger = logging.getLogger(__name__ + '._sync_initialize_sqlite_tables')
     if not cursor:
         func_logger.error("SQLite cursor is not available.")
         return False
     try:
-        # Initialize T1 Summary Table
+        # --- Initialize T1 Summary Table (Existing) ---
         cursor.execute(f"""CREATE TABLE IF NOT EXISTS {T1_SUMMARY_TABLE_NAME} (
                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_id TEXT,
                 summary_text TEXT NOT NULL, timestamp_utc REAL NOT NULL,
@@ -58,20 +103,29 @@ def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
         cursor.execute(
             f"CREATE INDEX IF NOT EXISTS idx_t1_session_end_idx ON {T1_SUMMARY_TABLE_NAME} (session_id, turn_end_index)"
         )
-        # Index for the existence check
         cursor.execute(
             f"CREATE INDEX IF NOT EXISTS idx_t1_session_start_end ON {T1_SUMMARY_TABLE_NAME} (session_id, turn_start_index, turn_end_index)"
         )
         func_logger.debug(f"Table '{T1_SUMMARY_TABLE_NAME}' initialized successfully.")
 
-        # Initialize RAG Cache Table
+        # --- Initialize RAG Cache Table (Existing) ---
         cursor.execute(f"""CREATE TABLE IF NOT EXISTS {RAG_CACHE_TABLE_NAME} (
                 session_id TEXT PRIMARY KEY, cached_context TEXT NOT NULL,
                 last_updated_utc REAL NOT NULL, last_updated_iso TEXT
             )""")
         func_logger.debug(f"Table '{RAG_CACHE_TABLE_NAME}' initialized successfully.")
 
+        # --- Initialize Inventory Table (NEW CALL) ---
+        inventory_init_success = _sync_initialize_inventory_table(cursor)
+        if not inventory_init_success:
+             func_logger.error("Failed to initialize inventory table during main init.")
+             # Decide if this is fatal - for now, return False if inventory fails
+             return False
+
+        # --- Return True if all initializations were okay ---
+        func_logger.info("All required SQLite tables initialized.")
         return True
+
     except sqlite3.Error as e:
         func_logger.error(f"SQLite error initializing tables: {e}")
         return False
@@ -79,14 +133,24 @@ def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
         func_logger.error(f"Unexpected error initializing tables: {e}")
         return False
 
+# --- 1.4: Async - Initialize ALL Tables ---
 async def initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
     """Async wrapper to initialize all necessary SQLite tables."""
     return await asyncio.to_thread(_sync_initialize_sqlite_tables, cursor)
 
-# ==============================================================================
-# === SQLite Tier 1 Summary Operations                                       ===
-# ==============================================================================
 
+# ==============================================================================
+# === 2. SQLite Tier 1 Summary Operations (Unchanged)                        ===
+# ==============================================================================
+# (Functions _sync_add_tier1_summary, add_tier1_summary,
+#  _sync_get_recent_tier1_summaries, get_recent_tier1_summaries,
+#  _sync_get_tier1_summary_count, get_tier1_summary_count,
+#  _sync_get_oldest_tier1_summary, get_oldest_tier1_summary,
+#  _sync_delete_tier1_summary, delete_tier1_summary,
+#  _sync_get_max_t1_end_index, get_max_t1_end_index,
+#  _sync_check_t1_summary_exists, check_t1_summary_exists
+#  remain exactly as provided in the previous context)
+# --- 2.1: Sync - Add T1 Summary ---
 def _sync_add_tier1_summary(
     cursor: sqlite3.Cursor,
     summary_id: str, session_id: str, user_id: str, summary_text: str, metadata: Dict
@@ -110,6 +174,7 @@ def _sync_add_tier1_summary(
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error adding T1 {summary_id}: {e}"); return False
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error adding T1 {summary_id}: {e}"); return False
 
+# --- 2.2: Async - Add T1 Summary ---
 async def add_tier1_summary(
     cursor: sqlite3.Cursor,
     summary_id: str, session_id: str, user_id: str, summary_text: str, metadata: Dict
@@ -117,6 +182,7 @@ async def add_tier1_summary(
     """Async wrapper to add a Tier 1 summary."""
     return await asyncio.to_thread(_sync_add_tier1_summary, cursor, summary_id, session_id, user_id, summary_text, metadata)
 
+# --- 2.3: Sync - Get Recent T1 Summaries ---
 def _sync_get_recent_tier1_summaries(cursor: sqlite3.Cursor, session_id: str, limit: int) -> List[str]:
     func_logger = logging.getLogger(__name__ + '._sync_get_recent_tier1_summaries')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return []
@@ -132,10 +198,12 @@ def _sync_get_recent_tier1_summaries(cursor: sqlite3.Cursor, session_id: str, li
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error getting recent T1: {e}"); return []
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error getting recent T1: {e}"); return []
 
+# --- 2.4: Async - Get Recent T1 Summaries ---
 async def get_recent_tier1_summaries(cursor: sqlite3.Cursor, session_id: str, limit: int) -> List[str]:
     """Async wrapper to get recent Tier 1 summaries."""
     return await asyncio.to_thread(_sync_get_recent_tier1_summaries, cursor, session_id, limit)
 
+# --- 2.5: Sync - Get T1 Summary Count ---
 def _sync_get_tier1_summary_count(cursor: sqlite3.Cursor, session_id: str) -> int:
     func_logger = logging.getLogger(__name__ + '._sync_get_tier1_summary_count')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return -1
@@ -146,10 +214,12 @@ def _sync_get_tier1_summary_count(cursor: sqlite3.Cursor, session_id: str) -> in
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error counting T1: {e}"); return -1
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error counting T1: {e}"); return -1
 
+# --- 2.6: Async - Get T1 Summary Count ---
 async def get_tier1_summary_count(cursor: sqlite3.Cursor, session_id: str) -> int:
     """Async wrapper to count Tier 1 summaries."""
     return await asyncio.to_thread(_sync_get_tier1_summary_count, cursor, session_id)
 
+# --- 2.7: Sync - Get Oldest T1 Summary ---
 def _sync_get_oldest_tier1_summary(cursor: sqlite3.Cursor, session_id: str) -> Optional[Tuple[str, str, Dict]]:
     func_logger = logging.getLogger(__name__ + '._sync_get_oldest_tier1_summary')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return None
@@ -174,10 +244,12 @@ def _sync_get_oldest_tier1_summary(cursor: sqlite3.Cursor, session_id: str) -> O
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error getting oldest T1: {e}"); return None
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error getting oldest T1: {e}"); return None
 
+# --- 2.8: Async - Get Oldest T1 Summary ---
 async def get_oldest_tier1_summary(cursor: sqlite3.Cursor, session_id: str) -> Optional[Tuple[str, str, Dict]]:
     """Async wrapper to get the oldest Tier 1 summary."""
     return await asyncio.to_thread(_sync_get_oldest_tier1_summary, cursor, session_id)
 
+# --- 2.9: Sync - Delete T1 Summary ---
 def _sync_delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_delete_tier1_summary')
     if not cursor: func_logger.error(f"Cursor unavailable for deleting T1 {summary_id}."); return False
@@ -187,11 +259,12 @@ def _sync_delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     except sqlite3.Error as e: func_logger.error(f"SQLite error deleting T1 {summary_id}: {e}"); return False
     except Exception as e: func_logger.error(f"Unexpected error deleting T1 {summary_id}: {e}"); return False
 
+# --- 2.10: Async - Delete T1 Summary ---
 async def delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     """Async wrapper to delete a Tier 1 summary."""
     return await asyncio.to_thread(_sync_delete_tier1_summary, cursor, summary_id)
 
-
+# --- 2.11: Sync - Get Max T1 End Index ---
 def _sync_get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
     """
     Synchronously retrieves the maximum turn_end_index for a given session_id
@@ -225,6 +298,7 @@ def _sync_get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optio
         func_logger.error(f"[{session_id}] Unexpected error getting max T1 end index: {e}")
         return None
 
+# --- 2.12: Async - Get Max T1 End Index ---
 async def get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
     """
     Async wrapper to retrieve the maximum turn_end_index for a given session_id
@@ -232,8 +306,7 @@ async def get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optio
     """
     return await asyncio.to_thread(_sync_get_max_t1_end_index, cursor, session_id)
 
-
-# --- [[[ NEW FUNCTION ]]] ---
+# --- 2.13: Sync - Check T1 Summary Exists ---
 def _sync_check_t1_summary_exists(
     cursor: sqlite3.Cursor, session_id: str, start_index: int, end_index: int
 ) -> bool:
@@ -251,9 +324,7 @@ def _sync_check_t1_summary_exists(
     if not isinstance(start_index, int) or not isinstance(end_index, int):
         func_logger.error(f"[{session_id}] Invalid start/end index type for T1 check.")
         return False
-
     try:
-        # Use EXISTS for efficiency, we only care if at least one row matches
         cursor.execute(
             f"""SELECT EXISTS (
                     SELECT 1 FROM {T1_SUMMARY_TABLE_NAME}
@@ -263,7 +334,6 @@ def _sync_check_t1_summary_exists(
             (session_id, start_index, end_index)
         )
         result = cursor.fetchone()
-        # fetchone() returns (1,) if exists, (0,) if not
         exists = bool(result and result[0])
         if exists:
              func_logger.debug(f"[{session_id}] Found existing T1 summary for indices {start_index}-{end_index}.")
@@ -277,6 +347,7 @@ def _sync_check_t1_summary_exists(
         func_logger.error(f"[{session_id}] Unexpected error checking for T1 summary ({start_index}-{end_index}): {e}")
         return False # Assume doesn't exist on error
 
+# --- 2.14: Async - Check T1 Summary Exists ---
 async def check_t1_summary_exists(
     cursor: sqlite3.Cursor, session_id: str, start_index: int, end_index: int
 ) -> bool:
@@ -286,19 +357,21 @@ async def check_t1_summary_exists(
     return await asyncio.to_thread(
         _sync_check_t1_summary_exists, cursor, session_id, start_index, end_index
     )
-# --- [[[ END NEW FUNCTION ]]] ---
 
 
 # ==============================================================================
-# === SQLite RAG Cache Operations                                            ===
+# === 3. SQLite RAG Cache Operations (Unchanged)                             ===
 # ==============================================================================
-# ... (RAG cache functions remain unchanged) ...
+# (Functions _sync_add_or_update_rag_cache, add_or_update_rag_cache,
+#  _sync_get_rag_cache, get_rag_cache remain exactly as provided)
+# --- 3.1: Sync - Add/Update RAG Cache ---
 def _sync_add_or_update_rag_cache(cursor: sqlite3.Cursor, session_id: str, context_text: str) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_add_or_update_rag_cache')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return False
     if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id."); return False
     if not isinstance(context_text, str): func_logger.warning(f"[{session_id}] RAG cache context_text not a string. Storing empty."); context_text = ""
     try:
+        # Local import needed as it's not used elsewhere in this specific file scope
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc); timestamp_utc = now_utc.timestamp(); timestamp_iso = now_utc.isoformat()
     except ImportError:
@@ -309,8 +382,12 @@ def _sync_add_or_update_rag_cache(cursor: sqlite3.Cursor, session_id: str, conte
         return True
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error updating RAG cache: {e}"); return False
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error updating RAG cache: {e}"); return False
+
+# --- 3.2: Async - Add/Update RAG Cache ---
 async def add_or_update_rag_cache(cursor: sqlite3.Cursor, session_id: str, context_text: str) -> bool:
     return await asyncio.to_thread(_sync_add_or_update_rag_cache, cursor, session_id, context_text)
+
+# --- 3.3: Sync - Get RAG Cache ---
 def _sync_get_rag_cache(cursor: sqlite3.Cursor, session_id: str) -> Optional[str]:
     func_logger = logging.getLogger(__name__ + '._sync_get_rag_cache')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return None
@@ -321,13 +398,163 @@ def _sync_get_rag_cache(cursor: sqlite3.Cursor, session_id: str) -> Optional[str
         return result[0] if result else None
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error retrieving RAG cache: {e}"); return None
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error retrieving RAG cache: {e}"); return None
+
+# --- 3.4: Async - Get RAG Cache ---
 async def get_rag_cache(cursor: sqlite3.Cursor, session_id: str) -> Optional[str]:
     return await asyncio.to_thread(_sync_get_rag_cache, cursor, session_id)
 
+
 # ==============================================================================
-# === ChromaDB Tier 2 Operations                                             ===
+# === 4. SQLite Inventory Operations (NEW)                                   ===
 # ==============================================================================
-# ... (ChromaDB functions remain unchanged) ...
+
+# --- 4.1: Sync - Get Character Inventory Data ---
+def _sync_get_character_inventory_data(cursor: sqlite3.Cursor, session_id: str, character_name: str) -> Optional[str]:
+    """
+    Synchronously retrieves the inventory data (JSON string) for a specific character
+    in a specific session.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_get_character_inventory_data')
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return None
+    if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id."); return None
+    if not character_name or not isinstance(character_name, str): func_logger.error("Invalid character_name."); return None
+
+    try:
+        # Perform case-insensitive comparison for character_name using LOWER() or COLLATE NOCASE
+        # Using LOWER() is generally more portable than COLLATE NOCASE on primary key
+        cursor.execute(
+            f"SELECT inventory_data FROM {INVENTORY_TABLE_NAME} WHERE session_id = ? AND LOWER(character_name) = LOWER(?)",
+            (session_id, character_name)
+        )
+        result = cursor.fetchone()
+        if result:
+            func_logger.debug(f"[{session_id}] Found inventory for character: {character_name}")
+            return result[0] # Return the JSON string
+        else:
+            func_logger.debug(f"[{session_id}] No inventory found for character: {character_name}")
+            return None
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error retrieving inventory for {character_name}: {e}")
+        return None
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error retrieving inventory for {character_name}: {e}")
+        return None
+
+# --- 4.2: Async - Get Character Inventory Data ---
+async def get_character_inventory_data(cursor: sqlite3.Cursor, session_id: str, character_name: str) -> Optional[str]:
+    """
+    Async wrapper to retrieve the inventory data (JSON string) for a specific character.
+    """
+    return await asyncio.to_thread(_sync_get_character_inventory_data, cursor, session_id, character_name)
+
+# --- 4.3: Sync - Add or Update Character Inventory ---
+def _sync_add_or_update_character_inventory(cursor: sqlite3.Cursor, session_id: str, character_name: str, inventory_data_json: str) -> bool:
+    """
+    Synchronously adds a new character inventory record or updates an existing one
+    using INSERT OR REPLACE. Stores the entire inventory state as a JSON string.
+    Uses the provided character_name directly (case might matter on insert/replace).
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_add_or_update_character_inventory')
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return False
+    if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id."); return False
+    if not character_name or not isinstance(character_name, str): func_logger.error("Invalid character_name."); return False
+    # Basic check if it looks like JSON, actual validation happens elsewhere
+    if not isinstance(inventory_data_json, str): func_logger.warning(f"[{session_id}] Inventory data for {character_name} not a string."); inventory_data_json = "{}"
+
+    now_utc_timestamp = datetime.now(timezone.utc).timestamp()
+
+    try:
+        # INSERT OR REPLACE uses the PRIMARY KEY (session_id, character_name) to determine
+        # whether to insert a new row or replace an existing one.
+        # Case sensitivity of character_name depends on SQLite's default collation unless overridden.
+        # Storing character_name as provided. Retrieval uses LOWER() for case-insensitivity.
+        cursor.execute(
+             f"""INSERT OR REPLACE INTO {INVENTORY_TABLE_NAME}
+                (session_id, character_name, inventory_data, last_updated_utc)
+                VALUES (?, ?, ?, ?)""",
+             (session_id, character_name, inventory_data_json, now_utc_timestamp)
+        )
+        func_logger.info(f"[{session_id}] Successfully added/updated inventory for: {character_name}")
+        return True
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error adding/updating inventory for {character_name}: {e}")
+        return False
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error adding/updating inventory for {character_name}: {e}")
+        return False
+
+# --- 4.4: Async - Add or Update Character Inventory ---
+async def add_or_update_character_inventory(cursor: sqlite3.Cursor, session_id: str, character_name: str, inventory_data_json: str) -> bool:
+    """
+    Async wrapper to add or update a character's inventory JSON data.
+    """
+    return await asyncio.to_thread(_sync_add_or_update_character_inventory, cursor, session_id, character_name, inventory_data_json)
+
+# --- 4.5: Sync - Get All Inventories for Session ---
+def _sync_get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: str) -> Dict[str, str]:
+    """
+    Synchronously retrieves all character inventories (as JSON strings) for a given session.
+    Returns a dictionary mapping character_name to inventory_data JSON string.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_get_all_inventories_for_session')
+    inventories: Dict[str, str] = {}
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return inventories
+    if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id."); return inventories
+
+    try:
+        # --- START DEBUG ADDITION ---
+        db_connection = cursor.connection
+        try:
+            # Attempt to get the database name associated with the connection
+            cursor.execute("PRAGMA database_list;")
+            db_list = cursor.fetchall()
+            # The main database is usually seq 0, file path is column 2
+            db_path_from_pragma = db_list[0][2] if db_list and len(db_list[0]) > 2 else "N/A"
+            func_logger.debug(f"[{session_id}] Attempting to query inventories. Cursor connection DB via PRAGMA: '{db_path_from_pragma}'")
+        except Exception as e_pragma:
+            func_logger.warning(f"[{session_id}] Could not execute PRAGMA database_list to confirm DB path: {e_pragma}")
+        # --- END DEBUG ADDITION ---
+
+        cursor.execute(
+            f"SELECT character_name, inventory_data FROM {INVENTORY_TABLE_NAME} WHERE session_id = ?",
+            (session_id,)
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            char_name, inv_data = row
+            if char_name and isinstance(inv_data, str):
+                inventories[char_name] = inv_data
+        func_logger.debug(f"[{session_id}] Retrieved inventories for {len(inventories)} characters.")
+        return inventories
+    except sqlite3.Error as e:
+        # This is where the "no such table" error is caught
+        func_logger.error(f"[{session_id}] SQLite error retrieving all inventories: {e}")
+        # Log the pragma path again on error
+        try: func_logger.error(f"[{session_id}] DB Path from PRAGMA during error: '{db_path_from_pragma}'")
+        except NameError: func_logger.error(f"[{session_id}] DB Path from PRAGMA unavailable during error.")
+        return {} # Return empty dict on error
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error retrieving all inventories: {e}")
+        return {} # Return empty dict on error
+
+# --- 4.6: Async - Get All Inventories for Session ---
+async def get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: str) -> Dict[str, str]:
+    """
+    Async wrapper to retrieve all character inventories for a session.
+    Returns: Dict[character_name: str, inventory_data_json: str]
+    """
+    return await asyncio.to_thread(_sync_get_all_inventories_for_session, cursor, session_id)
+
+
+# ==============================================================================
+# === 5. ChromaDB Tier 2 Operations (Unchanged)                              ===
+# ==============================================================================
+# (Functions _sync_get_or_create_chroma_collection, get_or_create_chroma_collection,
+#  _sync_add_to_chroma_collection, add_to_chroma_collection,
+#  _sync_query_chroma_collection, query_chroma_collection,
+#  _sync_get_chroma_collection_count, get_chroma_collection_count
+#  remain exactly as provided in the previous context)
+# --- 5.1: Sync - Get/Create Chroma Collection ---
 def _sync_get_or_create_chroma_collection(
     chroma_client: Any, # Expects chromadb.ClientAPI but use Any for optional import
     collection_name: str,
@@ -351,8 +578,12 @@ def _sync_get_or_create_chroma_collection(
     except sqlite3.OperationalError as e: func_logger.error(f"SQLite operational error accessing ChromaDB collection '{collection_name}': {e}.", exc_info=True); return None
     except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Exception for collection '{collection_name}': {ide}. Check embedding function consistency.", exc_info=True); return None
     except Exception as e: func_logger.error(f"Unexpected error accessing/creating ChromaDB collection '{collection_name}': {e}", exc_info=True); return None
+
+# --- 5.2: Async - Get/Create Chroma Collection ---
 async def get_or_create_chroma_collection(chroma_client: Any, collection_name: str, embedding_function: Optional[ChromaEmbeddingFunction] = None, metadata_config: Optional[Dict] = None,) -> Optional[Any]:
     return await asyncio.to_thread(_sync_get_or_create_chroma_collection, chroma_client, collection_name, embedding_function, metadata_config)
+
+# --- 5.3: Sync - Add to Chroma Collection ---
 def _sync_add_to_chroma_collection(collection: Any, ids: List[str], embeddings: List[List[float]], metadatas: List[Dict], documents: List[str]) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_add_to_chroma_collection')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return False
@@ -363,8 +594,12 @@ def _sync_add_to_chroma_collection(collection: Any, ids: List[str], embeddings: 
         return True
     except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Error adding to collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True); return False
     except Exception as e: func_logger.error(f"Error adding to ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return False
+
+# --- 5.4: Async - Add to Chroma Collection ---
 async def add_to_chroma_collection(collection: Any, ids: List[str], embeddings: List[List[float]], metadatas: List[Dict], documents: List[str]) -> bool:
     return await asyncio.to_thread(_sync_add_to_chroma_collection, collection, ids, embeddings, metadatas, documents)
+
+# --- 5.5: Sync - Query Chroma Collection ---
 def _sync_query_chroma_collection(collection: Any, query_embeddings: List[List[float]], n_results: int, include: List[str] = ["documents", "distances", "metadatas"]) -> Optional[Dict[str, Any]]:
     func_logger = logging.getLogger(__name__ + '._sync_query_chroma_collection')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return None
@@ -376,14 +611,22 @@ def _sync_query_chroma_collection(collection: Any, query_embeddings: List[List[f
         return results
     except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Error querying collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True); return None
     except Exception as e: func_logger.error(f"Error querying ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return None
+
+# --- 5.6: Async - Query Chroma Collection ---
 async def query_chroma_collection(collection: Any, query_embeddings: List[List[float]], n_results: int, include: List[str] = ["documents", "distances", "metadatas"]) -> Optional[Dict[str, Any]]:
     return await asyncio.to_thread(_sync_query_chroma_collection, collection, query_embeddings, n_results, include)
+
+# --- 5.7: Sync - Get Chroma Collection Count ---
 def _sync_get_chroma_collection_count(collection: Any) -> int:
     func_logger = logging.getLogger(__name__ + '._sync_get_chroma_collection_count')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return -1
     if not hasattr(collection, 'count'): func_logger.error("Provided collection object lacks 'count' method."); return -1
     try: count = collection.count(); return count
     except Exception as e: func_logger.error(f"Error getting count for ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return -1
+
+# --- 5.8: Async - Get Chroma Collection Count ---
 async def get_chroma_collection_count(collection: Any) -> int:
     return await asyncio.to_thread(_sync_get_chroma_collection_count, collection)
+
 # [[END MODIFIED database.py]]
+# --- END OF FILE database.py ---

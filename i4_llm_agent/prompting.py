@@ -74,71 +74,76 @@ CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 1 (Cache Update) - v2 (Focus on Character Profiles)
+# [[[ START MODIFIED PROMPT TEMPLATE - v2.1 Optimized ]]]
+# Default Template Text for Step 1 (Cache Update) - v2.1 (Optimized for Speed/Clarity)
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Session Background Curator
-**Task:** Maintain and update the SESSION CACHE by intelligently merging background information (lore, facts) AND establishing persistent core character profile summaries. Prioritize `character_profile` documents as the foundation for character understanding.
-**Objective:** Create and maintain an accurate, concise, and persistent cache containing both factual background information AND foundational summaries of key characters involved in the session, useful for long-term context.
+**Role:** Session Background Cache Maintainer
+**Task:** Efficiently update the SESSION CACHE using new information. Prioritize preserving existing core character profiles and integrating ONLY relevant NEW factual details.
+**Objective:** Maintain an accurate and structured cache for long-term context, focusing on speed and essential updates.
 
-**Instructions:**
+**Inputs:**
+- LATEST USER QUERY (for context)
+- CURRENT OWI RETRIEVAL (potential new info & profiles)
+- PREVIOUSLY REFINED CACHE (base for update)
+- RECENT CHAT HISTORY (for context only)
 
-1.  **Prioritize Character Profiles:**
-    *   Identify all provided `character_profile` type documents within the CURRENT OWI RETRIEVAL. These are the **primary source** for core character information.
-    *   For each key character (e.g., Caldric, Emily, Julia) with a profile:
-        *   **Extract AND Summarize Key Sections:** Concisely summarize the essential information from their profile, covering: Identity/Origins, Personality/Core Traits, Role/Capabilities, and Historical Legacy/Key Relationships.
-        *   **Mandatory Inclusion:** These character profile summaries **must** form the core foundation of the SESSION CACHE output. If a profile exists, its summarized information should always be present in the cache.
+**Core Instructions:**
 
-2.  **Integrate New Factual Information:**
-    *   Scan the CURRENT OWI RETRIEVAL (excluding profiles already processed) for new background *facts* (lore, world details, significant established events, location details) that are relevant to the session and NOT already present or accurately captured in the PREVIOUSLY REFINED CACHE.
-    *   Merge these relevant new *facts* logically with the character profile summaries and any existing factual lore from the previous cache.
+1.  **Identify & Preserve Character Profiles:**
+    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents.
+    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (likely under `# Character: Name` headings).
+    *   **Action:** If a character profile exists in PREVIOUS CACHE, **KEEP IT** unless a NEW profile in CURRENT OWI *explicitly contradicts or supersedes* it. Do NOT significantly alter core traits based only on RECENT CHAT HISTORY. Minor clarifications from OWI can be merged.
+    *   **Action:** If a NEW profile is found in CURRENT OWI for a character NOT in PREVIOUS CACHE, summarize its essential details (Identity, Traits, Role) and ADD it to the output under a new heading.
 
-3.  **Refine & Update (Carefully):**
-    *   **Character Info:** Compare the summarized profile info (Step 1) with the PREVIOUSLY REFINED CACHE and RECENT CHAT HISTORY.
-        *   Update the character summaries *only if* new OWI context provides explicit *canon* corrections/additions (e.g., an updated profile) OR if the RECENT CHAT HISTORY shows *significant, consistent, and lasting* character development or changes that fundamentally alter a core aspect. **Do not overwrite core personality traits from profiles based on temporary actions or moods in recent dialogue.**
-        *   Use RECENT CHAT HISTORY primarily to *confirm* established traits or add minor nuances *without* removing the core profile summary.
-    *   **Factual Lore:** If new factual information contradicts or provides a more accurate/detailed version of existing cached facts, update the cache accordingly. Use RECENT CHAT HISTORY to help resolve factual conflicts if possible.
+2.  **Integrate NEW Factual Lore:**
+    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for NEW background facts (lore, world details, established events, locations) relevant to the session.
+    *   **Action:** Compare these NEW facts against the PREVIOUSLY REFINED CACHE. If a fact is genuinely NEW and relevant OR provides a clear CORRECTION/UPDATE to existing lore, ADD/MODIFY it in the output. Do NOT add redundant facts.
 
-4.  **Use Query/History for Context:** Utilize the LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand the current focus, identify relevant themes, and resolve contradictions during the merging/updating process. **DO NOT include summaries of the RECENT CHAT HISTORY itself in the cache output.**
+3.  **Minimal Pruning:**
+    *   **Action:** Only remove sections from the PREVIOUS CACHE if they are *explicitly contradicted* by newer info in CURRENT OWI or are clearly no longer relevant (e.g., a character definitively removed from the story). **Default to keeping existing information unless strong evidence dictates removal.**
 
-5.  **Prune Gently:** Review the *entire* combined information (profile summaries + facts). Remove cached details that are outdated, explicitly contradicted by canon sources, or demonstrably irrelevant to the ongoing session narrative based on the dialogue flow. Remove character profiles that are no longer relevant to the session. **Do not remove character profiles or lore that are still relevant, even if they are not currently active in the session.**
+4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what new information* to add/update. **DO NOT summarize the history itself in the cache.**
 
-6.  **Output Format & Structure:**
-    *   Produce a clean, coherent text block representing the updated SESSION CACHE.
-    *   **Crucially, structure the output logically.** Use headings for clarity (e.g., `# Character: Caldric`, `# Lore: Aethelgard Empire`, `# Plot Point: Julia's Marriage`).
-    *   If no changes are needed (no new relevant info, profiles already cached), output the PREVIOUSLY REFINED CACHE content.
-    *   If the cache was empty and OWI retrieval provided nothing relevant (neither facts nor profiles), output: `[No relevant background context found]`
+5.  **Output Format:**
+    *   Produce the complete, updated SESSION CACHE text.
+    *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
+    *   **No Change:** If analysis shows no significant additions/updates/removals are needed, output the exact content of PREVIOUSLY REFINED CACHE.
+    *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
 
 **INPUTS:**
 
-**LATEST USER QUERY (for context):**
+**LATEST USER QUERY:**
 {CACHE_UPDATE_QUERY_PLACEHOLDER}
 
-**CURRENT OWI RETRIEVAL (potential new info & profiles):**
+**CURRENT OWI RETRIEVAL:**
 ---
 {CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER}
 ---
 
-**PREVIOUSLY REFINED CACHE (to be updated):**
+**PREVIOUSLY REFINED CACHE:**
 ---
 {CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY (for context & nuance):**
+**RECENT CHAT HISTORY:**
 ---
 {CACHE_UPDATE_HISTORY_PLACEHOLDER}
 ---
 
 **OUTPUT (Updated Session Cache Text - Structured):**
 """
+# [[[ END MODIFIED PROMPT TEMPLATE - v2.1 Optimized ]]]
 
-# Placeholders for Step 2 (Final Context Selection)
+
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
+# FINAL_SELECT_CURRENT_INVENTORY_PLACEHOLDER = "{current_inventory}" # <<< REMOVED Placeholder
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 2 (Final Context Selection)
+# Default Template Text for Step 2 (Final Context Selection) - REVERTED
+# --- START REPLACEMENT 1 (Reverted Prompt) ---
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Query-Focused Context Selector
@@ -162,7 +167,7 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 {FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER}
 ---
 
-**CURRENT OWI RETRIEVAL (Secondary Source):**
+**CURRENT OWI RETRIEVAL (Secondary Source, may include injected inventory):**
 ---
 {FINAL_SELECT_CURRENT_OWI_PLACEHOLDER}
 ---
@@ -386,7 +391,6 @@ async def generate_rag_query(
         if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
         else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
-# --- [[ START REVISED FUNCTION ]] ---
 # --- Function: Construct Final LLM Payload (Revised for Long Term Goal) ---
 def construct_final_llm_payload(
     system_prompt: str,
@@ -500,43 +504,77 @@ def construct_final_llm_payload(
     final_payload = {"contents": gemini_contents}
     func_logger.debug(f"Final payload constructed with {len(gemini_contents)} turns using strategy '{strategy}'.")
     return final_payload
-# --- [[ END REVISED FUNCTION ]] ---
 
+# --- Function: Combine Background Context (Includes Inventory) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
     t2_rag_results: Optional[List[str]],
-    labels: Dict[str, str] = TAG_LABELS # Use existing labels
+    inventory_context: Optional[str] = None, # <<< ADDED parameter
+    labels: Dict[str, str] = TAG_LABELS
 ) -> str:
     """
     Combines various background context sources into a single formatted string
-    suitable for injection into the final LLM prompt.
+    suitable for injection into the final LLM prompt. Now includes inventory.
+
+    Args:
+        final_selected_context: Context from OWI/Cache/Stateless refinement.
+        t1_summaries: List of recent Tier 1 summary strings.
+        t2_rag_results: List of retrieved Tier 2 RAG result strings.
+        inventory_context: Formatted string of current character inventories. <<< ADDED
+        labels: Dictionary mapping context types to labels for formatting.
+
+    Returns:
+        A single formatted string containing all valid context parts,
+        or a placeholder if no context is available.
     """
     func_logger = logging.getLogger(__name__ + '.combine_background_context')
     context_parts = []
-    # 1. Add Final Selected Context
-    selected_context_label = "Selected Background Context"
+
+    # 1. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
+    selected_context_label = "Selected Background Context" # Label for this dynamic part
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
-    if safe_selected_context and safe_selected_context != EMPTY_CONTEXT_PLACEHOLDER:
+    # Check if it's empty or just the placeholder indicating nothing was relevant
+    if safe_selected_context and "[No relevant background context found" not in safe_selected_context:
         func_logger.debug(f"Adding selected context (len: {len(safe_selected_context)}).")
         context_parts.append(f"--- {selected_context_label} ---\n{safe_selected_context}")
+
     # 2. Add T1 Summaries
     t1_label = labels.get("t1", "Recent Summaries (T1)")
     if t1_summaries:
+        # Filter out empty strings and join valid ones
         combined_t1 = "\n---\n".join(s.strip() for s in t1_summaries if isinstance(s, str) and s.strip())
-        if combined_t1: func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries."); context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
+        if combined_t1:
+            func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
+            context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
+
     # 3. Add T2 RAG Results
     t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
     if t2_rag_results:
+        # Filter out empty strings and join valid ones
         combined_t2 = "\n---\n".join(s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip())
-        if combined_t2: func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results."); context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
-    # 4. Combine parts or return placeholder
+        if combined_t2:
+            func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
+            context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
+
+    # 4. Add Inventory Context <<< NEW SECTION >>>
+    inventory_label = "Current Inventories" # Define a label
+    safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
+    # Check if inventory context is valid and not just a placeholder/error message
+    if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
+        func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
+        context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
+    # <<< END NEW SECTION >>>
+
+    # 5. Combine parts or return placeholder
     if context_parts:
+        # Join sections with double newlines for readability
         full_context_string = "\n\n".join(context_parts)
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
         return full_context_string
     else:
         func_logger.info("No background context available from any source.")
+        # Return the standard placeholder if all sources were empty/invalid
         return EMPTY_CONTEXT_PLACEHOLDER
 
 # --- Less Relevant Functions (Keep for potential internal use/completeness) ---
@@ -555,4 +593,95 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         match = re.search(pattern, system_content, re.DOTALL | re.IGNORECASE)
         if match: extracted[key] = match.group(1).strip()
     return extracted
-# === END OF FILE i4_llm_agent/prompting.py ===
+
+
+# Placeholders for Inventory Update LLM
+INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
+INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
+INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+
+# Default Template Text for Post-Turn Inventory Update LLM (Revised for Commands)
+DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Inventory Log Keeper
+**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) in a roleplaying session to identify any explicit changes to character inventories, either described in dialogue OR stated via direct commands.
+**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
+
+**Supported Direct Command Formats (Expected in User Query):**
+*   `INVENTORY: SET [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Replaces entire inventory for the character)
+*   `INVENTORY: ADD [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Adds specified items/quantities)
+*   `INVENTORY: REMOVE [Character Name]: [Item Name]=[Quantity], [Another Item]=[Quantity], ...` (Removes specified items/quantities)
+*   `INVENTORY: CLEAR [Character Name]` (Removes all items for the character)
+*(Note: Use `__USER__` for the player character if their specific name isn't provided in the command)*
+
+**Instructions:**
+
+1.  **Prioritize Direct Commands:** First, check the **USER QUERY** for any explicit `INVENTORY:` commands matching the formats above.
+    *   If a valid command is found, parse it accurately to determine the character(s), action(s) (SET, ADD, REMOVE, CLEAR), items, and quantities.
+    *   Generate the JSON `updates` based *solely* on the parsed command. **Ignore conflicting dialogue in the Assistant Response if a command is present.**
+    *   For `SET`, generate `set_quantity` action for each item listed. (Existing items not listed are implicitly removed by the downstream logic).
+    *   If `INVENTORY: CLEAR` is found, represent this with `{{ "action": "remove", "item_name": "__ALL_ITEMS__", "quantity": 0 }}` for the specified character.
+
+2.  **Analyze Dialogue (If No Command Found):** If no `INVENTORY:` command is present in the User Query, *then* analyze the **ASSISTANT RESPONSE** (and User Query for context) for narrative descriptions of inventory changes.
+    *   Identify actions like picking up, dropping, giving, receiving, using (if consumable), crafting, buying, or selling items mentioned.
+    *   Determine the character(s) involved. Use `__USER__` for the player character if their specific name isn't mentioned or easily inferred from history. Identify NPCs by name. Use history context to resolve pronouns ("he", "she", "they").
+    *   Determine the action ("add", "remove", "set_quantity").
+    *   Extract the item name and quantity (default 1 if unspecified).
+    *   Extract an optional description for added items if clearly provided.
+
+3.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+    ```json
+    {{
+      "updates": [
+        // One entry for each detected change (from command OR dialogue)
+        {{
+          "character_name": "Name or __USER__",
+          "action": "add | remove | set_quantity",
+          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
+          "quantity": <integer>,
+          "description": "<optional string>" // Typically only for 'add' from dialogue
+        }}
+        // ... more updates if needed
+      ]
+    }}
+    ```
+4.  **Accuracy is Key:** Only report changes explicitly stated in commands or directly and unambiguously implied by the dialogue. Do NOT infer changes.
+5.  **No Change:** If NO commands are found AND NO inventory changes are detected in the dialogue, output `{{"updates": []}}`.
+
+**INPUTS:**
+
+**USER QUERY (Check for commands first):**
+{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
+
+**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
+---
+{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY (For context, especially pronoun resolution):**
+---
+{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (JSON object with detected inventory updates):**
+"""
+
+# --- Function: Format Inventory Update Prompt (No code changes needed here) ---
+def format_inventory_update_prompt(
+    main_llm_response: str,
+    user_query: str,
+    recent_history_str: str,
+    template: str # Expecting the specific template for this step
+) -> str:
+    """Formats the prompt for the Post-Turn Inventory Update LLM."""
+    func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
+    if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
+    # Use basic replace for safety, assuming placeholders are unique enough
+    try:
+        formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
+        return formatted_prompt
+    except Exception as e:
+        func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
+        return f"[Error formatting inventory update prompt: {type(e).__name__}]"
