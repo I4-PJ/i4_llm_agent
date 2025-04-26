@@ -81,8 +81,8 @@ CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# [[[ START MODIFIED PROMPT TEMPLATE - v2.1 Optimized ]]]
-# Default Template Text for Step 1 (Cache Update) - v2.1 (Optimized for Speed/Clarity)
+# [[[ START MODIFIED PROMPT TEMPLATE - v2.2 No Change Marker ]]]
+# Default Template Text for Step 1 (Cache Update) - v2.2 (Adds NO_CACHE_UPDATE marker)
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Cache Maintainer
@@ -115,7 +115,7 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 5.  **Output Format:**
     *   Produce the complete, updated SESSION CACHE text.
     *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
-    *   **No Change:** If analysis shows no significant additions/updates/removals are needed, output the exact content of PREVIOUSLY REFINED CACHE.
+    *   **<<< MODIFIED >>> No Change:** If analysis shows no significant additions/updates/removals are needed, output ONLY the exact text: `[NO_CACHE_UPDATE]`
     *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
 
 **INPUTS:**
@@ -138,19 +138,17 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 {CACHE_UPDATE_HISTORY_PLACEHOLDER}
 ---
 
-**OUTPUT (Updated Session Cache Text - Structured):**
+**OUTPUT (Updated Session Cache Text - Structured, or [NO_CACHE_UPDATE], or [No relevant background context found]):**
 """
-# [[[ END MODIFIED PROMPT TEMPLATE - v2.1 Optimized ]]]
+# [[[ END MODIFIED PROMPT TEMPLATE - v2.2 No Change Marker ]]]
 
 
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
-# FINAL_SELECT_CURRENT_INVENTORY_PLACEHOLDER = "{current_inventory}" # <<< REMOVED Placeholder
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 2 (Final Context Selection) - REVERTED
-# --- START REPLACEMENT 1 (Reverted Prompt) ---
+# Default Template Text for Step 2 (Final Context Selection) - Reverted
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Query-Focused Context Selector
@@ -188,7 +186,7 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 """
 
 
-# --- Function: Clean Context Tags (Existing) ---
+# --- Function: Clean Context Tags (Existing - Unchanged) ---
 def clean_context_tags(system_content: str) -> str:
     if not system_content or not isinstance(system_content, str): return ""
     cleaned = system_content
@@ -198,7 +196,7 @@ def clean_context_tags(system_content: str) -> str:
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
 
-# --- Function: Process System Prompt (Existing) ---
+# --- Function: Process System Prompt (Existing - Unchanged) ---
 def process_system_prompt(messages: List[Dict]) -> Tuple[str, Optional[str]]:
     func_logger = logging.getLogger(__name__ + '.process_system_prompt')
     original_system_prompt_content = ""
@@ -227,7 +225,7 @@ def process_system_prompt(messages: List[Dict]) -> Tuple[str, Optional[str]]:
         base_system_prompt_text = "You are a helpful assistant."
     return base_system_prompt_text, extracted_owi_context
 
-# --- Function: Format Stateless Refiner Prompt (Existing) ---
+# --- Function: Format Stateless Refiner Prompt (Existing - Unchanged) ---
 def format_stateless_refiner_prompt(external_context: str, recent_history_str: str, query: str, template: Optional[str] = None) -> str:
     func_logger = logging.getLogger(__name__ + '.format_stateless_refiner_prompt')
     prompt_template = template if template is not None else DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE
@@ -250,7 +248,7 @@ def format_stateless_refiner_prompt(external_context: str, recent_history_str: s
         func_logger.error(f"Error formatting stateless refiner prompt: {e}", exc_info=True)
         return f"[Error formatting: {type(e).__name__}]"
 
-# --- Function: Refine External Context (Stateless - Existing) ---
+# --- Function: Refine External Context (Stateless - Existing - Unchanged) ---
 async def refine_external_context(external_context: str, history_messages: List[Dict], latest_user_query: str, llm_call_func: Callable, refiner_llm_config: Dict, skip_threshold: int, history_count: int, dialogue_only_roles: List[str] = DIALOGUE_ROLES, caller_info: str = "StatelessRefiner") -> str:
     func_logger = logging.getLogger(__name__ + '.refine_external_context')
     func_logger.debug(f"[{caller_info}] Entered refine_external_context (stateless).")
@@ -305,7 +303,7 @@ async def refine_external_context(external_context: str, history_messages: List[
         func_logger.warning(f"[{caller_info}] Stateless refinement failed. Error: '{error_details}'. Returning original context.")
         return external_context
 
-# --- NEW: Format Cache Update Prompt ---
+# --- NEW: Format Cache Update Prompt (Unchanged from previous step) ---
 def format_cache_update_prompt(
     previous_cache: str,
     current_owi_rag: str,
@@ -333,7 +331,7 @@ def format_cache_update_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in cache update prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting cache update prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# --- NEW: Format Final Context Selection Prompt ---
+# --- NEW: Format Final Context Selection Prompt (Unchanged from previous step) ---
 def format_final_context_selection_prompt(
     updated_cache: str,
     current_owi_rag: str, # Include current OWI for secondary check
@@ -361,7 +359,7 @@ def format_final_context_selection_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in final selection prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting final selection prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# --- Function: Generate RAG Query (Corrected) ---
+# --- Function: Generate RAG Query (Existing - Unchanged) ---
 async def generate_rag_query(
     latest_message_str: str,
     dialogue_context_str: str,
@@ -398,7 +396,7 @@ async def generate_rag_query(
         if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
         else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
-# --- Function: Construct Final LLM Payload (MODIFIED for Event Hints) ---
+# --- Function: Construct Final LLM Payload (Existing - Unchanged) ---
 def construct_final_llm_payload(
     system_prompt: str,
     history: List[Dict],
@@ -443,7 +441,6 @@ def construct_final_llm_payload(
     safe_long_term_goal = long_term_goal.strip() if isinstance(long_term_goal, str) else None
     if safe_long_term_goal:
         goal_handling_guideline = (
-            # ... (guideline text as before)
              "This is the persistent, overarching goal guiding the direction of the current session. "
              "**There is no specific deadline or requirement to achieve this goal within a short timeframe; focus on gradual progress and ensuring actions/dialogue remain coherent with this long-term objective.** "
              "Evaluate NPC actions, dialogue, and narrative developments against this objective. Ensure they generally align with or progress towards achieving this goal, "
@@ -476,13 +473,9 @@ def construct_final_llm_payload(
             ack_text = "Understood. I will follow these instructions."
             if safe_long_term_goal:
                  ack_text += " I will also keep the long-term goal in mind."
-            # Modify ACK further if hint guideline was added? Maybe not necessary.
-            # if event_hint and isinstance(event_hint, str) and event_hint.strip():
-            #    ack_text += " I will consider any event suggestions provided."
             gemini_contents.append({"role": "model", "parts": [{"text": ack_text}]})
 
     # 3. Prepare History Turns (Filter for valid roles/content)
-    # ... (no changes needed here)
     history_turns = []
     for msg in history:
         role = msg.get("role")
@@ -493,7 +486,6 @@ def construct_final_llm_payload(
 
 
     # 4. Prepare Context Turn (if context exists) and optional ACK
-    # ... (no changes needed here)
     context_turn = None; ack_turn = None
     has_real_context = bool(context and context.strip() and context.strip() != EMPTY_CONTEXT_PLACEHOLDER)
     if has_real_context:
@@ -517,7 +509,6 @@ def construct_final_llm_payload(
     final_query_turn = {"role": "user", "parts": [{"text": final_query_text}]} # Use the potentially modified text
 
     # 6. Assemble Payload based on Strategy
-    # ... (no changes needed here)
     if strategy == 'standard': # [Sys+Goal] -> Hist -> [Ctx] -> Query
         gemini_contents.extend(history_turns)
         if context_turn: gemini_contents.append(context_turn)
@@ -537,7 +528,7 @@ def construct_final_llm_payload(
     return final_payload
 
 
-# --- Function: Combine Background Context (Includes Inventory) ---
+# --- Function: Combine Background Context (Existing - Unchanged) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
@@ -632,7 +623,7 @@ INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# --- START REVISED TEMPLATE (Hybrid Approach) ---
+# --- START REVISED TEMPLATE (Hybrid Approach - Unchanged) ---
 DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Inventory Log Keeper
@@ -700,7 +691,7 @@ DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 """
 # --- END REVISED TEMPLATE (Hybrid Approach) ---
 
-# --- Function: Format Inventory Update Prompt (No code changes needed here) ---
+# --- Function: Format Inventory Update Prompt (Existing - Unchanged) ---
 def format_inventory_update_prompt(
     main_llm_response: str,
     user_query: str,
@@ -719,3 +710,5 @@ def format_inventory_update_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
         return f"[Error formatting inventory update prompt: {type(e).__name__}]"
+
+# === END OF FILE i4_llm_agent/prompting.py ===
