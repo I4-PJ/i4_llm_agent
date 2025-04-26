@@ -1,3 +1,4 @@
 
 - Database file path to be reflected as set in valve
 - Message refresh should prevent inventory items duplicates
+- Debug logs now containing sometomes all the content in message which is not needed => too much information
