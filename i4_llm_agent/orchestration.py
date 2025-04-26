@@ -49,7 +49,10 @@ from .prompting import (
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
 )
 from .cache import update_rag_cache, select_final_context
-from .api_client import call_google_llm_api, _convert_google_to_openai_payload # Import converter too
+# --- MODIFIED IMPORT: Only import the main dispatcher (now litellm adapter) ---
+from .api_client import call_google_llm_api
+# --- REMOVED IMPORT: No longer needed as adapter handles conversion ---
+# from .api_client import _convert_google_to_openai_payload
 from .utils import count_tokens, calculate_string_similarity, TIKTOKEN_AVAILABLE
 
 # --- NEW: Import Event Hint logic ---
@@ -83,20 +86,13 @@ except ImportError:
 # --- END LOCAL Inventory Import ---
 
 
-# --- Optional Imports ---
-try:
-    import httpx
-    HTTPX_AVAILABLE = True
-except ImportError:
-    httpx = None
-    HTTPX_AVAILABLE = False
-    # Logging handled by Pipe startup
-
+# --- REMOVED Optional httpx Import ---
+# No longer needed for streaming
 
 logger = logging.getLogger(__name__) # i4_llm_agent.orchestration
 
-# Type Alias for the complex return type
-OrchestratorResult = Union[Dict, AsyncGenerator[str, None], str]
+# --- MODIFIED Type Alias: Removed AsyncGenerator ---
+OrchestratorResult = Union[Dict, str]
 
 # ==============================================================================
 # === Session Pipe Orchestrator Class (Modularized)                          ===
@@ -108,6 +104,7 @@ class SessionPipeOrchestrator:
     Encapsulates logic in helper methods for clarity and maintainability.
     Includes inventory management and event hint features.
     Handles final payload debug logging.
+    Uses LiteLLM adapter via api_client for LLM calls. NO STREAMING.
     """
 
     def __init__(
@@ -141,7 +138,8 @@ class SessionPipeOrchestrator:
 
         # --- Function Aliases ---
         # Core
-        self._llm_call_func = call_google_llm_api # Use dispatcher
+        # --- MODIFIED: Use the main dispatcher directly (it's now the async litellm adapter) ---
+        self._llm_call_func = call_google_llm_api
         self._format_history_func = format_history_for_llm
         self._get_recent_turns_func = get_recent_turns
         self._manage_memory_func = manage_tier1_summarization
@@ -172,7 +170,7 @@ class SessionPipeOrchestrator:
             self._format_inventory_func = _dummy_format_inventory
             self._update_inventories_func = _dummy_update_inventories
 
-        self.logger.info("SessionPipeOrchestrator initialized.")
+        self.logger.info("SessionPipeOrchestrator initialized (Non-Streaming).")
 
     # --- Internal Helper: Status Emitter ---
     async def _emit_status(
@@ -186,158 +184,61 @@ class SessionPipeOrchestrator:
         if event_emitter and callable(event_emitter) and getattr(self.config, 'emit_status_updates', True):
             try:
                 status_data = { "type": "status", "data": {"description": str(description), "done": bool(done)} }
+                # Check if emitter itself is async (Open WebUI's usually is)
                 if asyncio.iscoroutinefunction(event_emitter):
                     await event_emitter(status_data)
                 else:
-                    event_emitter(status_data) # Call sync directly
+                    # If somehow it's sync, call it directly (less likely for OWI)
+                    event_emitter(status_data)
             except Exception as e_emit:
                 self.logger.warning(f"[{session_id}] Orchestrator failed to emit status '{description}': {e_emit}")
         else:
              self.logger.debug(f"[{session_id}] Orchestrator status update (not emitted): '{description}' (Done: {done})")
 
 
-    # --- Internal Helper: Async LLM Call Wrapper ---
+    # --- MODIFIED Internal Helper: Async LLM Call Wrapper (Simplified) ---
     async def _async_llm_call_wrapper(
         self,
         api_url: str,
         api_key: str,
-        payload: Dict[str, Any],
+        payload: Dict[str, Any], # Expects Google 'contents' format
         temperature: float,
         timeout: int = 90,
         caller_info: str = "Orchestrator_LLM",
     ) -> Tuple[bool, Union[str, Dict]]:
-        """ Wraps the library's LLM call function for error handling. """
+        """
+        Wraps the library's LLM call function (now the litellm adapter) for error handling.
+        Directly awaits the underlying async function.
+        """
         if not self._llm_call_func:
-            self.logger.error(f"[{caller_info}] LLM func unavailable in orchestrator.")
-            return False, {"error_type": "SetupError", "message": "LLM func unavailable"}
+            self.logger.error(f"[{caller_info}] LLM func alias unavailable in orchestrator.")
+            return False, {"error_type": "SetupError", "message": "LLM func alias unavailable"}
+
+        if not asyncio.iscoroutinefunction(self._llm_call_func):
+             self.logger.critical(f"[{caller_info}] LLM func alias is NOT async! Expected async adapter. Cannot proceed.")
+             return False, {"error_type": "SetupError", "message": "LLM func alias is not async"}
+
         try:
-            result = self._llm_call_func(
+            # Directly await the function (which is now the async litellm adapter)
+            self.logger.debug(f"[{caller_info}] Awaiting result from LLM adapter function.")
+            success, result_or_error = await self._llm_call_func(
                 api_url=api_url, api_key=api_key, payload=payload,
                 temperature=temperature, timeout=timeout, caller_info=caller_info
             )
-            if asyncio.iscoroutine(result):
-                self.logger.debug(f"[{caller_info}] Awaiting result from LLM function.")
-                return await result
-            elif isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], bool):
-                self.logger.debug(f"[{caller_info}] LLM function returned tuple directly (Success: {result[0]}).")
-                return result
-            else:
-                self.logger.error(f"[{caller_info}] LLM function returned unexpected type: {type(result)}. Result: {result}")
-                return False, {"error_type": "InternalError", "message": f"LLM function returned unexpected type {type(result)}"}
+            self.logger.debug(f"[{caller_info}] LLM adapter returned (Success: {success}).")
+            return success, result_or_error
+
+        except asyncio.CancelledError:
+             self.logger.info(f"[{caller_info}] LLM call cancelled.")
+             raise # Re-raise cancellation
         except Exception as e:
-            self.logger.error(f"Orchestrator LLM Wrapper Error [{caller_info}]: {e}", exc_info=True)
+            self.logger.error(f"Orchestrator LLM Wrapper Error [{caller_info}]: Uncaught exception during await: {e}", exc_info=True)
             return False, {"error_type": "AsyncWrapperError", "message": f"{type(e).__name__}: {str(e)}"}
 
 
-    # --- Internal Helper: Final LLM Stream Call Wrapper ---
-    async def _async_final_llm_stream_call(
-        self,
-        api_url: str,
-        api_key: str,
-        payload: Dict[str, Any], # Expects Google 'contents' format initially
-        temperature: float,
-        timeout: int = 120,
-        caller_info: str = "Orchestrator_FinalStream",
-        final_status_message: str = "Status: Stream completed.",
-        event_emitter: Optional[Callable] = None
-    ) -> AsyncGenerator[str, None]:
-        """ Handles streaming calls to OpenAI-compatible endpoints. """
-        log_session_id = caller_info
-        session_id_match = re.search(r'_(user_.*|chat_.*)', log_session_id)
-        extracted_session_id = session_id_match.group(1) if session_id_match else "unknown_session"
-        base_api_url = api_url
-        final_payload_to_send = {}
-        headers = {}
-        stream_successful = False
+    # --- REMOVED Internal Helper: Final LLM Stream Call Wrapper ---
+    # Streaming is removed
 
-        if not HTTPX_AVAILABLE:
-            self.logger.error(f"[{log_session_id}] httpx library not available. Cannot stream.")
-            yield f"[Streaming Error: httpx not installed]"
-            return
-        if not api_url or not api_key:
-            error_msg = "Missing API Key" if not api_key else "Missing Final LLM URL"
-            self.logger.error(f"[{log_session_id}] {error_msg}.")
-            yield f"[Streaming Error: {error_msg}]"
-            return
-
-        try:
-            converter_func = _convert_google_to_openai_payload
-            if converter_func is None:
-                self.logger.error(f"[{log_session_id}] Payload converter func unavailable. Cannot stream OpenAI.")
-                yield "[Streaming Error: Payload converter missing]"
-                return
-
-            parsed_url = urllib.parse.urlparse(api_url)
-            base_api_url = urllib.parse.urlunparse(parsed_url._replace(fragment=""))
-            url_for_check = base_api_url.lower().rstrip('/')
-
-            if "openrouter.ai/api/v1/chat/completions" in url_for_check or url_for_check.endswith("/v1/chat/completions"):
-                if parsed_url.fragment:
-                    model_name_for_conversion = parsed_url.fragment
-                    self.logger.debug(f"[{log_session_id}] Final stream target is OpenAI-like. Model: '{model_name_for_conversion}'")
-                    try:
-                        openai_payload_converted = converter_func(payload, model_name_for_conversion, temperature)
-                        openai_payload_converted["stream"] = True
-                        final_payload_to_send = openai_payload_converted
-                    except Exception as e_conv:
-                        self.logger.error(f"[{log_session_id}] Error converting payload for OpenAI stream: {e_conv}", exc_info=True)
-                        yield f"[Streaming Error: Payload conversion failed - {type(e_conv).__name__}]"
-                        return
-                    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"}
-                else:
-                    self.logger.error(f"[{log_session_id}] OpenAI-like URL requires model fragment for streaming.")
-                    yield "[Streaming Error: Model fragment missing in URL]"
-                    return
-            else:
-                self.logger.error(f"[{log_session_id}] Cannot determine final LLM API type for streaming from URL: {base_api_url}")
-                yield "[Streaming Error: Cannot determine API type for streaming]"
-                return
-        except Exception as e_prep:
-            self.logger.error(f"[{log_session_id}] Error parsing URL/preparing payload for stream: {e_prep}", exc_info=True)
-            yield "[Streaming Error: URL/Payload prep failed]"
-            return
-
-        if not final_payload_to_send:
-             self.logger.error(f"[{log_session_id}] Final payload for streaming is empty after preparation.")
-             yield "[Streaming Error: Final payload empty]"
-             return
-
-        self.logger.info(f"[{log_session_id}] Starting final LLM stream call to {base_api_url[:80]}...")
-        self.logger.debug(f"[{log_session_id}] Streaming Payload: {json.dumps(final_payload_to_send)}")
-        try:
-            async with httpx.AsyncClient(timeout=timeout + 10) as client:
-                 async with client.stream("POST", base_api_url, headers=headers, json=final_payload_to_send, timeout=timeout) as response:
-                    if response.status_code != 200:
-                         error_body = await response.aread(); error_text = error_body.decode('utf-8', errors='replace')[:1000]
-                         self.logger.error(f"[{log_session_id}] Stream API Error: Status {response.status_code}. Response: {error_text}...")
-                         yield f"[Streaming Error: API returned status {response.status_code}]"
-                         try: err_json = json.loads(error_text)
-                         except json.JSONDecodeError: pass
-                         else:
-                             if "error" in err_json and isinstance(err_json["error"], dict): yield f"\n[Detail: {err_json['error'].get('message', 'Unknown API error')}]"
-                         return
-
-                    self.logger.debug(f"[{log_session_id}] Stream connection successful (Status {response.status_code}). Reading chunks...")
-                    async for line in response.aiter_lines():
-                        if line.startswith("data:"):
-                            data_content = line[len("data:"):].strip()
-                            if data_content == "[DONE]": self.logger.debug(f"[{log_session_id}] Received [DONE] signal."); stream_successful = True; break
-                            if data_content:
-                                try:
-                                    chunk = json.loads(data_content)
-                                    delta = chunk.get("choices", [{}])[0].get("delta", {}); text_chunk = delta.get("content")
-                                    if text_chunk: yield text_chunk
-                                except json.JSONDecodeError: self.logger.warning(f"[{log_session_id}] Failed to decode JSON data chunk: '{data_content}'")
-                                except (IndexError, KeyError, TypeError) as e_parse: self.logger.warning(f"[{log_session_id}] Error parsing stream chunk structure ({type(e_parse).__name__}): {chunk}")
-                        elif line.strip(): self.logger.debug(f"[{log_session_id}] Received non-data line: '{line}'")
-        except httpx.TimeoutException as e_timeout: self.logger.error(f"[{log_session_id}] HTTPX Timeout during stream after {timeout}s: {e_timeout}", exc_info=False); yield f"[Streaming Error: Timeout after {timeout}s]"
-        except httpx.RequestError as e_req: self.logger.error(f"[{log_session_id}] HTTPX RequestError during stream: {e_req}", exc_info=True); yield f"[Streaming Error: Network request failed - {type(e_req).__name__}]"
-        except asyncio.CancelledError: self.logger.info(f"[{log_session_id}] Final stream call explicitly cancelled."); yield "[Streaming Error: Cancelled]"; raise
-        except Exception as e_stream: self.logger.error(f"[{log_session_id}] Unexpected error during final LLM stream: {e_stream}", exc_info=True); yield f"[Streaming Error: Unexpected error - {type(e_stream).__name__}]"
-        finally:
-             self.logger.info(f"[{log_session_id}] Final LLM stream processing finished.")
-             status_to_emit = final_status_message + ("" if stream_successful else " (Stream Interrupted or Failed)")
-             await self._emit_status(event_emitter=event_emitter, session_id=extracted_session_id, description=status_to_emit, done=True)
 
     # --- START NEW DEBUG LOGGING HELPERS (adapted from Pipe) ---
     def _orchestrator_get_debug_log_path(self, suffix: str) -> Optional[str]:
@@ -393,6 +294,11 @@ class SessionPipeOrchestrator:
             self.logger.info(f"[{session_id}] Orch: Attempting write FINAL PAYLOAD debug log to: {debug_log_path}")
             with open(debug_log_path, "a", encoding="utf-8") as f:
                  f.write(f"--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- START ---\n")
+                 # Ensure 'contents' is directly under 'payload' for easier reading if present
+                 if 'contents' in payload_body:
+                     log_entry_payload = payload_body.copy() # Avoid modifying original
+                     log_entry['payload']['contents'] = log_entry_payload.pop('contents', None) # Move contents up
+                     log_entry['payload_other_keys'] = log_entry_payload # Store remaining keys separately
                  json.dump(log_entry, f, indent=2)
                  f.write(f"\n--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- END ---\n\n")
             self.logger.info(f"[{session_id}] Orch: Successfully wrote FINAL PAYLOAD debug log.")
@@ -759,32 +665,41 @@ class SessionPipeOrchestrator:
         return status_message, final_payload_tokens
 
 
+    # --- MODIFIED Helper: Execute/Prepare Output (Non-Streaming) ---
     async def _execute_or_prepare_output(
         self, session_id: str, body: Dict, final_llm_payload_contents: Optional[List[Dict]],
         event_emitter: Optional[Callable], status_message: str, final_payload_tokens: int
-    ) -> OrchestratorResult:
-        """ Executes the final LLM call or prepares the output body. """
+    ) -> OrchestratorResult: # Return type is now str | Dict
+        """
+        Executes the final LLM call using the LiteLLM adapter OR returns the
+        constructed payload dictionary if the call is disabled by config.
+        NO STREAMING.
+        """
         output_body = body.copy() if isinstance(body, dict) else {}
         if not final_llm_payload_contents:
             self.logger.error(f"[{session_id}] Final payload construction failed.");
             await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True);
+            # Return error dict directly
             return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
 
-        output_body["messages"] = final_llm_payload_contents
+        # Prepare the payload dictionary structure (used for logging and potentially returning)
+        output_body["messages"] = final_llm_payload_contents # This uses Google 'contents' format
         preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"];
         keys_preserved = [k for k in preserved_keys if k in body];
-        [output_body.update({k: body[k]}) for k in keys_preserved];
-        self.logger.info(f"[{session_id}] Output body updated. Preserved keys: {keys_preserved}.")
+        # Note: 'stream' might be preserved but won't be used for the call anymore
+        for k in keys_preserved:
+            output_body[k] = body[k]
+        self.logger.info(f"[{session_id}] Output body constructed/updated. Preserved keys: {keys_preserved}.")
 
-        # --- START MODIFIED: Final Payload Logging ---
-        # Log the payload HERE before deciding whether to call the final LLM or return.
+        # Log the constructed payload HERE before deciding whether to call or return.
         if getattr(self.config, 'debug_log_final_payload', False):
-            self.logger.info(f"[{session_id}] Logging final payload dict due to debug valve.")
-            self._orchestrator_log_debug_payload(session_id, output_body) # Use the orchestrator's helper
+            self.logger.info(f"[{session_id}] Logging final constructed payload dict due to debug valve.")
+            # Log the version that includes the messages/contents
+            self._orchestrator_log_debug_payload(session_id, {"contents": final_llm_payload_contents})
         else:
             self.logger.debug(f"[{session_id}] Skipping final payload log: Debug valve is OFF.")
-        # --- END MODIFIED: Final Payload Logging ---
 
+        # Check if final LLM call is enabled
         final_url = getattr(self.config, 'final_llm_api_url', None)
         final_key = getattr(self.config, 'final_llm_api_key', None)
         url_present = bool(final_url and isinstance(final_url, str) and final_url.strip())
@@ -793,47 +708,45 @@ class SessionPipeOrchestrator:
         final_llm_triggered = url_present and key_present
 
         if final_llm_triggered:
-            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming).")
+            # --- Execute Final LLM Call (Non-Streaming) ---
+            self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming, using LiteLLM Adapter).")
             await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call...", done=False)
             final_temp = getattr(self.config, 'final_llm_temperature', 0.7);
             final_timeout = getattr(self.config, 'final_llm_timeout', 120);
-            final_call_payload_google_fmt = {"contents": final_llm_payload_contents} # Use the constructed contents
+            # The wrapper expects the Google format payload dict
+            final_call_payload_google_fmt = {"contents": final_llm_payload_contents}
 
             success, response_or_error = await self._async_llm_call_wrapper(
                 api_url=final_url,
                 api_key=final_key,
-                payload=final_call_payload_google_fmt,
+                payload=final_call_payload_google_fmt, # Pass Google format
                 temperature=final_temp,
                 timeout=final_timeout,
                 caller_info=f"Orch_FinalLLM_{session_id}"
             )
             intermediate_status = "Status: Final LLM Complete" + (" (Success)" if success else " (Failed)")
-            await self._emit_status(event_emitter, session_id, intermediate_status, done=False)
+            await self._emit_status(event_emitter, session_id, intermediate_status, done=False) # Not done=True, inventory follows
 
             if success and isinstance(response_or_error, str):
                 self.logger.info(f"[{session_id}] Final LLM call successful. Returning response string.")
-                return response_or_error
+                return response_or_error # Return the string content
             elif not success and isinstance(response_or_error, dict):
                 self.logger.error(f"[{session_id}] Final LLM call failed. Returning error dict: {response_or_error}")
-                return response_or_error
+                return response_or_error # Return the error dict
             else:
-                self.logger.error(f"[{session_id}] Final LLM call returned unexpected format. Success={success}, Type={type(response_or_error)}")
-                return {"error": "Final LLM call returned unexpected result format.", "status_code": 500}
+                # Should not happen if adapter works correctly
+                self.logger.error(f"[{session_id}] Final LLM adapter returned unexpected format. Success={success}, Type={type(response_or_error)}")
+                return {"error": "Final LLM adapter returned unexpected result format.", "status_code": 500}
         else:
-            self.logger.info(f"[{session_id}] Final LLM Call disabled. Passing modified payload downstream.")
+            # --- Final LLM Call Disabled ---
+            self.logger.info(f"[{session_id}] Final LLM Call disabled by config. Returning constructed payload dict.")
             # Payload logging already happened above
-            return output_body
-
-
-    # --- REMOVED OLD/UNUSED DEBUG HELPER ---
-    # def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
-    #    # This helper was not used correctly before and is now replaced by
-    #    # _orchestrator_log_debug_payload which uses the correct path getter.
-    #    pass
+            # Return the payload dict as confirmed
+            return {"messages": final_llm_payload_contents} # Use 'messages' key consistent with OWI expectations
 
 
     # ==========================================================================
-    # === Main Process Turn Method (MODIFIED for Event Hints)                ===
+    # === Main Process Turn Method (MODIFIED for Event Hints & Non-Streaming) ===
     # ==========================================================================
     async def process_turn(
         self,
@@ -845,7 +758,7 @@ class SessionPipeOrchestrator:
         embedding_func: Optional[Callable] = None,
         chroma_embed_wrapper: Optional[Any] = None,
         is_regeneration_heuristic: bool = False
-    ) -> OrchestratorResult:
+    ) -> OrchestratorResult: # Return type updated
         """ Processes a single turn by calling helper methods in sequence. """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
@@ -855,15 +768,15 @@ class SessionPipeOrchestrator:
         self.pipe_debug_path_getter = getattr(self, 'pipe_debug_path_getter', None)
 
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
-        event_hints_enabled = getattr(self.config, 'enable_event_hints', False) # <<< Check event hint valve
+        event_hints_enabled = getattr(self.config, 'enable_event_hints', False) # Check event hint valve
 
         self.logger.info(f"[{session_id}] Inventory Management Enabled (Global Valve): {inventory_enabled}")
-        self.logger.info(f"[{session_id}] Event Hints Enabled (Global Valve): {event_hints_enabled}") # <<< Log event hint status
+        self.logger.info(f"[{session_id}] Event Hints Enabled (Global Valve): {event_hints_enabled}") # Log event hint status
         self.logger.info(f"[{session_id}] Inventory Module Available (Local Import Check): {_ORCH_INVENTORY_MODULE_AVAILABLE}")
 
         # Initialize variables
         summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False
-        generated_event_hint: Optional[str] = None # <<< Variable for the generated hint
+        generated_event_hint: Optional[str] = None # Variable for the generated hint
 
         try:
             # 1. History Sync
@@ -902,7 +815,6 @@ class SessionPipeOrchestrator:
             t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
 
 
-            # <<< START Event Hint Generation >>>
             # 7.5. Generate Event Hint (If Enabled)
             if event_hints_enabled:
                 self.logger.info(f"[{session_id}] Event Hints feature enabled. Attempting generation...")
@@ -926,18 +838,17 @@ class SessionPipeOrchestrator:
                     generated_event_hint = None # Ensure it's None on error
             else:
                 self.logger.debug(f"[{session_id}] Event Hints feature disabled. Skipping hint generation.")
-            # <<< END Event Hint Generation >>>
+
 
             # 8. Construct Payload (Uses standalone function now)
             await self._emit_status(event_emitter, session_id, "Status: Constructing final request...")
-            # Call the standalone function from prompting.py
             payload_dict_or_error = standalone_construct_payload(
                 system_prompt=base_system_prompt_text,
                 history=t0_raw_history_slice,
                 context=combined_context_string,
                 query=latest_user_query_str,
                 long_term_goal=getattr(user_valves, 'long_term_goal', ''),
-                event_hint=generated_event_hint, # <<< Pass the hint here
+                event_hint=generated_event_hint, # Pass the hint here
                 strategy="standard", # Or load from config if needed
                 include_ack_turns=getattr(self.config, 'include_ack_turns', True),
             )
@@ -950,7 +861,7 @@ class SessionPipeOrchestrator:
                 final_llm_payload_contents = None
 
 
-            # 9. Execute/Prepare Output
+            # 9. Execute/Prepare Output (Non-Streaming)
             final_result = await self._execute_or_prepare_output(
                  session_id=session_id,
                  body=body,
@@ -962,12 +873,10 @@ class SessionPipeOrchestrator:
 
 
             # 10. Post-Turn Inventory Update
-            # (No changes needed here)
             if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._update_inventories_func:
                 inventory_update_completed = True
-                if isinstance(final_result, dict) and "error" in final_result: self.logger.warning(f"[{session_id}] Skipping inventory update due to upstream error: {final_result.get('error')}")
-                elif isinstance(final_result, AsyncGenerator): self.logger.warning(f"[{session_id}] Skipping inventory update: Streaming response detected.")
-                elif isinstance(final_result, str):
+                # --- MODIFIED: Check result type for inventory update ---
+                if isinstance(final_result, str): # Update only if final LLM call succeeded
                     self.logger.info(f"[{session_id}] Performing post-turn inventory update...")
                     await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
                     try:
@@ -986,22 +895,29 @@ class SessionPipeOrchestrator:
                                  new_cursor = None
                                  try:
                                      new_cursor = self.sqlite_cursor.connection.cursor()
-                                     # Log inventory prompt/response using Pipe's helper
+                                     # Log inventory prompt using Pipe's helper (if available)
                                      if getattr(self.config, 'debug_log_final_payload', False):
                                          if hasattr(self, 'pipe_logger') and hasattr(self.pipe_logger, '_log_debug_inventory_llm'):
                                              self.logger.debug(f"[{session_id}] Calling Pipe's inventory logger for PROMPT.")
-                                             self.pipe_logger._log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
+                                             # Ensure pipe_logger has the method attached if called from here
+                                             # For now, assume it might exist; needs careful setup in Pipe class __init__ potentially
+                                             try:
+                                                self.pipe_logger._log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
+                                             except AttributeError:
+                                                self.logger.warning(f"[{session_id}] Pipe logger missing '_log_debug_inventory_llm' method.")
+                                             except Exception as log_e:
+                                                self.logger.error(f"[{session_id}] Error calling pipe logger for inventory: {log_e}")
                                          else:
-                                             self.logger.warning(f"[{session_id}] Cannot log inventory prompt: Pipe logger or method missing.")
+                                             self.logger.warning(f"[{session_id}] Cannot log inventory prompt: Pipe logger or method missing/misconfigured.")
 
                                      update_success = await self._update_inventories_func(
                                          cursor=new_cursor, session_id=session_id, main_llm_response=final_result, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str,
-                                         llm_call_func=self._async_llm_call_wrapper,
+                                         llm_call_func=self._async_llm_call_wrapper, # Uses litellm adapter now
                                          db_get_inventory_func=get_character_inventory_data,
                                          db_update_inventory_func=add_or_update_character_inventory,
                                          inventory_llm_config=inv_llm_config,
                                          # Pass Pipe's logger for inventory LLM response logging if needed within the function
-                                         # inventory_llm_debug_logger=getattr(self, 'pipe_logger', None)
+                                         # inventory_llm_debug_logger=getattr(self, 'pipe_logger', None) # Needs handling inside inventory func
                                      )
                                      inventory_update_success_flag = update_success
                                      if update_success: self.logger.info(f"[{session_id}] Post-turn inventory update successful.")
@@ -1012,20 +928,26 @@ class SessionPipeOrchestrator:
                                           try: new_cursor.close(); self.logger.debug(f"[{session_id}] Inventory update cursor closed.")
                                           except Exception as e_close_cursor: self.logger.error(f"[{session_id}] Error closing inventory update cursor: {e_close_cursor}")
                     except Exception as e_inv_update_outer: self.logger.error(f"[{session_id}] Outer error during inventory update setup: {e_inv_update_outer}", exc_info=True); inventory_update_success_flag = False
-                elif isinstance(final_result, dict) and final_result.get("messages") == final_llm_payload_contents: self.logger.info(f"[{session_id}] Skipping inventory update: Final LLM call disabled or payload unchanged.")
-                else: self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
+
+                elif isinstance(final_result, dict) and "error" in final_result:
+                    self.logger.warning(f"[{session_id}] Skipping inventory update due to upstream error: {final_result.get('error')}")
+                    inventory_update_completed = False # Mark as not completed due to error
+                elif isinstance(final_result, dict) and "messages" in final_result: # Check if it's the payload dict
+                    self.logger.info(f"[{session_id}] Skipping inventory update: Final LLM call was disabled or skipped.")
+                    inventory_update_completed = False # Mark as not completed because final call didn't run
+                else: # Should not happen with non-streaming logic
+                    self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
+                    inventory_update_completed = False
+
             elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE:
                  self.logger.warning(f"[{session_id}] Skipping inventory update: Module import failed.")
-                 inventory_update_completed = False;
-                 inventory_update_success_flag = False;
+                 inventory_update_completed = False; inventory_update_success_flag = False;
             elif inventory_enabled and not self._update_inventories_func:
                  self.logger.error(f"[{session_id}] Skipping inventory update: Update function alias is None.")
-                 inventory_update_completed = False;
-                 inventory_update_success_flag = False;
+                 inventory_update_completed = False; inventory_update_success_flag = False;
             else:
                  self.logger.debug(f"[{session_id}] Skipping inventory update: Disabled by global valve.")
-                 inventory_update_completed = False;
-                 inventory_update_success_flag = False;
+                 inventory_update_completed = False; inventory_update_success_flag = False;
 
 
             # 11. Calculate FINAL Status
@@ -1042,24 +964,23 @@ class SessionPipeOrchestrator:
             if inventory_enabled:
                  if not _ORCH_INVENTORY_MODULE_AVAILABLE: inv_stat_indicator = "Inv=MISSING"
                  else:
-                     inv_stat_indicator = "Inv=ON"
-                     if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP"
-                     elif not inventory_update_success_flag: inv_stat_indicator = "Inv=FAIL"
+                     if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP" # Skipped (final call disabled or error)
+                     elif inventory_update_success_flag: inv_stat_indicator = "Inv=OK" # Completed successfully
+                     else: inv_stat_indicator = "Inv=FAIL" # Attempted but failed
             final_status_string = final_status_string_base + f" {inv_stat_indicator}"
             self.logger.debug(f"[{session_id}] Orchestrator: About to emit FINAL status: '{final_status_string}'")
+            # Emit final status AFTER inventory attempt
             await self._emit_status(event_emitter, session_id, final_status_string, done=True)
 
 
             # 12. Log Final Payload (Handled inside _execute_or_prepare_output now)
-            # (No changes needed here)
 
 
             # 13. Return
-            # (No changes needed here)
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(f"Orchestrator process_turn [{session_id}]: Finished at {pipe_end_time_iso}")
             if final_result is None: raise RuntimeError("Internal processing error, final result was None.")
-            return final_result
+            return final_result # Returns str (success) or dict (error or skipped payload)
 
         except asyncio.CancelledError:
             self.logger.info(f"[{session_id or 'unknown'}] Orchestrator process_turn cancelled."); await self._emit_status(event_emitter, session_id or 'unknown', "Status: Processing cancelled.", done=True); raise
