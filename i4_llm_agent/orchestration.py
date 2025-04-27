@@ -482,6 +482,8 @@ class SessionPipeOrchestrator:
         return retrieved_rag_summaries, t2_retrieved_count
 
 
+    # --- orchestrator.py ---
+
     async def _prepare_and_refine_background(
         self, session_id: str, body: Dict, user_valves: Any,
         retrieved_t1_summaries: List[str], retrieved_rag_summaries: List[str],
@@ -491,15 +493,47 @@ class SessionPipeOrchestrator:
         """
         Processes system prompt, manages context refinement (RAG Cache or Stateless),
         fetches and formats inventory, and combines background information.
-        MODIFIED: Injects formatted inventory into the RAG Cache Step 2 input
-                  using an empty string if OWI context is missing.
-                  Modifies the final combination step accordingly.
+        MODIFIED: Injects formatted inventory into the RAG Cache Step 2 input.
+                  Logs inventory tracing steps to a dedicated file.
         """
         func_logger = self.logger # Use the logger assigned during Pipe init
+        inventory_trace_log_path = None
+        debug_inventory_trace_enabled = getattr(self.config, 'debug_log_final_payload', False)
+
+        # --- Helper to write to inventory trace log file ---
+        def _log_inventory_trace(message: str):
+            nonlocal inventory_trace_log_path # Allow modification if needed
+            if not debug_inventory_trace_enabled:
+                return
+            try:
+                if inventory_trace_log_path is None:
+                    # Attempt to get path only once per call
+                    inventory_trace_log_path = self._orchestrator_get_debug_log_path(".DEBUG_INVENTORY_TRACE")
+
+                if inventory_trace_log_path:
+                    ts = datetime.now(timezone.utc).isoformat()
+                    log_line = f"[{ts}] [{session_id}] {message}\n"
+                    # Open in append mode, create if not exists
+                    with open(inventory_trace_log_path, "a", encoding="utf-8") as f:
+                        f.write(log_line)
+                else:
+                    # Log error once if path couldn't be determined
+                    if inventory_trace_log_path is not False: # Check if we haven't already failed
+                        func_logger.error(f"[{session_id}] Inventory Trace: Cannot log, failed to determine debug path.")
+                        inventory_trace_log_path = False # Mark as failed to avoid repeated errors
+            except Exception as e_log:
+                 # Log error once if writing fails
+                 if inventory_trace_log_path is not False:
+                    func_logger.error(f"[{session_id}] Inventory Trace: Error writing to log file '{inventory_trace_log_path}': {e_log}", exc_info=False)
+                    inventory_trace_log_path = False # Mark as failed
+
+        _log_inventory_trace("--- START _prepare_and_refine_background ---")
+
         await self._emit_status(event_emitter, session_id, "Status: Preparing context...")
         base_system_prompt_text = "You are helpful."; extracted_owi_context = None; initial_owi_context_tokens = -1; current_output_messages = body.get("messages", [])
 
         # --- 1. Process System Prompt & Handle Base Text Removal ---
+        _log_inventory_trace("Step 1: Processing system prompt...")
         if self._process_system_prompt_func:
              try: base_system_prompt_text, extracted_owi_context = self._process_system_prompt_func(current_output_messages)
              except Exception as e_proc_sys: func_logger.error(f"[{session_id}] Error process_system_prompt: {e_proc_sys}.", exc_info=True); extracted_owi_context = None
@@ -509,85 +543,133 @@ class SessionPipeOrchestrator:
              try: initial_owi_context_tokens = self._count_tokens_func(extracted_owi_context, self._tokenizer)
              except Exception: initial_owi_context_tokens = -1
         elif not extracted_owi_context: func_logger.debug(f"[{session_id}] No OWI <context> tag found.")
+        _log_inventory_trace(f"Extracted OWI Context Length: {len(extracted_owi_context) if extracted_owi_context else 0}, Tokens: {initial_owi_context_tokens}")
+
 
         if not base_system_prompt_text: base_system_prompt_text = "You are helpful."; func_logger.warning(f"[{session_id}] System prompt empty after clean. Using default.")
 
         session_text_block_to_remove = getattr(user_valves, 'text_block_to_remove', '') if user_valves else ''
         if session_text_block_to_remove:
-            func_logger.info(f"[{session_id}] Attempting removal of text block from base system prompt...")
+            # func_logger.info(f"[{session_id}] Attempting removal of text block from base system prompt...")
             original_len = len(base_system_prompt_text); temp_prompt = base_system_prompt_text.replace(session_text_block_to_remove, "")
-            if len(temp_prompt) < original_len: base_system_prompt_text = temp_prompt; func_logger.info(f"[{session_id}] Removed text block ({original_len - len(temp_prompt)} chars).")
-            else: func_logger.warning(f"[{session_id}] Text block for removal '{session_text_block_to_remove[:50]}...' NOT FOUND.")
-        else: func_logger.debug(f"[{session_id}] No text block for removal specified.")
+            if len(temp_prompt) < original_len: base_system_prompt_text = temp_prompt; _log_inventory_trace(f"Removed text block from system prompt ({original_len - len(temp_prompt)} chars).") # func_logger.info(f"[{session_id}] Removed text block ({original_len - len(temp_prompt)} chars).")
+            else: _log_inventory_trace(f"Text block for removal NOT FOUND: '{session_text_block_to_remove[:50]}...'") # func_logger.warning(f"[{session_id}] Text block for removal '{session_text_block_to_remove[:50]}...' NOT FOUND.")
+        # else: func_logger.debug(f"[{session_id}] No text block for removal specified.")
 
         session_process_owi_rag = bool(getattr(user_valves, 'process_owi_rag', True))
-        if not session_process_owi_rag: func_logger.info(f"[{session_id}] Session valve 'process_owi_rag=False'. Discarding OWI context."); extracted_owi_context = None; initial_owi_context_tokens = 0
+        if not session_process_owi_rag:
+            _log_inventory_trace("Session valve 'process_owi_rag=False'. Discarding OWI context.") # func_logger.info(f"[{session_id}] Session valve 'process_owi_rag=False'. Discarding OWI context.");
+            extracted_owi_context = None; initial_owi_context_tokens = 0
 
         # --- 2. Fetch and Format Inventory Data ---
+        _log_inventory_trace("Step 2: Fetching and formatting inventory...")
         formatted_inventory_string = "[Inventory Management Disabled]"; raw_session_inventories = {}; inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
         if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._get_all_inventories_db_func and self._format_inventory_func and self.sqlite_cursor:
-            func_logger.debug(f"[{session_id}] Inventory enabled, fetching data...")
+            # func_logger.debug(f"[{session_id}] Inventory enabled, fetching data...")
+            _log_inventory_trace("Inventory enabled, fetching data...")
             try:
                 raw_session_inventories = await self._get_all_inventories_db_func(self.sqlite_cursor, session_id)
                 if raw_session_inventories:
-                    func_logger.info(f"[{session_id}] Retrieved inventory data for {len(raw_session_inventories)} characters.")
-                    try: formatted_inventory_string = self._format_inventory_func(raw_session_inventories); func_logger.info(f"[{session_id}] Formatted inventory string generated (len: {len(formatted_inventory_string)}).")
-                    except Exception as e_fmt_inv: func_logger.error(f"[{session_id}] Failed to format inventory string: {e_fmt_inv}", exc_info=True); formatted_inventory_string = "[Error Formatting Inventory]"
-                else: func_logger.info(f"[{session_id}] No inventory data found in DB for this session."); formatted_inventory_string = "[No Inventory Data Available]"
-            except Exception as e_get_inv: func_logger.error(f"[{session_id}] Error retrieving inventory data from DB: {e_get_inv}", exc_info=True); formatted_inventory_string = "[Error Retrieving Inventory]"
-        elif not inventory_enabled: func_logger.debug(f"[{session_id}] Skipping inventory fetch: Feature disabled by global valve.")
-        elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE: func_logger.warning(f"[{session_id}] Skipping inventory fetch: Module unavailable (Import failed).")
+                    # func_logger.info(f"[{session_id}] Retrieved inventory data for {len(raw_session_inventories)} characters.")
+                    _log_inventory_trace(f"Retrieved inventory data for {len(raw_session_inventories)} characters.")
+                    try:
+                        formatted_inventory_string = self._format_inventory_func(raw_session_inventories);
+                        _log_inventory_trace(f"Formatted inventory string generated (len: {len(formatted_inventory_string)}). Content:\n------\n{formatted_inventory_string}\n------")
+                        # func_logger.info(f"[{session_id}] Formatted inventory string generated (len: {len(formatted_inventory_string)}).")
+                    except Exception as e_fmt_inv:
+                        func_logger.error(f"[{session_id}] Failed to format inventory string: {e_fmt_inv}", exc_info=True);
+                        formatted_inventory_string = "[Error Formatting Inventory]"
+                        _log_inventory_trace(f"ERROR formatting inventory string: {e_fmt_inv}")
+                else:
+                    _log_inventory_trace("No inventory data found in DB for this session.")
+                    # func_logger.info(f"[{session_id}] No inventory data found in DB for this session.");
+                    formatted_inventory_string = "[No Inventory Data Available]"
+            except Exception as e_get_inv:
+                func_logger.error(f"[{session_id}] Error retrieving inventory data from DB: {e_get_inv}", exc_info=True);
+                formatted_inventory_string = "[Error Retrieving Inventory]"
+                _log_inventory_trace(f"ERROR retrieving inventory data from DB: {e_get_inv}")
+        elif not inventory_enabled:
+            _log_inventory_trace("Skipping inventory fetch: Feature disabled by global valve.")
+            # func_logger.debug(f"[{session_id}] Skipping inventory fetch: Feature disabled by global valve.")
+        elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE:
+            _log_inventory_trace("Skipping inventory fetch: Module unavailable (Import failed).")
+            # func_logger.warning(f"[{session_id}] Skipping inventory fetch: Module unavailable (Import failed).")
         else:
-             missing_inv_funcs = [f for f, fn in {"db_get": self._get_all_inventories_db_func, "formatter": self._format_inventory_func, "cursor": self.sqlite_cursor}.items() if not fn]; func_logger.warning(f"[{session_id}] Skipping inventory fetch: Missing prerequisites: {missing_inv_funcs}")
+             missing_inv_funcs = [f for f, fn in {"db_get": self._get_all_inventories_db_func, "formatter": self._format_inventory_func, "cursor": self.sqlite_cursor}.items() if not fn];
+             _log_inventory_trace(f"Skipping inventory fetch: Missing prerequisites: {missing_inv_funcs}")
+             # func_logger.warning(f"[{session_id}] Skipping inventory fetch: Missing prerequisites: {missing_inv_funcs}")
              formatted_inventory_string = "[Inventory Init/Config Error]"
 
         # --- 3. Context Refinement Logic (RAG Cache or Stateless) ---
+        _log_inventory_trace("Step 3: Context Refinement Logic...")
         context_for_prompt = extracted_owi_context; refined_context_tokens = -1; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; updated_cache_text_intermediate = "[Cache not initialized or updated]"
         enable_rag_cache_global = getattr(self.config, 'enable_rag_cache', False); enable_stateless_refin_global = getattr(self.config, 'enable_stateless_refinement', False)
+        _log_inventory_trace(f"RAG Cache Enabled: {enable_rag_cache_global}, Stateless Refinement Enabled: {enable_stateless_refin_global}")
+
 
         if enable_rag_cache_global and self._cache_update_func and self._cache_select_func and self._get_rag_cache_db_func and self.sqlite_cursor:
             # --- RAG Cache Path ---
-            func_logger.info(f"[{session_id}] RAG Cache Feature ENABLED.")
+            _log_inventory_trace("RAG Cache Path Selected.")
+            # func_logger.info(f"[{session_id}] RAG Cache Feature ENABLED.")
             run_step1 = False; previous_cache_text = "";
             try: cache_result = await self._get_rag_cache_db_func(self.sqlite_cursor, session_id); previous_cache_text = cache_result if cache_result is not None else ""
             except Exception as e_get_cache: func_logger.error(f"[{session_id}] Error retrieving previous cache: {e_get_cache}", exc_info=True)
+            _log_inventory_trace(f"Previous cache length: {len(previous_cache_text)}")
 
-            if not session_process_owi_rag: func_logger.info(f"[{session_id}] Skipping RAG Cache Step 1 (session valve 'process_owi_rag=False')."); cache_update_skipped = True; run_step1 = False; updated_cache_text_intermediate = previous_cache_text
+
+            if not session_process_owi_rag:
+                _log_inventory_trace("Skipping RAG Cache Step 1 (session valve 'process_owi_rag=False').")
+                # func_logger.info(f"[{session_id}] Skipping RAG Cache Step 1 (session valve 'process_owi_rag=False').");
+                cache_update_skipped = True; run_step1 = False; updated_cache_text_intermediate = previous_cache_text
             else:
                  skip_len = False; skip_sim = False; owi_content_for_check = extracted_owi_context or ""; len_thresh = getattr(self.config, 'CACHE_UPDATE_SKIP_OWI_THRESHOLD', 50)
-                 if len(owi_content_for_check.strip()) < len_thresh: skip_len = True; func_logger.info(f"[{session_id}] Cache S1 Skip: OWI len < {len_thresh}.")
+                 if len(owi_content_for_check.strip()) < len_thresh:
+                     skip_len = True; _log_inventory_trace(f"Cache S1 Skip: OWI len ({len(owi_content_for_check.strip())}) < {len_thresh}.") # func_logger.info(f"[{session_id}] Cache S1 Skip: OWI len < {len_thresh}.")
                  elif self._calculate_similarity_func and previous_cache_text:
                       sim_thresh = getattr(self.config, 'CACHE_UPDATE_SIMILARITY_THRESHOLD', 0.9)
                       try: sim_score = self._calculate_similarity_func(owi_content_for_check, previous_cache_text)
                       except Exception as e_sim: func_logger.error(f"[{session_id}] Error calculating similarity: {e_sim}")
                       else:
-                          if sim_score > sim_thresh: skip_sim = True; func_logger.info(f"[{session_id}] Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.")
+                          if sim_score > sim_thresh:
+                              skip_sim = True; _log_inventory_trace(f"Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.") # func_logger.info(f"[{session_id}] Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.")
                  cache_update_skipped = skip_len or skip_sim; run_step1 = not cache_update_skipped
-                 if cache_update_skipped: await self._emit_status(event_emitter, session_id, "Status: Skipping cache update (redundant OWI)."); updated_cache_text_intermediate = previous_cache_text
+                 if cache_update_skipped:
+                     await self._emit_status(event_emitter, session_id, "Status: Skipping cache update (redundant OWI).");
+                     updated_cache_text_intermediate = previous_cache_text
+                     _log_inventory_trace("Cache Step 1 SKIPPED.")
+
 
             cache_update_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'cache_update_prompt_template', DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT),}
             final_select_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'final_context_selection_prompt_template', DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT),}
             configs_ok_step1 = all([cache_update_llm_config["url"], cache_update_llm_config["key"], cache_update_llm_config["prompt_template"]])
             configs_ok_step2 = all([final_select_llm_config["url"], final_select_llm_config["key"], final_select_llm_config["prompt_template"]])
 
-            if not (configs_ok_step1 and configs_ok_step2): func_logger.error(f"[{session_id}] Cannot proceed with RAG Cache: Refiner config missing."); await self._emit_status(event_emitter, session_id, "ERROR: RAG Cache Refiner config incomplete.", done=False); updated_cache_text_intermediate = previous_cache_text; run_step1 = False
+            if not (configs_ok_step1 and configs_ok_step2):
+                 _log_inventory_trace("ERROR: RAG Cache Refiner config incomplete. Cannot proceed.")
+                 # func_logger.error(f"[{session_id}] Cannot proceed with RAG Cache: Refiner config missing.");
+                 await self._emit_status(event_emitter, session_id, "ERROR: RAG Cache Refiner config incomplete.", done=False);
+                 updated_cache_text_intermediate = previous_cache_text; run_step1 = False
             else:
                  # --- Execute Step 1 (Cache Update) if needed ---
                  if run_step1:
-                      await self._emit_status(event_emitter, session_id, "Status: Updating background cache..."); func_logger.info(f"[{session_id}] Executing RAG Cache Step 1 (Update)...")
+                      await self._emit_status(event_emitter, session_id, "Status: Updating background cache...");
+                      # func_logger.info(f"[{session_id}] Executing RAG Cache Step 1 (Update)...")
+                      _log_inventory_trace("Executing RAG Cache Step 1 (Update)...")
                       try:
                           updated_cache_text_intermediate = await self._cache_update_func( session_id=session_id, current_owi_context=extracted_owi_context, history_messages=current_active_history, latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper, sqlite_cursor=self.sqlite_cursor, cache_update_llm_config=cache_update_llm_config, history_count=getattr(self.config, 'refiner_history_count', 6), dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CacheUpdate_{session_id}",)
-                          cache_update_performed = True; func_logger.info(f"[{session_id}] RAG Cache Step 1 (Update) completed.")
-                      except Exception as e_cache_update: func_logger.error(f"[{session_id}] EXCEPTION during RAG Cache Step 1 (Update): {e_cache_update}", exc_info=True); updated_cache_text_intermediate = previous_cache_text
+                          cache_update_performed = True;
+                          _log_inventory_trace(f"RAG Cache Step 1 (Update) completed. Updated cache length: {len(updated_cache_text_intermediate)}")
+                          # func_logger.info(f"[{session_id}] RAG Cache Step 1 (Update) completed.")
+                      except Exception as e_cache_update:
+                           func_logger.error(f"[{session_id}] EXCEPTION during RAG Cache Step 1 (Update): {e_cache_update}", exc_info=True);
+                           updated_cache_text_intermediate = previous_cache_text
+                           _log_inventory_trace(f"EXCEPTION during RAG Cache Step 1: {e_cache_update}")
+
 
                  # --- Prepare Input for Step 2 (Selection), Injecting Inventory ---
                  await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context...")
 
-                 # <<< MODIFICATION START: Use "" instead of placeholder >>>
-                 # Start with the actual OWI context or an empty string if none exists
                  base_owi_context_for_selection = extracted_owi_context or ""
-                 # <<< MODIFICATION END >>>
-
                  temp_owi_and_inventory_context = base_owi_context_for_selection # Initialize with base
 
                  # Check if inventory is valid and should be injected
@@ -602,17 +684,21 @@ class SessionPipeOrchestrator:
                      "[Inventory Init/Config Error]" not in formatted_inventory_string
                  )
                  if is_valid_inventory:
-                     # Append the valid inventory string with separators
-                     # Add a newline before the separator if the base context wasn't empty
                      separator = "\n\n" if base_owi_context_for_selection else ""
                      inventory_injection = f"{separator}--- Current Inventory ---\n{formatted_inventory_string.strip()}"
                      temp_owi_and_inventory_context += inventory_injection
-                     func_logger.info(f"[{session_id}] Injected formatted inventory into secondary source for selection step (Inv len: {len(inventory_injection)}).")
+                     _log_inventory_trace(f"Injected formatted inventory into secondary source for selection step. Combined input length: {len(temp_owi_and_inventory_context)}.\n------\n{temp_owi_and_inventory_context}\n------")
+                     # func_logger.info(f"[{session_id}] Injected formatted inventory into secondary source for selection step (Inv len: {len(inventory_injection)}).")
                  else:
-                     func_logger.debug(f"[{session_id}] Skipping inventory injection for selection step (Inventory disabled, unavailable, empty, or error).")
+                     _log_inventory_trace("Skipping inventory injection for selection step (Inventory disabled, unavailable, empty, or error).")
+                     # func_logger.debug(f"[{session_id}] Skipping inventory injection for selection step (Inventory disabled, unavailable, empty, or error).")
 
                  # --- Execute Step 2 (Context Selection) ---
-                 func_logger.info(f"[{session_id}] Executing RAG Cache Step 2 (Select) with combined OWI/Inventory...")
+                 # func_logger.info(f"[{session_id}] Executing RAG Cache Step 2 (Select) with combined OWI/Inventory...")
+                 _log_inventory_trace("Executing RAG Cache Step 2 (Select)...")
+                 _log_inventory_trace(f"Step 2 Input Cache Length: {len(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else '')}")
+                 _log_inventory_trace(f"Step 2 Input OWI+Inv Length: {len(temp_owi_and_inventory_context)}")
+
                  final_selected_context = await self._cache_select_func(
                      updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""),
                      current_owi_context=temp_owi_and_inventory_context, # Pass combined string here
@@ -625,50 +711,65 @@ class SessionPipeOrchestrator:
                      caller_info=f"Orch_CtxSelect_{session_id}",
                  )
                  final_context_selection_performed = True
-                 # The result of selection is now our main context
                  context_for_prompt = final_selected_context
                  log_step1_status = "Performed" if cache_update_performed else ("Skipped" if cache_update_skipped else "Not Run")
-                 func_logger.info(f"[{session_id}] RAG Cache Step 2 complete. Selected context len: {len(context_for_prompt)}. Step 1: {log_step1_status}")
+                 _log_inventory_trace(f"RAG Cache Step 2 complete. Selected context length: {len(context_for_prompt)}. Step 1: {log_step1_status}\n------\n{context_for_prompt}\n------")
+                 # func_logger.info(f"[{session_id}] RAG Cache Step 2 complete. Selected context len: {len(context_for_prompt)}. Step 1: {log_step1_status}")
                  await self._emit_status(event_emitter, session_id, "Status: Context selection complete.", done=False)
 
         elif enable_stateless_refin_global and self._stateless_refine_func:
             # --- Stateless Refinement Path ---
-            func_logger.info(f"[{session_id}] Stateless Refinement ENABLED.")
+            _log_inventory_trace("Stateless Refinement Path Selected.")
+            # func_logger.info(f"[{session_id}] Stateless Refinement ENABLED.")
             await self._emit_status(event_emitter, session_id, "Status: Refining OWI context (stateless)...")
-            if not extracted_owi_context: func_logger.debug(f"[{session_id}] Skipping stateless refinement: No OWI context.")
-            elif not latest_user_query_str: func_logger.warning(f"[{session_id}] Skipping stateless refinement: Query empty.")
+            if not extracted_owi_context:
+                _log_inventory_trace("Skipping stateless refinement: No OWI context.")
+                # func_logger.debug(f"[{session_id}] Skipping stateless refinement: No OWI context.")
+            elif not latest_user_query_str:
+                _log_inventory_trace("Skipping stateless refinement: Query empty.")
+                # func_logger.warning(f"[{session_id}] Skipping stateless refinement: Query empty.")
             else:
                  stateless_refiner_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'stateless_refiner_prompt_template', None),}
-                 if not stateless_refiner_config["url"] or not stateless_refiner_config["key"]: func_logger.error(f"[{session_id}] Skipping stateless refinement: Refiner URL/Key missing."); await self._emit_status(event_emitter, session_id, "ERROR: Stateless Refiner config incomplete.", done=False)
+                 if not stateless_refiner_config["url"] or not stateless_refiner_config["key"]:
+                     _log_inventory_trace("Skipping stateless refinement: Refiner URL/Key missing.")
+                     # func_logger.error(f"[{session_id}] Skipping stateless refinement: Refiner URL/Key missing.");
+                     await self._emit_status(event_emitter, session_id, "ERROR: Stateless Refiner config incomplete.", done=False)
                  else:
                       try:
                           refined_stateless_context = await self._stateless_refine_func( external_context=extracted_owi_context, history_messages=current_active_history, latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper, refiner_llm_config=stateless_refiner_config, skip_threshold=getattr(self.config, 'stateless_refiner_skip_threshold', 500), history_count=getattr(self.config, 'refiner_history_count', 6), dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_StatelessRef_{session_id}",)
                           if refined_stateless_context != extracted_owi_context:
-                              # Result of stateless refinement becomes the context
                               context_for_prompt = refined_stateless_context;
                               stateless_refinement_performed = True;
-                              func_logger.info(f"[{session_id}] Stateless refinement successful (Length: {len(context_for_prompt)}).");
+                              _log_inventory_trace(f"Stateless refinement successful. Refined length: {len(context_for_prompt)}.")
+                              # func_logger.info(f"[{session_id}] Stateless refinement successful (Length: {len(context_for_prompt)}).");
                               await self._emit_status(event_emitter, session_id, "Status: OWI context refined (stateless).", done=False)
-                          else: func_logger.info(f"[{session_id}] Stateless refinement resulted in no change or was skipped by length.")
-                      except Exception as e_refine_stateless: func_logger.error(f"[{session_id}] EXCEPTION during stateless refinement: {e_refine_stateless}", exc_info=True)
+                          else:
+                              _log_inventory_trace("Stateless refinement resulted in no change or was skipped by length.")
+                              # func_logger.info(f"[{session_id}] Stateless refinement resulted in no change or was skipped by length.")
+                      except Exception as e_refine_stateless:
+                           func_logger.error(f"[{session_id}] EXCEPTION during stateless refinement: {e_refine_stateless}", exc_info=True)
+                           _log_inventory_trace(f"EXCEPTION during stateless refinement: {e_refine_stateless}")
+
         else:
             # --- No Refinement Path ---
-             func_logger.debug(f"[{session_id}] No context refinement feature (RAG Cache or Stateless) is enabled.")
-             # context_for_prompt remains the initially extracted_owi_context
+            _log_inventory_trace("No context refinement feature (RAG Cache or Stateless) is enabled.")
+            # func_logger.debug(f"[{session_id}] No context refinement feature (RAG Cache or Stateless) is enabled.")
+            # context_for_prompt remains the initially extracted_owi_context
 
         # --- 4. Calculate Refined Context Tokens ---
+        _log_inventory_trace("Step 4: Calculating refined context tokens...")
         if self._count_tokens_func and self._tokenizer:
             try: token_source = context_for_prompt; refined_context_tokens = self._count_tokens_func(token_source, self._tokenizer) if token_source and isinstance(token_source, str) else 0
             except Exception as e_tok_ref: refined_context_tokens = -1; func_logger.error(f"[{session_id}] Error calculating refined tokens: {e_tok_ref}")
         else: refined_context_tokens = -1
-        func_logger.debug(f"[{session_id}] Final selected context tokens ('context_for_prompt' source): {refined_context_tokens}")
+        _log_inventory_trace(f"Final context_for_prompt tokens: {refined_context_tokens}")
+        # func_logger.debug(f"[{session_id}] Final selected context tokens ('context_for_prompt' source): {refined_context_tokens}")
 
         # --- 5. Combine Final Background Context ---
+        _log_inventory_trace("Step 5: Combining final background context...")
         combined_context_string = "[No background context generated]"
         if self._combine_context_func:
             try:
-                # MODIFICATION: Inventory is now expected to be *inside* context_for_prompt if RAG Cache was used.
-                # If RAG Cache was NOT used, we pass the formatted inventory string here.
                 inventory_to_pass_to_combiner = None
                 if not enable_rag_cache_global: # Only add inventory here if Cache Select didn't handle it
                     is_valid_inventory_for_combine = (
@@ -683,12 +784,17 @@ class SessionPipeOrchestrator:
                     )
                     if is_valid_inventory_for_combine:
                         inventory_to_pass_to_combiner = formatted_inventory_string
-                        func_logger.debug(f"[{session_id}] Passing formatted inventory to combine_background_context (RAG Cache disabled).")
+                        _log_inventory_trace("Passing formatted inventory to combiner (RAG Cache disabled).")
+                        # func_logger.debug(f"[{session_id}] Passing formatted inventory to combine_background_context (RAG Cache disabled).")
                     else:
-                         func_logger.debug(f"[{session_id}] Not passing inventory to combine_background_context (RAG Cache disabled, inventory invalid/empty).")
+                         _log_inventory_trace("Not passing inventory to combiner (RAG Cache disabled, inventory invalid/empty).")
+                         # func_logger.debug(f"[{session_id}] Not passing inventory to combine_background_context (RAG Cache disabled, inventory invalid/empty).")
                 else:
-                    func_logger.debug(f"[{session_id}] Not passing inventory to combine_background_context (RAG Cache enabled, handled by selection step).")
+                    _log_inventory_trace("Not passing inventory to combiner (RAG Cache enabled, handled by selection step).")
+                    # func_logger.debug(f"[{session_id}] Not passing inventory to combine_background_context (RAG Cache enabled, handled by selection step).")
 
+                _log_inventory_trace(f"Combiner Input - final_selected_context Length: {len(context_for_prompt if isinstance(context_for_prompt, str) else '')}")
+                _log_inventory_trace(f"Combiner Input - inventory_context Length: {len(inventory_to_pass_to_combiner if inventory_to_pass_to_combiner else '')}")
 
                 combined_context_string = self._combine_context_func(
                     final_selected_context=(context_for_prompt if isinstance(context_for_prompt, str) else None),
@@ -696,9 +802,17 @@ class SessionPipeOrchestrator:
                     t2_rag_results=retrieved_rag_summaries,
                     inventory_context=inventory_to_pass_to_combiner # Pass None if RAG Cache handled it
                 )
-            except Exception as e_combine: func_logger.error(f"[{session_id}] Error combining context: {e_combine}", exc_info=True); combined_context_string = "[Error combining context]"
-        else: func_logger.error(f"[{session_id}] Cannot combine context: Function unavailable.")
-        func_logger.debug(f"[{session_id}] Final combined background context length: {len(combined_context_string)}.")
+                _log_inventory_trace(f"Combiner Output Length: {len(combined_context_string)}\n------\n{combined_context_string}\n------")
+            except Exception as e_combine:
+                func_logger.error(f"[{session_id}] Error combining context: {e_combine}", exc_info=True);
+                combined_context_string = "[Error combining context]"
+                _log_inventory_trace(f"ERROR combining context: {e_combine}")
+        else:
+            func_logger.error(f"[{session_id}] Cannot combine context: Function unavailable.")
+            _log_inventory_trace("ERROR: combine_context function unavailable.")
+        # func_logger.debug(f"[{session_id}] Final combined background context length: {len(combined_context_string)}.")
+        _log_inventory_trace("--- END _prepare_and_refine_background ---")
+
 
         # Return the formatted inventory string separately for status logging purposes
         return (
@@ -712,6 +826,10 @@ class SessionPipeOrchestrator:
             stateless_refinement_performed,
             formatted_inventory_string # Still return the raw formatted string for status logging
         )
+
+    # --- The rest of the orchestrator methods remain unchanged ---
+    # ... (e.g., _determine_effective_query, _handle_tier1_summarization, etc.) ...
+    # ... process_turn method ...
 
 
     async def _select_t0_history_slice(self, session_id: str, history_for_processing: List[Dict]) -> Tuple[List[Dict], int]:
