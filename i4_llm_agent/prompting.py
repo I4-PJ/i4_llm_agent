@@ -148,20 +148,29 @@ FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 2 (Final Context Selection) - MODIFIED to handle inventory
+# Default Template Text for Step 2 (Final Context Selection) - MODIFIED v3 (Mandatory Full Inventory Inclusion)
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Query-Focused Context Selector
-**Task:** Analyze the available background information sources (UPDATED SESSION CACHE, CURRENT OWI RETRIEVAL which *now includes current inventory data*, and RECENT CHAT HISTORY). Based on the LATEST USER QUERY and RECENT CHAT HISTORY, extract **only the specific background details** (from *any* source) most relevant for understanding and answering the current query accurately.
-**Objective:** Provide a concise block of immediately relevant background information (including potentially relevant inventory items/details) for the final response generation, filtering out anything not directly pertinent to the current conversational turn.
+**Task:** Analyze available background sources (CACHE, OWI+Inventory, HISTORY) and extract details relevant to the LATEST USER QUERY and RECENT HISTORY. **Mandatory Requirement:** Include the full inventory for characters directly involved in the turn.
+**Objective:** Provide relevant background context from Cache/OWI AND the complete inventory for key characters, ensuring the final response generator has access to necessary item details.
+
+**Sources:**
+1.  **UPDATED SESSION CACHE:** Long-term facts, character profiles, established lore.
+2.  **CURRENT OWI RETRIEVAL:** General context for the turn AND includes a section listing `--- Current Inventory ---` for characters.
+3.  **RECENT CHAT HISTORY:** Immediate conversational context (dialogue, actions).
+4.  **LATEST USER QUERY:** The user's specific input for this turn.
+
 **Instructions:**
-1.  **Analyze Query & History:** Understand the core subject and context of the LATEST USER QUERY and RECENT CHAT HISTORY. What information is needed *right now*?
-2.  **Scan ALL Sources:** Examine the UPDATED SESSION CACHE (long-term facts/profiles), the CURRENT OWI RETRIEVAL (which contains general OWI context *and* potentially a section detailing Current Inventories), and the RECENT CHAT HISTORY (for immediate conversational context).
-3.  **Select Aggressively:** Extract **only** the information snippets (sentences, short passages, specific inventory item lines) deemed highly relevant to the immediate task. Prioritize information that explains relationships, motivations, past events, relevant character traits, or inventory items directly needed to answer the query or understand the current situation described in the history.
-4.  **Focus on Relevance:** If the query is about relationships, select relationship context. If the query is about an item mentioned, select details about that item from the inventory or lore. If the query is general, select broader relevant context.
-5.  **Exclude Irrelevant Info:** Discard any background details from any source that are not needed for *this specific turn*, even if factually correct. Avoid pulling in the entire inventory if only one item is relevant.
-6.  **Combine Snippets:** Present the extracted relevant snippets as a single, coherent text block. Use newlines to separate distinct pieces of information if helpful.
-7.  **Output Content:** The output must contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant background snippets are found in *any* source, state clearly: "[No relevant background context found for the current query]".
+
+1.  **Analyze Query & History:** Determine the core subject, actions, and **characters directly involved** in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY.
+2.  **Select Relevant Cache/OWI Context:** Examine the CACHE and the general OWI part of the OWI RETRIEVAL (excluding the `--- Current Inventory ---` section for this step). Extract sentences/passages that **directly explain or provide essential context** for the query, situation, or involved characters' motivations/relationships relevant *now*. **Be aggressive in excluding non-essential Cache/OWI information.**
+3.  **Mandatory Inventory Inclusion:**
+    *   Identify the inventory listings within the OWI RETRIEVAL's `--- Current Inventory ---` section for the **directly involved characters** identified in Step 1.
+    *   You **MUST** include the **complete, unmodified inventory list** as found in the input for **each** involved character. Do not summarize or filter these specific inventory lists.
+    *   Generally **exclude** inventories of characters not directly involved in the current turn, unless an item they possess is specifically mentioned or critically relevant to the query.
+4.  **Combine Snippets:** Assemble the selected Cache/OWI context snippets (from Step 2) AND the **mandatory full inventories** for involved characters (from Step 3) into a single, coherent text block. Use headings or clear separation (e.g., `=== Relevant Context ===`, `=== Involved Inventories ===`).
+5.  **Output Content:** The output **must** contain ONLY the selected relevant background snippets (Cache/OWI) and the **required full inventories**. DO NOT add commentary or summaries of the history. If no relevant Cache/OWI context is found AND no characters are identified as involved (or they have no inventory listed), state clearly: "[No relevant background context found for the current query]".
 
 **INPUTS:**
 
@@ -178,12 +187,12 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 {FINAL_SELECT_CURRENT_OWI_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY (for relevance check):**
+**RECENT CHAT HISTORY (for relevance & involved characters):**
 ---
 {FINAL_SELECT_HISTORY_PLACEHOLDER}
 ---
 
-**OUTPUT (Selected Relevant Background Snippets for This Turn - May include Cache, OWI, and/or Inventory details):**
+**OUTPUT (Selected Relevant Cache/OWI Snippets & MANDATORY Full Inventories for Involved Characters):**
 """
 
 # --- Function: Clean Context Tags (Existing - Unchanged) ---
