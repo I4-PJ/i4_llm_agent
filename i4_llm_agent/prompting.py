@@ -148,31 +148,32 @@ FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 2 (Final Context Selection) - Reverted
+# Default Template Text for Step 2 (Final Context Selection) - MODIFIED to handle inventory
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Query-Focused Context Selector
-**Task:** Analyze the UPDATED SESSION CACHE and the CURRENT OWI RETRIEVAL. Based on the LATEST USER QUERY and RECENT CHAT HISTORY, extract **only the specific background details** most relevant for understanding and answering the current query accurately.
-**Objective:** Provide a concise block of immediately relevant background information for the final response generation, filtering out anything not directly pertinent to the current conversational turn.
+**Task:** Analyze the available background information sources (UPDATED SESSION CACHE, CURRENT OWI RETRIEVAL which *now includes current inventory data*, and RECENT CHAT HISTORY). Based on the LATEST USER QUERY and RECENT CHAT HISTORY, extract **only the specific background details** (from *any* source) most relevant for understanding and answering the current query accurately.
+**Objective:** Provide a concise block of immediately relevant background information (including potentially relevant inventory items/details) for the final response generation, filtering out anything not directly pertinent to the current conversational turn.
 **Instructions:**
-1.  **Analyze Query & History:** Understand the core subject and context of the LATEST USER QUERY and RECENT CHAT HISTORY.
-2.  **Scan Sources:** Examine *both* the UPDATED SESSION CACHE and the CURRENT OWI RETRIEVAL for sentences or short passages that directly address or provide essential context for the query.
-3.  **Select Aggressively:** Extract **only** the information snippets deemed highly relevant to the immediate task. Prioritize information that explains relationships, motivations, past events, or lore directly needed to answer the query or understand the current situation described in the history.
-4.  **Exclude Irrelevant Info:** Discard any background details from the sources that are not needed for the current turn, even if factually correct.
-5.  **Combine Snippets:** Present the extracted relevant snippets as a single, coherent text block.
-6.  **Output Content:** The output must contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant background snippets are found in either source, state clearly: "[No relevant background context found for the current query]".
+1.  **Analyze Query & History:** Understand the core subject and context of the LATEST USER QUERY and RECENT CHAT HISTORY. What information is needed *right now*?
+2.  **Scan ALL Sources:** Examine the UPDATED SESSION CACHE (long-term facts/profiles), the CURRENT OWI RETRIEVAL (which contains general OWI context *and* potentially a section detailing Current Inventories), and the RECENT CHAT HISTORY (for immediate conversational context).
+3.  **Select Aggressively:** Extract **only** the information snippets (sentences, short passages, specific inventory item lines) deemed highly relevant to the immediate task. Prioritize information that explains relationships, motivations, past events, relevant character traits, or inventory items directly needed to answer the query or understand the current situation described in the history.
+4.  **Focus on Relevance:** If the query is about relationships, select relationship context. If the query is about an item mentioned, select details about that item from the inventory or lore. If the query is general, select broader relevant context.
+5.  **Exclude Irrelevant Info:** Discard any background details from any source that are not needed for *this specific turn*, even if factually correct. Avoid pulling in the entire inventory if only one item is relevant.
+6.  **Combine Snippets:** Present the extracted relevant snippets as a single, coherent text block. Use newlines to separate distinct pieces of information if helpful.
+7.  **Output Content:** The output must contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant background snippets are found in *any* source, state clearly: "[No relevant background context found for the current query]".
 
 **INPUTS:**
 
 **LATEST USER QUERY:**
 {FINAL_SELECT_QUERY_PLACEHOLDER}
 
-**UPDATED SESSION CACHE (Primary Source):**
+**UPDATED SESSION CACHE (Primary Source - Long-Term Facts/Profiles):**
 ---
 {FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER}
 ---
 
-**CURRENT OWI RETRIEVAL (Secondary Source, may include injected inventory):**
+**CURRENT OWI RETRIEVAL (Secondary Source - General Context & *Current Inventories*):**
 ---
 {FINAL_SELECT_CURRENT_OWI_PLACEHOLDER}
 ---
@@ -182,9 +183,8 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 {FINAL_SELECT_HISTORY_PLACEHOLDER}
 ---
 
-**OUTPUT (Selected Relevant Background Snippets for This Turn):**
+**OUTPUT (Selected Relevant Background Snippets for This Turn - May include Cache, OWI, and/or Inventory details):**
 """
-
 
 # --- Function: Clean Context Tags (Existing - Unchanged) ---
 def clean_context_tags(system_content: str) -> str:
