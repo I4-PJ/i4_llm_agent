@@ -7,12 +7,12 @@ import re
 import sqlite3
 import json
 import uuid
-import os # <<< Added for path manipulation in helpers
+import os # Added for path manipulation in helpers
 from datetime import datetime, timezone
 from typing import ( # Ensure Coroutine is imported
     Tuple, Union, List, Dict, Optional, Any, Callable, Coroutine, AsyncGenerator
 )
-import importlib.util # <<< ADDED FOR IMPORT DEBUGGING
+import importlib.util # Added for import debugging
 
 # --- Standard Library Imports ---
 import urllib.parse
@@ -29,8 +29,8 @@ from .database import (
     InvalidDimensionException,
     get_all_inventories_for_session, get_character_inventory_data,
     add_or_update_character_inventory,
-    get_world_state, # <<< ADDED
-    set_world_state, # <<< ADDED (for initialization)
+    get_world_state, # Added
+    set_world_state, # Added (for initialization)
 )
 from .history import (
     format_history_for_llm, get_recent_turns, DIALOGUE_ROLES, select_turns_for_t0
@@ -58,16 +58,23 @@ from .api_client import call_google_llm_api
 # from .api_client import _convert_google_to_openai_payload
 from .utils import count_tokens, calculate_string_similarity, TIKTOKEN_AVAILABLE
 
+# --- MODIFIED IMPORT: Import the new LLM-based parser ---
 try:
-    from .world_state_parser import parse_llm_response_for_state_changes
-    _WORLD_STATE_PARSER_AVAILABLE = True
-except ImportError:
-    # Define a dummy function if the parser module is not found
-    def parse_llm_response_for_state_changes(*args, **kwargs) -> Dict: return {}
-    _WORLD_STATE_PARSER_AVAILABLE = False
+    from .world_state_parser import parse_world_state_with_llm, DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
+    _WORLD_STATE_PARSER_LLM_AVAILABLE = True
+except ImportError as e_world_parser:
+    # Define a dummy async function if the parser module is not found
+    async def parse_world_state_with_llm(*args, **kwargs) -> Dict:
+        logging.getLogger(__name__).error("Executing FALLBACK parse_world_state_with_llm due to import error.")
+        await asyncio.sleep(0) # Need await for async definition
+        return {}
+    DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = "[Default World State Parse Template Load Failed]"
+    _WORLD_STATE_PARSER_LLM_AVAILABLE = False
     logging.getLogger(__name__).error(
-        "Failed to import world_state_parser in orchestration.py. State change detection disabled."
+        f"Failed to import world_state_parser (LLM version) in orchestration.py: {e_world_parser}. State change detection disabled.", exc_info=True
     )
+# --- END MODIFIED WORLD STATE IMPORT ---
+
 
 # --- MODIFIED: Import Event Hint logic with Debugging ---
 _event_hints_import_success = False
@@ -205,11 +212,14 @@ class SessionPipeOrchestrator:
         self._update_char_inventory_db_func = add_or_update_character_inventory
         self._get_world_state_db_func = get_world_state  # Already added
         self._set_world_state_db_func = set_world_state  # Already added
-        # Parsing
-        if _WORLD_STATE_PARSER_AVAILABLE: # <<< NEW PARSER ALIAS
-            self._parse_world_state_func = parse_llm_response_for_state_changes
+
+        # --- MODIFIED: Alias the new LLM-based parser ---
+        if _WORLD_STATE_PARSER_LLM_AVAILABLE:
+            self._parse_world_state_func = parse_world_state_with_llm
         else:
-            self._parse_world_state_func = lambda text: {} # Fallback empty parser
+            # Assign the async fallback if import failed
+            self._parse_world_state_func = parse_world_state_with_llm # Which is the dummy async func
+        # --- END MODIFICATION ---
 
         # Inventory Module Functions
         if _ORCH_INVENTORY_MODULE_AVAILABLE:
@@ -352,17 +362,21 @@ class SessionPipeOrchestrator:
     # --- NEW: Debug Logger for Inventory LLM ---
     def _orchestrator_log_debug_inventory_llm(self, session_id: str, text: str, is_prompt: bool):
         """Logs the Inventory LLM prompt or response text to a debug file."""
-        debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_INVENTORY_LLM")
+        # Log to the main payload file if enabled
+        debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_PAYLOAD")
         if not debug_log_path:
             self.logger.error(f"[{session_id}] Orch: Cannot log inventory LLM text: No path determined.")
             return
+        if not getattr(self.config, 'debug_log_final_payload', False):
+            return # Only log if main debug payload is enabled
+
         try:
             ts = datetime.now(timezone.utc).isoformat()
             log_type = "PROMPT" if is_prompt else "RESPONSE"
             self.logger.info(f"[{session_id}] Orch: Attempting write INVENTORY LLM {log_type} debug log to: {debug_log_path}")
             with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(f"--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- START ---\n")
-                f.write(text)
+                f.write(f"\n--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- START ---\n")
+                f.write(str(text)) # Ensure text is string
                 f.write(f"\n--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- END ---\n\n")
             self.logger.info(f"[{session_id}] Orch: Successfully wrote INVENTORY LLM {log_type} debug log.")
         except Exception as e:
@@ -567,15 +581,16 @@ class SessionPipeOrchestrator:
             if not debug_inventory_trace_enabled: return
             try:
                 if inventory_trace_log_path is None:
-                    inventory_trace_log_path = self._orchestrator_get_debug_log_path(".DEBUG_INVENTORY_TRACE")
+                    # Log inventory trace to the payload file for consolidation
+                    inventory_trace_log_path = self._orchestrator_get_debug_log_path(".DEBUG_PAYLOAD")
                 if inventory_trace_log_path:
                     ts = datetime.now(timezone.utc).isoformat()
-                    log_line = f"[{ts}] [{session_id}] {message}\n"
+                    log_line = f"\n--- [{ts}] SESSION: {session_id} - INV_TRACE --- {message} ---\n"
                     with open(inventory_trace_log_path, "a", encoding="utf-8") as f: f.write(log_line)
                 else:
-                    if inventory_trace_log_path is not False:
+                    if inventory_trace_log_path is not False: # Only log error once
                         func_logger.error(f"[{session_id}] Inventory Trace: Cannot log, failed to determine debug path.")
-                        inventory_trace_log_path = False
+                        inventory_trace_log_path = False # Prevent further attempts
             except Exception as e_log:
                  if inventory_trace_log_path is not False:
                     func_logger.error(f"[{session_id}] Inventory Trace: Error writing to log file '{inventory_trace_log_path}': {e_log}", exc_info=False)
@@ -922,7 +937,7 @@ class SessionPipeOrchestrator:
         self.logger.info(f"[{session_id}] Inventory Management Enabled (Global Valve): {inventory_enabled}")
         self.logger.info(f"[{session_id}] Event Hints Enabled (Global Valve): {event_hints_enabled}")
         self.logger.info(f"[{session_id}] Inventory Module Available (Local Import Check): {_ORCH_INVENTORY_MODULE_AVAILABLE}")
-        self.logger.info(f"[{session_id}] World State Parser Available (Local Import Check): {_WORLD_STATE_PARSER_AVAILABLE}")
+        self.logger.info(f"[{session_id}] World State Parser Available (Local Import Check): {_WORLD_STATE_PARSER_LLM_AVAILABLE}") # Check LLM parser flag
 
         summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False
         generated_event_hint: Optional[str] = None
@@ -1021,31 +1036,90 @@ class SessionPipeOrchestrator:
                  event_emitter=event_emitter, status_message="Status: Core processing complete.", final_payload_tokens=-1
             )
 
-            if isinstance(final_result, str) and self._parse_world_state_func and self.sqlite_cursor and self._set_world_state_db_func:
-                 self.logger.info(f"[{session_id}] Analyzing final response for world state changes...")
+            # --- MODIFIED WORLD STATE PARSING & UPDATE BLOCK ---
+            if isinstance(final_result, str) and self._parse_world_state_func and self.sqlite_cursor and self._set_world_state_db_func and _WORLD_STATE_PARSER_LLM_AVAILABLE:
+                 self.logger.info(f"[{session_id}] Analyzing final response for world state changes (using LLM)...")
                  detected_changes = {}
-                 try: detected_changes = self._parse_world_state_func(final_result)
-                 except Exception as e_parse: self.logger.error(f"[{session_id}] Error calling world state parser: {e_parse}", exc_info=True)
+                 try:
+                     # --- Prepare Config for World State Parse LLM ---
+                     ws_parse_llm_config = {
+                         "url": getattr(self.config, 'event_hint_llm_api_url', None), # Use Event Hint URL
+                         "key": getattr(self.config, 'event_hint_llm_api_key', None), # Use Event Hint Key
+                         "temp": getattr(self.config, 'event_hint_llm_temperature', 0.3), # Use Event Hint Temp (or default 0.3)
+                         "prompt_template": getattr(self.config, 'world_state_parse_prompt_template', DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT) # NEW Valve
+                     }
+                     # --- Prepare Current State Dict ---
+                     current_state_dict = {
+                         "day": self.current_day,
+                         "time_of_day": self.current_time_of_day,
+                         "weather": self.current_weather,
+                         "season": self.current_season
+                     }
+                     # --- Call the new async parser function ---
+                     detected_changes = await self._parse_world_state_func(
+                         llm_response_text=final_result,
+                         history_messages=current_active_history,
+                         current_state=current_state_dict,
+                         llm_call_func=self._async_llm_call_wrapper,
+                         ws_parse_llm_config=ws_parse_llm_config,
+                         logger_instance=self.logger,
+                         session_id=session_id
+                     )
+                     # --- END MODIFIED CALL ---
+                 except Exception as e_parse:
+                     self.logger.error(f"[{session_id}] Error calling world state parser LLM function: {e_parse}", exc_info=True)
+
                  if detected_changes:
+                     self.logger.debug(f"[{session_id}] LLM Parser detected changes: {detected_changes}")
+                     # Apply changes to current state for comparison and potential update
                      new_day = self.current_day + detected_changes.get('day_increment', 0)
                      new_time = detected_changes.get('time_of_day', self.current_time_of_day)
                      new_weather = detected_changes.get('weather', self.current_weather)
                      new_season = detected_changes.get('season', self.current_season)
-                     state_changed = not ( new_day == self.current_day and new_time == self.current_time_of_day and new_weather == self.current_weather and new_season == self.current_season )
+
+                     # Check if any state actually changed compared to current state
+                     state_changed = not (
+                         new_day == self.current_day and
+                         new_time == self.current_time_of_day and
+                         new_weather == self.current_weather and
+                         new_season == self.current_season
+                     )
+
                      if state_changed:
-                         self.logger.info(f"[{session_id}] Attempting to save updated world state to DB: Day={new_day}, Time='{new_time}', Weather='{new_weather}', Season='{new_season}'")
+                         self.logger.info(f"[{session_id}] World state change detected by LLM Parser. Attempting DB update.")
                          await self._emit_status(event_emitter, session_id, "Status: Updating world state...", done=False)
                          try:
-                             update_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, new_season, new_weather, new_day, new_time )
+                             self.logger.debug(f"[{session_id}] Attempting DB update with: Day={new_day}, Time='{new_time}', Weather='{new_weather}', Season='{new_season}'")
+                             update_success = await self._set_world_state_db_func(
+                                 self.sqlite_cursor, session_id, new_season, new_weather, new_day, new_time
+                             )
+                             self.logger.debug(f"[{session_id}] DB update success status: {update_success}")
+
                              if update_success:
                                  self.logger.info(f"[{session_id}] World state successfully updated in DB.")
-                                 self.current_day = new_day; self.current_time_of_day = new_time; self.current_weather = new_weather; self.current_season = new_season
-                             else: self.logger.error(f"[{session_id}] Failed to save updated world state to DB.")
-                         except Exception as e_set_world: self.logger.error(f"[{session_id}] Error saving updated world state: {e_set_world}", exc_info=True)
-                     else: self.logger.info(f"[{session_id}] Parser ran, but no net change detected in world state.")
-                 else: self.logger.info(f"[{session_id}] No world state changes detected by parser.")
-            elif not isinstance(final_result, str): self.logger.debug(f"[{session_id}] Skipping world state analysis: Final result was not a string (Error or Payload).")
-            elif not self._parse_world_state_func: self.logger.warning(f"[{session_id}] Skipping world state analysis: Parser function unavailable.")
+                                 # Update the orchestrator's internal state to match DB
+                                 self.current_day = new_day
+                                 self.current_time_of_day = new_time
+                                 self.current_weather = new_weather
+                                 self.current_season = new_season
+                             else:
+                                 self.logger.error(f"[{session_id}] Failed to save updated world state to DB (set function returned False).")
+                         except Exception as e_set_world:
+                             self.logger.error(f"[{session_id}] Error saving updated world state: {e_set_world}", exc_info=True)
+                     else:
+                         self.logger.info(f"[{session_id}] LLM Parser ran, but no net change detected compared to current world state.")
+                 else:
+                     self.logger.info(f"[{session_id}] No world state changes detected by LLM parser (empty dict returned).")
+
+            elif not isinstance(final_result, str):
+                self.logger.debug(f"[{session_id}] Skipping world state analysis: Final result was not a string (Type: {type(final_result).__name__}).")
+            elif not _WORLD_STATE_PARSER_LLM_AVAILABLE:
+                self.logger.warning(f"[{session_id}] Skipping world state analysis: LLM Parser function unavailable (import failed).")
+            elif not self.sqlite_cursor or not self._set_world_state_db_func:
+                 missing_ws_update = [f for f, fn in {"cursor": self.sqlite_cursor, "setter": self._set_world_state_db_func}.items() if not fn]
+                 self.logger.warning(f"[{session_id}] Skipping world state update: Missing prerequisites: {missing_ws_update}")
+            # <<< --- END WORLD STATE PARSING & UPDATE BLOCK --- >>>
+
 
             if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._update_inventories_func:
                 inventory_update_completed = True

@@ -1,6 +1,6 @@
 # === START OF FILE i4_llm_agent/__init__.py ===
 
-# [[START FINAL __init__.py - Reflects World State DB Exports]]
+# [[START FINAL __init__.py - Reflects World State DB Exports & LLM Parser Constant]]
 # i4_llm_agent/__init__.py
 import logging
 
@@ -59,10 +59,10 @@ from .database import (
     get_character_inventory_data,
     add_or_update_character_inventory,
     get_all_inventories_for_session,
-    # SQLite World State (NEW)
-    initialize_world_state_table, # <<< Added previously
-    get_world_state,              # <<< Added previously
-    set_world_state,              # <<< Added previously
+    # SQLite World State (Added previously)
+    initialize_world_state_table,
+    get_world_state,
+    set_world_state,
     # ChromaDB T2 (Existing)
     get_or_create_chroma_collection, add_to_chroma_collection,
     query_chroma_collection, get_chroma_collection_count,
@@ -97,9 +97,14 @@ except ImportError as e:
     logging.getLogger(__name__).error(f"Failed to import event_hints module: {e}", exc_info=True)
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Template Load Error]"
 
-# --- World State Parser (Internal Use - Not Exported by default) ---
-# The orchestrator imports this directly using `from .world_state_parser import ...`
-# No need to add it to __all__ unless intended for external library users.
+# --- World State Parser (Importing new constant) ---
+# The orchestrator imports the function directly using `from .world_state_parser import ...`
+# But we need to export the default template constant for the pipe script.
+try:
+    from .world_state_parser import DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT # <<< ADDED IMPORT
+except ImportError as e:
+    logging.getLogger(__name__).error(f"Failed to import world_state_parser module: {e}", exc_info=True)
+    DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = "[Default World State Parse Template Load Error]" # <<< ADDED FALLBACK
 
 # --- Configure basic logging for the library ---
 logger = logging.getLogger(__name__)
@@ -149,7 +154,7 @@ __all__ = [
     "get_character_inventory_data",
     "add_or_update_character_inventory",
     "get_all_inventories_for_session",
-    # -- World State (DB) -- # <<< Added previously
+    # -- World State (DB) --
     "initialize_world_state_table",
     "get_world_state",
     "set_world_state",
@@ -168,7 +173,9 @@ __all__ = [
     "INVENTORY_MODULE_AVAILABLE", # Flag
     # event_hints (Constants Only)
     "DEFAULT_EVENT_HINT_TEMPLATE_TEXT",
+    # world_state_parser (Constants Only) # <<< ADDED SECTION
+    "DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT",
 ]
-# [[END FINAL __init__.py - Reflects World State DB Exports]]
+# [[END FINAL __init__.py - Reflects World State DB Exports & LLM Parser Constant]]
 
 # === END OF FILE i4_llm_agent/__init__.py ===
