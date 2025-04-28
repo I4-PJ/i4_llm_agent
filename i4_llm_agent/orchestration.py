@@ -493,7 +493,8 @@ class SessionPipeOrchestrator:
         """
         Processes system prompt, manages context refinement (RAG Cache or Stateless),
         fetches and formats inventory, and combines background information.
-        MODIFIED: Injects formatted inventory into the RAG Cache Step 2 input.
+        MODIFIED: Always passes valid formatted inventory to the context combiner,
+                  bypassing the Step 2 LLM for inventory inclusion guarantee.
                   Logs inventory tracing steps to a dedicated file.
         """
         func_logger = self.logger # Use the logger assigned during Pipe init
@@ -527,7 +528,7 @@ class SessionPipeOrchestrator:
                     func_logger.error(f"[{session_id}] Inventory Trace: Error writing to log file '{inventory_trace_log_path}': {e_log}", exc_info=False)
                     inventory_trace_log_path = False # Mark as failed
 
-        _log_inventory_trace("--- START _prepare_and_refine_background ---")
+        _log_inventory_trace("--- START _prepare_and_refine_background (Bypass Logic Active) ---")
 
         await self._emit_status(event_emitter, session_id, "Status: Preparing context...")
         base_system_prompt_text = "You are helpful."; extracted_owi_context = None; initial_owi_context_tokens = -1; current_output_messages = body.get("messages", [])
@@ -667,41 +668,19 @@ class SessionPipeOrchestrator:
 
 
                  # --- Prepare Input for Step 2 (Selection), Injecting Inventory ---
+                 # Inventory is NO LONGER injected here for Step 2 with the bypass logic
                  await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context...")
 
                  base_owi_context_for_selection = extracted_owi_context or ""
-                 temp_owi_and_inventory_context = base_owi_context_for_selection # Initialize with base
-
-                 # Check if inventory is valid and should be injected
-                 is_valid_inventory = (
-                     inventory_enabled and
-                     _ORCH_INVENTORY_MODULE_AVAILABLE and
-                     formatted_inventory_string and
-                     isinstance(formatted_inventory_string, str) and
-                     "[Error" not in formatted_inventory_string and
-                     "[Disabled]" not in formatted_inventory_string and
-                     "[No Inventory Data Available]" not in formatted_inventory_string and
-                     "[Inventory Init/Config Error]" not in formatted_inventory_string
-                 )
-                 if is_valid_inventory:
-                     separator = "\n\n" if base_owi_context_for_selection else ""
-                     inventory_injection = f"{separator}--- Current Inventory ---\n{formatted_inventory_string.strip()}"
-                     temp_owi_and_inventory_context += inventory_injection
-                     _log_inventory_trace(f"Injected formatted inventory into secondary source for selection step. Combined input length: {len(temp_owi_and_inventory_context)}.\n------\n{temp_owi_and_inventory_context}\n------")
-                     # func_logger.info(f"[{session_id}] Injected formatted inventory into secondary source for selection step (Inv len: {len(inventory_injection)}).")
-                 else:
-                     _log_inventory_trace("Skipping inventory injection for selection step (Inventory disabled, unavailable, empty, or error).")
-                     # func_logger.debug(f"[{session_id}] Skipping inventory injection for selection step (Inventory disabled, unavailable, empty, or error).")
-
                  # --- Execute Step 2 (Context Selection) ---
-                 # func_logger.info(f"[{session_id}] Executing RAG Cache Step 2 (Select) with combined OWI/Inventory...")
-                 _log_inventory_trace("Executing RAG Cache Step 2 (Select)...")
+                 # func_logger.info(f"[{session_id}] Executing RAG Cache Step 2 (Select) with OWI only (Inventory bypassed)...")
+                 _log_inventory_trace("Executing RAG Cache Step 2 (Select) with OWI only (Inventory bypassed)...")
                  _log_inventory_trace(f"Step 2 Input Cache Length: {len(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else '')}")
-                 _log_inventory_trace(f"Step 2 Input OWI+Inv Length: {len(temp_owi_and_inventory_context)}")
+                 _log_inventory_trace(f"Step 2 Input OWI Length: {len(base_owi_context_for_selection)}")
 
                  final_selected_context = await self._cache_select_func(
                      updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""),
-                     current_owi_context=temp_owi_and_inventory_context, # Pass combined string here
+                     current_owi_context=base_owi_context_for_selection, # Pass OWI context only
                      history_messages=current_active_history,
                      latest_user_query=latest_user_query_str,
                      llm_call_func=self._async_llm_call_wrapper,
@@ -770,28 +749,24 @@ class SessionPipeOrchestrator:
         combined_context_string = "[No background context generated]"
         if self._combine_context_func:
             try:
+                # <<< MODIFICATION START: Always determine if inventory is valid and pass it >>>
                 inventory_to_pass_to_combiner = None
-                if not enable_rag_cache_global: # Only add inventory here if Cache Select didn't handle it
-                    is_valid_inventory_for_combine = (
-                        inventory_enabled and
-                        _ORCH_INVENTORY_MODULE_AVAILABLE and
-                        formatted_inventory_string and
-                        isinstance(formatted_inventory_string, str) and
-                        "[Error" not in formatted_inventory_string and
-                        "[Disabled]" not in formatted_inventory_string and
-                        "[No Inventory Data Available]" not in formatted_inventory_string and
-                        "[Inventory Init/Config Error]" not in formatted_inventory_string
-                    )
-                    if is_valid_inventory_for_combine:
-                        inventory_to_pass_to_combiner = formatted_inventory_string
-                        _log_inventory_trace("Passing formatted inventory to combiner (RAG Cache disabled).")
-                        # func_logger.debug(f"[{session_id}] Passing formatted inventory to combine_background_context (RAG Cache disabled).")
-                    else:
-                         _log_inventory_trace("Not passing inventory to combiner (RAG Cache disabled, inventory invalid/empty).")
-                         # func_logger.debug(f"[{session_id}] Not passing inventory to combine_background_context (RAG Cache disabled, inventory invalid/empty).")
+                is_valid_inventory_for_combine = (
+                    inventory_enabled and
+                    _ORCH_INVENTORY_MODULE_AVAILABLE and
+                    formatted_inventory_string and
+                    isinstance(formatted_inventory_string, str) and
+                    "[Error" not in formatted_inventory_string and
+                    "[Disabled]" not in formatted_inventory_string and
+                    "[No Inventory Data Available]" not in formatted_inventory_string and
+                    "[Inventory Init/Config Error]" not in formatted_inventory_string
+                )
+                if is_valid_inventory_for_combine:
+                    inventory_to_pass_to_combiner = formatted_inventory_string
+                    _log_inventory_trace("Inventory is valid, preparing to pass to combiner.")
                 else:
-                    _log_inventory_trace("Not passing inventory to combiner (RAG Cache enabled, handled by selection step).")
-                    # func_logger.debug(f"[{session_id}] Not passing inventory to combine_background_context (RAG Cache enabled, handled by selection step).")
+                     _log_inventory_trace("Inventory is invalid or unavailable, not passing to combiner.")
+                # <<< MODIFICATION END >>>
 
                 _log_inventory_trace(f"Combiner Input - final_selected_context Length: {len(context_for_prompt if isinstance(context_for_prompt, str) else '')}")
                 _log_inventory_trace(f"Combiner Input - inventory_context Length: {len(inventory_to_pass_to_combiner if inventory_to_pass_to_combiner else '')}")
@@ -800,7 +775,7 @@ class SessionPipeOrchestrator:
                     final_selected_context=(context_for_prompt if isinstance(context_for_prompt, str) else None),
                     t1_summaries=retrieved_t1_summaries,
                     t2_rag_results=retrieved_rag_summaries,
-                    inventory_context=inventory_to_pass_to_combiner # Pass None if RAG Cache handled it
+                    inventory_context=inventory_to_pass_to_combiner # Pass if valid, otherwise None
                 )
                 _log_inventory_trace(f"Combiner Output Length: {len(combined_context_string)}\n------\n{combined_context_string}\n------")
             except Exception as e_combine:
@@ -826,10 +801,6 @@ class SessionPipeOrchestrator:
             stateless_refinement_performed,
             formatted_inventory_string # Still return the raw formatted string for status logging
         )
-
-    # --- The rest of the orchestrator methods remain unchanged ---
-    # ... (e.g., _determine_effective_query, _handle_tier1_summarization, etc.) ...
-    # ... process_turn method ...
 
 
     async def _select_t0_history_slice(self, session_id: str, history_for_processing: List[Dict]) -> Tuple[List[Dict], int]:

@@ -46,31 +46,90 @@ STATELESS_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
 # Default Template for Stateless Refinement
 DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Roleplay Context Extractor
-**Task:** Analyze the provided CONTEXT DOCUMENTS (character backstories, relationship histories, past events, lore) and the RECENT CHAT HISTORY (dialogue, actions, emotional expressions).
-**Objective:** Based ONLY on this information, extract and describe the specific details, memories, relationship dynamics, stated feelings, significant past events, or relevant character traits that are **essential for understanding the full context** of and accurately answering the LATEST USER QUERY from a roleplaying perspective.
-**Instructions:**
-1.  Identify the core subject of the LATEST USER QUERY and any immediately related contextual elements.
-2.  Extract Key Information: Prioritize extracting verbatim sentences or short passages that **directly address** the core subject and related elements.
-3.  Describe Key Dynamics: ...extract specific details or events... that illustrate *why* it's complex...
-4.  Include Foundational Context: Extract specific details... that **directly led to or fundamentally define** the current situation...
-5.  Incorporate Recent Developments: Include details from the RECENT CHAT HISTORY...
-6.  Be Descriptive but Focused: Capture the nuance... Avoid overly generic summaries...
-7.  Prioritize Relevance over Extreme Brevity: ...ensure that key descriptive details... are included...
-8.  Ensure Accuracy: Do not infer, assume, or add information not explicitly present...
-9.  Output: Present the extracted points clearly. If no relevant information is found, state clearly: \"No specific details relevant to the query were found in the provided context.\"
+
+**Role:** Roleplay Context Refiner and Memory Extractor (Structured + Critical Dialogue)
+
+**Objective:**  
+Analyze the provided CONTEXT DOCUMENTS (character profiles, relationship timelines, lore) and RECENT CHAT HISTORY (dialogue, actions, emotional expressions), then produce a **high-fidelity memory summary** to preserve emotional, practical, relationship, and world realism for future roleplay continuation.
+
+**Primary Goals:**
+1. **Scene Context:**  
+   - Capture the basic physical situation: location, time of day, environmental effects.
+2. **Emotional State Changes (per character):**  
+   - Track emotional shifts: fear, hope, anger, guilt, trust, resentment, affection.
+3. **Relationship Developments:**  
+   - Describe how trust, distance, dependence, or emotional connections evolved during the scene.
+4. **Practical Developments:**  
+   - Capture important practical events: travel hardships, fatigue, injury, hunger, gear changes, environmental obstacles.
+5. **World-State Changes:**  
+   - Record important plot/world events: route changes, enemy movements, political developments, survival risks.
+6. **Critical Dialogue Fragments:**  
+   - Identify and preserve 1–3 **critical quotes** or **key emotional exchanges** from the dialogue.
+   - These must reflect major emotional turning points, confessions, confrontations, or promises.
+   - Use near-verbatim phrasing when possible.
+7. **Continuity Anchors:**  
+   - Identify important facts, feelings, or decisions that must be remembered for emotional and logical continuity in future roleplay.
+
+**Compression and Length Policy:**
+- **Do NOT prioritize token-saving compression over realism.**
+- Length is **flexible** depending on emotional and narrative density.
+- Allow **longer outputs naturally** for scenes rich in dialogue, emotional conflict, or tactical discussion.
+- Aggressively compress only if the scene is mostly trivial small-talk.
+
+**Accuracy Policy:**
+- Only extract facts, emotions, or quotes that are explicitly present or strongly implied.
+- Never invent or assume information beyond the provided context.
+
+**Tone Handling:**
+- Preserve emotional nuance and character complexity — avoid flattening characters into simple good/bad binaries.
+
+---
+
+[[INPUTS]]
 
 **LATEST USER QUERY:** {STATELESS_REFINER_QUERY_PLACEHOLDER}
+
 **CONTEXT DOCUMENTS:**
 ---
 {STATELESS_REFINER_CONTEXT_PLACEHOLDER}
 ---
+
 **RECENT CHAT HISTORY:**
 ---
 {STATELESS_REFINER_HISTORY_PLACEHOLDER}
 ---
 
-Concise Relevant Information (for final answer generation):
+---
+
+[[OUTPUT STRUCTURE]]
+
+**Scene Location and Context:**  
+(description)
+
+**Emotional State Changes (per character):**  
+- (Character Name): emotional shifts.
+
+**Relationship Developments:**  
+- (short descriptions)
+
+**Practical Developments:**  
+- (details about survival, fatigue, injuries, supplies)
+
+**World-State Changes:**  
+- (plot changes, movement of threats, discoveries)
+
+**Critical Dialogue Fragments:**  
+- (List 1–3 key quotes that define emotional turning points)
+
+**Important Continuity Anchors:**  
+- (Facts, feelings, or decisions that must persist.)
+
+---
+
+[[NOTES]]
+- Prioritize **emotional realism** and **narrative continuity** over brevity.
+- Critical Dialogue Fragments should be highly selective, capturing *turning points*, *trust shifts*, *confessions*, or *major promises* whenever present.
+
 """
 
 # --- NEW: Constants for Two-Step RAG Cache Refinement ---
@@ -148,29 +207,30 @@ FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template Text for Step 2 (Final Context Selection) - MODIFIED v3 (Mandatory Full Inventory Inclusion)
+
+# --- prompting.py ---
+
+# Default Template Text for Step 2 (Final Context Selection) - MODIFIED v5 (Inventory Handling Removed - Bypass Logic)
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Query-Focused Context Selector
-**Task:** Analyze available background sources (CACHE, OWI+Inventory, HISTORY) and extract details relevant to the LATEST USER QUERY and RECENT HISTORY. **Mandatory Requirement:** Include the full inventory for characters directly involved in the turn.
-**Objective:** Provide relevant background context from Cache/OWI AND the complete inventory for key characters, ensuring the final response generator has access to necessary item details.
+**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and extract details relevant to the LATEST USER QUERY and RECENT HISTORY.
+**Objective:** Provide relevant background context from Cache and OWI, ensuring the final response generator has the necessary situational information.
 
 **Sources:**
-1.  **UPDATED SESSION CACHE:** Long-term facts, character profiles, established lore.
-2.  **CURRENT OWI RETRIEVAL:** General context for the turn AND includes a section listing `--- Current Inventory ---` for characters.
+1.  **UPDATED SESSION CACHE:** Long-term facts, character profiles, established lore. (Primary Source)
+2.  **CURRENT OWI RETRIEVAL:** General contextual information provided for the current turn. (Secondary Source)
 3.  **RECENT CHAT HISTORY:** Immediate conversational context (dialogue, actions).
 4.  **LATEST USER QUERY:** The user's specific input for this turn.
 
 **Instructions:**
 
-1.  **Analyze Query & History:** Determine the core subject, actions, and **characters directly involved** in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY.
-2.  **Select Relevant Cache/OWI Context:** Examine the CACHE and the general OWI part of the OWI RETRIEVAL (excluding the `--- Current Inventory ---` section for this step). Extract sentences/passages that **directly explain or provide essential context** for the query, situation, or involved characters' motivations/relationships relevant *now*. **Be aggressive in excluding non-essential Cache/OWI information.**
-3.  **Mandatory Inventory Inclusion:**
-    *   Identify the inventory listings within the OWI RETRIEVAL's `--- Current Inventory ---` section for the **directly involved characters** identified in Step 1.
-    *   You **MUST** include the **complete, unmodified inventory list** as found in the input for **each** involved character. Do not summarize or filter these specific inventory lists.
-    *   Generally **exclude** inventories of characters not directly involved in the current turn, unless an item they possess is specifically mentioned or critically relevant to the query.
-4.  **Combine Snippets:** Assemble the selected Cache/OWI context snippets (from Step 2) AND the **mandatory full inventories** for involved characters (from Step 3) into a single, coherent text block. Use headings or clear separation (e.g., `=== Relevant Context ===`, `=== Involved Inventories ===`).
-5.  **Output Content:** The output **must** contain ONLY the selected relevant background snippets (Cache/OWI) and the **required full inventories**. DO NOT add commentary or summaries of the history. If no relevant Cache/OWI context is found AND no characters are identified as involved (or they have no inventory listed), state clearly: "[No relevant background context found for the current query]".
+1.  **Analyze Query & History:** Determine the core subject, actions, and characters involved in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY. Use this understanding to gauge relevance.
+2.  **Select Relevant Cache/OWI Context:** Examine the CACHE and the OWI RETRIEVAL. Extract sentences/passages that **directly explain or provide essential context** for the query, situation, or involved characters' motivations/relationships relevant *now*.
+3.  **Prioritize Cache:** Give higher priority to relevant information found in the UPDATED SESSION CACHE. Use the CURRENT OWI RETRIEVAL primarily for immediate situational context not present in the cache.
+4.  **Be Aggressive in Exclusion:** Filter out information from both Cache and OWI that is *not* directly relevant to understanding or responding to the current query and recent history. Avoid including general character descriptions or lore unless directly pertinent.
+5.  **Combine Snippets:** Assemble the selected Cache/OWI context snippets into a single, coherent text block. Use headings or clear separation if combining distinct topics (e.g., `=== Relevant Character Note ===`, `=== Location Details ===`).
+6.  **Output Content:** The output **must** contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant Cache/OWI context is found, state clearly: "[No relevant background context found for the current query]".
 
 **INPUTS:**
 
@@ -182,7 +242,7 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 {FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER}
 ---
 
-**CURRENT OWI RETRIEVAL (Secondary Source - General Context & *Current Inventories*):**
+**CURRENT OWI RETRIEVAL (Secondary Source - General Context):**
 ---
 {FINAL_SELECT_CURRENT_OWI_PLACEHOLDER}
 ---
@@ -192,7 +252,7 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 {FINAL_SELECT_HISTORY_PLACEHOLDER}
 ---
 
-**OUTPUT (Selected Relevant Cache/OWI Snippets & MANDATORY Full Inventories for Involved Characters):**
+**OUTPUT (Selected Relevant Cache/OWI Snippets):**
 """
 
 # --- Function: Clean Context Tags (Existing - Unchanged) ---
@@ -719,5 +779,7 @@ def format_inventory_update_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
         return f"[Error formatting inventory update prompt: {type(e).__name__}]"
+
+
 
 # === END OF FILE i4_llm_agent/prompting.py ===
