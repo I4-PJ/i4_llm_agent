@@ -22,24 +22,39 @@ logger = logging.getLogger(__name__) # 'i4_llm_agent.event_hints'
 
 # === Constants ===
 
+# --- Placeholders for Prompt Formatting (NEW: Added World State) ---
 EVENT_HINT_HISTORY_PLACEHOLDER = "{recent_history}"
 EVENT_HINT_CONTEXT_PLACEHOLDER = "{background_context}"
+EVENT_HINT_SEASON_PLACEHOLDER = "{current_season}" # <<< NEW
+EVENT_HINT_WEATHER_PLACEHOLDER = "{current_weather}" # <<< NEW
 
+
+# --- Default Prompt Template (MODIFIED: Includes World State) ---
 DEFAULT_EVENT_HINT_TEMPLATE_TEXT = f"""
-[[SYSTEM ROLE: Story Event Suggestor]]
-Analyze the dialogue and context. Suggest one brief, minor, plausible event/detail fitting the scene. Avoid major plot changes. Output only the suggestion or "[No Suggestion]".
+[[SYSTEM ROLE: Contextual Event Suggestor]]
+**Objective:** Analyze the dialogue, background context, and current world state (season/weather) to suggest ONE brief, plausible, minor environmental detail or event that fits the scene. Avoid major plot changes or commands. Focus on sensory details or small occurrences consistent with the provided environment. Output ONLY the suggestion text or "[No Suggestion]".
 
-RECENT DIALOGUE HISTORY:
+**Established World State (Use this as factual basis):**
+*   **Season:** {EVENT_HINT_SEASON_PLACEHOLDER}
+*   **Weather:** {EVENT_HINT_WEATHER_PLACEHOLDER}
+
+**RECENT DIALOGUE HISTORY (Consider the flow):**
 ---
 {EVENT_HINT_HISTORY_PLACEHOLDER}
 ---
 
-BACKGROUND CONTEXT:
+**BACKGROUND CONTEXT (Character info, location, etc.):**
 ---
 {EVENT_HINT_CONTEXT_PLACEHOLDER}
 ---
 
-EVENT/DETAIL SUGGESTION:
+**Instructions:**
+1.  Base your suggestion on the established Season and Weather.
+2.  Keep it brief and environmental (e.g., "A gust of wind rattles the shutters," "The scent of damp earth hangs in the air," "A bird calls out nearby," "Snowflakes drift down lazily").
+3.  Do NOT suggest character actions, dialogue, or major plot points.
+4.  If no fitting minor detail comes to mind, output: `[No Suggestion]`
+
+**EVENT/DETAIL SUGGESTION:**
 """
 
 EVENT_HANDLING_GUIDELINE_TEXT = """
@@ -51,17 +66,22 @@ You may occasionally receive an [[Event Suggestion: ...]] within the user's inpu
 
 # === Helper Functions ===
 
+# --- MODIFIED: Include season and weather ---
 def _format_event_hint_prompt(
     recent_history_str: str,
     background_context: str,
+    current_season: Optional[str], # <<< NEW parameter
+    current_weather: Optional[str], # <<< NEW parameter
     template: str
 ) -> str:
     """
-    Formats the prompt for the Event Hint LLM.
+    Formats the prompt for the Event Hint LLM, including world state.
 
     Args:
-        recent_history_str: The formatted string of recent dialogue history.
-        background_context: The background context string (e.g., combined).
+        recent_history_str: Formatted recent dialogue history.
+        background_context: Background context string.
+        current_season: The current season string (e.g., "Summer").
+        current_weather: The current weather string (e.g., "Clear").
         template: The prompt template string.
 
     Returns:
@@ -71,17 +91,25 @@ def _format_event_hint_prompt(
     if not template or not isinstance(template, str):
         return "[Error: Invalid Template for Event Hint]"
 
-    # Basic replace for safety, assuming placeholders are unique enough
+    # Use placeholders or defaults if state is None/empty
+    season_text = current_season if current_season else "Not Specified"
+    weather_text = current_weather if current_weather else "Not Specified"
+
+    # Basic replace for safety
     safe_history = recent_history_str.replace("{", "{{").replace("}", "}}") if isinstance(recent_history_str, str) else ""
     safe_context = background_context.replace("{", "{{").replace("}", "}}") if isinstance(background_context, str) else ""
+    safe_season = season_text.replace("{", "{{").replace("}", "}}")
+    safe_weather = weather_text.replace("{", "{{").replace("}", "}}")
 
     try:
-        formatted_prompt = template.format(
-            **{
-                EVENT_HINT_HISTORY_PLACEHOLDER.strip('{}'): safe_history,
-                EVENT_HINT_CONTEXT_PLACEHOLDER.strip('{}'): safe_context
-            }
-        )
+        # Create the dictionary of placeholders to format
+        format_dict = {
+            EVENT_HINT_HISTORY_PLACEHOLDER.strip('{}'): safe_history,
+            EVENT_HINT_CONTEXT_PLACEHOLDER.strip('{}'): safe_context,
+            EVENT_HINT_SEASON_PLACEHOLDER.strip('{}'): safe_season, # <<< NEW
+            EVENT_HINT_WEATHER_PLACEHOLDER.strip('{}'): safe_weather # <<< NEW
+        }
+        formatted_prompt = template.format(**format_dict)
         return formatted_prompt
     except KeyError as e:
         func_logger.error(f"Missing placeholder in event hint prompt: {e}")
@@ -95,26 +123,35 @@ def format_hint_for_query(event_hint: str) -> str:
     """Formats the event hint string for prepending to the user query."""
     if not event_hint or not isinstance(event_hint, str):
         return ""
-    return f"[[Event Suggestion: {event_hint.strip()}]]"
+    # Remove potential leading/trailing markers or whitespace before formatting
+    clean_hint = event_hint.strip()
+    if clean_hint.lower() == '[no suggestion]':
+        return "" # Don't format the "no suggestion" marker itself
+    return f"[[Event Suggestion: {clean_hint}]]"
 
 
 # === Core Logic ===
 
+# --- MODIFIED: Accept and use season/weather ---
 async def generate_event_hint(
     config: Any, # Expects object with event hint LLM config attributes
     history_messages: List[Dict],
     background_context: str,
+    current_season: Optional[str], # <<< NEW parameter
+    current_weather: Optional[str], # <<< NEW parameter
     llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]],
     logger_instance: Optional[logging.Logger] = None,
     session_id: str = "unknown_session",
 ) -> Optional[str]:
     """
-    Generates a dynamic event hint using a secondary LLM based on context.
+    Generates a dynamic event hint using a secondary LLM based on context and world state.
 
     Args:
         config: Configuration object containing valves like 'event_hint_llm_api_url', etc.
-        history_messages: The list of message dictionaries for history context.
-        background_context: The combined background context string.
+        history_messages: List of message dictionaries for history context.
+        background_context: Combined background context string.
+        current_season: The current season string.
+        current_weather: The current weather string.
         llm_call_func: The async function wrapper to call the LLM.
         logger_instance: Optional logger instance.
         session_id: The session ID for logging.
@@ -130,6 +167,7 @@ async def generate_event_hint(
     hint_llm_url = getattr(config, 'event_hint_llm_api_url', None)
     hint_llm_key = getattr(config, 'event_hint_llm_api_key', None)
     hint_llm_temp = getattr(config, 'event_hint_llm_temperature', 0.7)
+    # Use the template defined in this file by default
     hint_llm_template = getattr(config, 'event_hint_llm_prompt_template', DEFAULT_EVENT_HINT_TEMPLATE_TEXT)
     hint_history_count = getattr(config, 'event_hint_history_count', 6)
 
@@ -152,9 +190,12 @@ async def generate_event_hint(
     )
     recent_history_str = format_history_for_llm(recent_history_list) if recent_history_list else "[No Recent History]"
 
+    # Format the prompt using the helper that now includes world state
     event_hint_prompt_text = _format_event_hint_prompt(
         recent_history_str=recent_history_str,
         background_context=background_context,
+        current_season=current_season, # Pass world state
+        current_weather=current_weather, # Pass world state
         template=hint_llm_template
     )
 
@@ -163,7 +204,9 @@ async def generate_event_hint(
         return None
 
     event_hint_payload = {"contents": [{"parts": [{"text": event_hint_prompt_text}]}]}
-    func_logger.info(f"[{caller_info}] Calling Event Hint LLM...")
+    func_logger.info(f"[{caller_info}] Calling Event Hint LLM (with world state)...")
+    # Optional: Log the actual prompt being sent for debugging
+    # func_logger.debug(f"[{caller_info}] Event Hint Prompt Text:\n------\n{event_hint_prompt_text}\n------")
 
     # --- Call LLM ---
     try:

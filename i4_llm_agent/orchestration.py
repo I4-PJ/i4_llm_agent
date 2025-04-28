@@ -28,6 +28,8 @@ from .database import (
     InvalidDimensionException,
     get_all_inventories_for_session, get_character_inventory_data,
     add_or_update_character_inventory,
+    get_world_state, # <<< ADDED
+    set_world_state, # <<< ADDED (for initialization)
 )
 from .history import (
     format_history_for_llm, get_recent_turns, DIALOGUE_ROLES, select_turns_for_t0
@@ -138,12 +140,10 @@ class SessionPipeOrchestrator:
 
         # --- Function Aliases ---
         # Core
-        # --- MODIFIED: Use the main dispatcher directly (it's now the async litellm adapter) ---
         self._llm_call_func = call_google_llm_api
         self._format_history_func = format_history_for_llm
         self._get_recent_turns_func = get_recent_turns
         self._manage_memory_func = manage_tier1_summarization
-        # Use the standalone payload constructor from prompting.py directly
         self._count_tokens_func = count_tokens
         self._calculate_similarity_func = calculate_string_similarity
         self._dialogue_roles = DIALOGUE_ROLES
@@ -161,6 +161,8 @@ class SessionPipeOrchestrator:
         self._get_all_inventories_db_func = get_all_inventories_for_session
         self._get_char_inventory_db_func = get_character_inventory_data
         self._update_char_inventory_db_func = add_or_update_character_inventory
+        self._get_world_state_db_func = get_world_state  # <<< NEW ALIAS
+        self._set_world_state_db_func = set_world_state  # <<< NEW ALIAS (for init)
 
         # Inventory Module Functions
         if _ORCH_INVENTORY_MODULE_AVAILABLE:
@@ -171,6 +173,7 @@ class SessionPipeOrchestrator:
             self._update_inventories_func = _dummy_update_inventories
 
         self.logger.info("SessionPipeOrchestrator initialized (Non-Streaming).")
+
 
     # --- Internal Helper: Status Emitter ---
     async def _emit_status(
@@ -937,7 +940,7 @@ class SessionPipeOrchestrator:
 
 
     # ==========================================================================
-    # === Main Process Turn Method (MODIFIED for Event Hints & Non-Streaming) ===
+    # === Main Process Turn Method (MODIFIED for World State & Event Hints)    ===
     # ==========================================================================
     async def process_turn(
         self,
@@ -968,6 +971,8 @@ class SessionPipeOrchestrator:
         # Initialize variables
         summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False
         generated_event_hint: Optional[str] = None # Variable for the generated hint
+        current_season: Optional[str] = "Unknown"   # <<< NEW: World state vars
+        current_weather: Optional[str] = "Unknown" # <<< NEW: World state vars
 
         try:
             # 1. History Sync
@@ -998,6 +1003,43 @@ class SessionPipeOrchestrator:
             retrieved_rag_summaries, t2_retrieved_count = await self._get_t2_rag_results( session_id, history_for_processing, latest_user_query_str, embedding_func, chroma_embed_wrapper, event_emitter )
 
 
+            # --- 5.5 Get World State (or Initialize) --- <<< NEW STEP >>>
+            await self._emit_status(event_emitter, session_id, "Status: Fetching world state...")
+            world_state = None
+            if self.sqlite_cursor and self._get_world_state_db_func and self._set_world_state_db_func:
+                try:
+                    world_state = await self._get_world_state_db_func(self.sqlite_cursor, session_id)
+                    if world_state and isinstance(world_state, dict):
+                        current_season = world_state.get("season", "Unknown")
+                        current_weather = world_state.get("weather", "Unknown")
+                        self.logger.info(f"[{session_id}] Successfully fetched world state: Season='{current_season}', Weather='{current_weather}'")
+                    else:
+                        # Initialize if not found
+                        self.logger.info(f"[{session_id}] No world state found. Initializing with defaults (Summer, Clear).")
+                        default_season = "Summer"
+                        default_weather = "Clear"
+                        set_success = await self._set_world_state_db_func(
+                            self.sqlite_cursor, session_id, default_season, default_weather
+                        )
+                        if set_success:
+                            current_season = default_season
+                            current_weather = default_weather
+                            self.logger.info(f"[{session_id}] Successfully initialized and saved world state.")
+                        else:
+                            self.logger.error(f"[{session_id}] Failed to initialize/save world state in DB.")
+                            # Keep defaults but log error
+                            current_season = default_season
+                            current_weather = default_weather
+                except Exception as e_world_state:
+                    self.logger.error(f"[{session_id}] Error fetching/setting world state: {e_world_state}", exc_info=True)
+                    # Use defaults on error
+                    current_season = "Unknown (Error)"
+                    current_weather = "Unknown (Error)"
+            else:
+                missing_world_funcs = [f for f, fn in {"cursor": self.sqlite_cursor, "getter": self._get_world_state_db_func, "setter": self._set_world_state_db_func}.items() if not fn]
+                self.logger.error(f"[{session_id}] Cannot fetch/set world state: Missing prerequisites: {missing_world_funcs}. Using defaults.")
+
+
             # 6. Prepare & Refine Background
             (combined_context_string, base_system_prompt_text, initial_owi_context_tokens, refined_context_tokens, cache_update_performed, cache_update_skipped, final_context_selection_performed, stateless_refinement_performed, formatted_inventory_string_for_status ) = await self._prepare_and_refine_background( session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries, current_active_history, latest_user_query_str, event_emitter )
 
@@ -1006,7 +1048,7 @@ class SessionPipeOrchestrator:
             t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
 
 
-            # 7.5. Generate Event Hint (If Enabled)
+            # 7.5. Generate Event Hint (If Enabled) - <<< MODIFIED TO PASS WORLD STATE >>>
             if event_hints_enabled:
                 self.logger.info(f"[{session_id}] Event Hints feature enabled. Attempting generation...")
                 await self._emit_status(event_emitter, session_id, "Status: Checking for dynamic event hints...")
@@ -1015,13 +1057,17 @@ class SessionPipeOrchestrator:
                         config=self.config, # Pass the main config object
                         history_messages=current_active_history, # Use full history for context
                         background_context=combined_context_string, # Use the combined context
+                        current_season=current_season, # <<< Pass current season
+                        current_weather=current_weather, # <<< Pass current weather
                         llm_call_func=self._async_llm_call_wrapper, # Pass the LLM caller
                         logger_instance=self.logger,
                         session_id=session_id
                     )
                     if generated_event_hint:
+                         self.logger.info(f"[{session_id}] Event Hint Generated: '{generated_event_hint[:80]}...'")
                          await self._emit_status(event_emitter, session_id, "Status: Event hint generated.")
                     else:
+                         self.logger.info(f"[{session_id}] No event hint suggested by Hint LLM.")
                          await self._emit_status(event_emitter, session_id, "Status: No event hint suggested.")
 
                 except Exception as e_hint_gen:
@@ -1088,16 +1134,10 @@ class SessionPipeOrchestrator:
                                      new_cursor = self.sqlite_cursor.connection.cursor()
                                      # Log inventory prompt using Pipe's helper (if available)
                                      if getattr(self.config, 'debug_log_final_payload', False):
-                                         if hasattr(self, 'pipe_logger') and hasattr(self.pipe_logger, '_log_debug_inventory_llm'):
+                                         # Check if pipe_logger has the method attached
+                                         if hasattr(self, 'pipe_logger') and callable(getattr(self.pipe_logger, '_log_debug_inventory_llm', None)):
                                              self.logger.debug(f"[{session_id}] Calling Pipe's inventory logger for PROMPT.")
-                                             # Ensure pipe_logger has the method attached if called from here
-                                             # For now, assume it might exist; needs careful setup in Pipe class __init__ potentially
-                                             try:
-                                                self.pipe_logger._log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
-                                             except AttributeError:
-                                                self.logger.warning(f"[{session_id}] Pipe logger missing '_log_debug_inventory_llm' method.")
-                                             except Exception as log_e:
-                                                self.logger.error(f"[{session_id}] Error calling pipe logger for inventory: {log_e}")
+                                             self.pipe_logger._log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
                                          else:
                                              self.logger.warning(f"[{session_id}] Cannot log inventory prompt: Pipe logger or method missing/misconfigured.")
 
@@ -1107,8 +1147,6 @@ class SessionPipeOrchestrator:
                                          db_get_inventory_func=get_character_inventory_data,
                                          db_update_inventory_func=add_or_update_character_inventory,
                                          inventory_llm_config=inv_llm_config,
-                                         # Pass Pipe's logger for inventory LLM response logging if needed within the function
-                                         # inventory_llm_debug_logger=getattr(self, 'pipe_logger', None) # Needs handling inside inventory func
                                      )
                                      inventory_update_success_flag = update_success
                                      if update_success: self.logger.info(f"[{session_id}] Post-turn inventory update successful.")

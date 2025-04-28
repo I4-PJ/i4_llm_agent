@@ -1,4 +1,4 @@
-# --- START OF FILE database.py ---
+# === START MODIFIED SECTION: i4_llm_agent/database.py ===
 
 # [[START MODIFIED database.py]]
 # i4_llm_agent/database.py
@@ -8,6 +8,7 @@ import sqlite3
 import asyncio
 import re
 import os
+import json # <<< ADDED for potential future use in world state
 from datetime import datetime, timezone # <<< ADDED for inventory timestamp
 from typing import (
     Optional, Dict, List, Tuple, Union, Any, Callable, Coroutine, Sequence
@@ -34,13 +35,14 @@ logger = logging.getLogger(__name__) # i4_llm_agent.database
 # --- Constants ---
 T1_SUMMARY_TABLE_NAME = "tier1_text_summaries"
 RAG_CACHE_TABLE_NAME = "session_rag_cache"
-INVENTORY_TABLE_NAME = "character_inventory" # <<< NEW: Inventory Table Name
+INVENTORY_TABLE_NAME = "character_inventory"
+WORLD_STATE_TABLE_NAME = "session_world_state" # <<< NEW: World State Table Name
 
 # ==============================================================================
 # === 1. SQLite Initialization (Modified)                                    ===
 # ==============================================================================
 
-# --- 1.1: Sync - Initialize Inventory Table ---
+# --- 1.1: Sync - Initialize Inventory Table (Existing - Unchanged) ---
 def _sync_initialize_inventory_table(cursor: sqlite3.Cursor) -> bool:
     """
     Synchronously initializes the character_inventory table.
@@ -71,22 +73,58 @@ def _sync_initialize_inventory_table(cursor: sqlite3.Cursor) -> bool:
         func_logger.error(f"Unexpected error initializing table '{INVENTORY_TABLE_NAME}': {e}")
         return False
 
-# --- 1.2: Async - Initialize Inventory Table ---
+# --- 1.2: Async - Initialize Inventory Table (Existing - Unchanged) ---
 async def initialize_inventory_table(cursor: sqlite3.Cursor) -> bool:
     """Async wrapper to initialize the character_inventory table."""
     return await asyncio.to_thread(_sync_initialize_inventory_table, cursor)
 
 
+# --- 1.2.1: Sync - Initialize World State Table (NEW) ---
+def _sync_initialize_world_state_table(cursor: sqlite3.Cursor) -> bool:
+    """
+    Synchronously initializes the session_world_state table.
+    Stores key-value pairs for world state per session (e.g., season, weather).
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_initialize_world_state_table')
+    if not cursor:
+        func_logger.error("SQLite cursor is not available for world state table init.")
+        return False
+    try:
+        # Stores current season and weather for a session.
+        # Could be expanded later with more state variables (time_of_day, etc.)
+        # session_id is the primary key, ensuring only one state row per session.
+        cursor.execute(f"""CREATE TABLE IF NOT EXISTS {WORLD_STATE_TABLE_NAME} (
+                session_id TEXT PRIMARY KEY,
+                current_season TEXT,
+                current_weather TEXT,
+                last_updated_utc REAL NOT NULL
+            )""")
+        func_logger.debug(f"Table '{WORLD_STATE_TABLE_NAME}' initialized successfully.")
+        return True
+    except sqlite3.Error as e:
+        func_logger.error(f"SQLite error initializing table '{WORLD_STATE_TABLE_NAME}': {e}")
+        return False
+    except Exception as e:
+        func_logger.error(f"Unexpected error initializing table '{WORLD_STATE_TABLE_NAME}': {e}")
+        return False
+
+# --- 1.2.2: Async - Initialize World State Table (NEW) ---
+async def initialize_world_state_table(cursor: sqlite3.Cursor) -> bool:
+    """Async wrapper to initialize the session_world_state table."""
+    return await asyncio.to_thread(_sync_initialize_world_state_table, cursor)
+
+
 # --- 1.3: Sync - Initialize ALL Tables (MODIFIED) ---
 def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
     """
-    Initializes all necessary SQLite tables (T1 Summaries, RAG Cache, Inventory).
-    MODIFIED to include inventory table initialization.
+    Initializes all necessary SQLite tables (T1 Summaries, RAG Cache, Inventory, World State).
+    MODIFIED to include world state table initialization.
     """
     func_logger = logging.getLogger(__name__ + '._sync_initialize_sqlite_tables')
     if not cursor:
         func_logger.error("SQLite cursor is not available.")
         return False
+    all_success = True
     try:
         # --- Initialize T1 Summary Table (Existing) ---
         cursor.execute(f"""CREATE TABLE IF NOT EXISTS {T1_SUMMARY_TABLE_NAME} (
@@ -115,16 +153,24 @@ def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
             )""")
         func_logger.debug(f"Table '{RAG_CACHE_TABLE_NAME}' initialized successfully.")
 
-        # --- Initialize Inventory Table (NEW CALL) ---
+        # --- Initialize Inventory Table (Existing Call) ---
         inventory_init_success = _sync_initialize_inventory_table(cursor)
         if not inventory_init_success:
              func_logger.error("Failed to initialize inventory table during main init.")
-             # Decide if this is fatal - for now, return False if inventory fails
-             return False
+             all_success = False # Mark failure but continue
 
-        # --- Return True if all initializations were okay ---
-        func_logger.info("All required SQLite tables initialized.")
-        return True
+        # --- Initialize World State Table (NEW CALL) ---
+        world_state_init_success = _sync_initialize_world_state_table(cursor)
+        if not world_state_init_success:
+             func_logger.error("Failed to initialize world state table during main init.")
+             all_success = False # Mark failure
+
+        # --- Return True only if all initializations were okay ---
+        if all_success:
+            func_logger.info("All required SQLite tables initialized (or confirmed existed).")
+        else:
+            func_logger.error("One or more SQLite tables failed to initialize.")
+        return all_success
 
     except sqlite3.Error as e:
         func_logger.error(f"SQLite error initializing tables: {e}")
@@ -133,7 +179,7 @@ def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
         func_logger.error(f"Unexpected error initializing tables: {e}")
         return False
 
-# --- 1.4: Async - Initialize ALL Tables ---
+# --- 1.4: Async - Initialize ALL Tables (Modified - Calls modified sync version) ---
 async def initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
     """Async wrapper to initialize all necessary SQLite tables."""
     return await asyncio.to_thread(_sync_initialize_sqlite_tables, cursor)
@@ -142,14 +188,7 @@ async def initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
 # ==============================================================================
 # === 2. SQLite Tier 1 Summary Operations (Unchanged)                        ===
 # ==============================================================================
-# (Functions _sync_add_tier1_summary, add_tier1_summary,
-#  _sync_get_recent_tier1_summaries, get_recent_tier1_summaries,
-#  _sync_get_tier1_summary_count, get_tier1_summary_count,
-#  _sync_get_oldest_tier1_summary, get_oldest_tier1_summary,
-#  _sync_delete_tier1_summary, delete_tier1_summary,
-#  _sync_get_max_t1_end_index, get_max_t1_end_index,
-#  _sync_check_t1_summary_exists, check_t1_summary_exists
-#  remain exactly as provided in the previous context)
+# (Functions _sync_add_tier1_summary, add_tier1_summary, etc. remain unchanged)
 # --- 2.1: Sync - Add T1 Summary ---
 def _sync_add_tier1_summary(
     cursor: sqlite3.Cursor,
@@ -362,8 +401,7 @@ async def check_t1_summary_exists(
 # ==============================================================================
 # === 3. SQLite RAG Cache Operations (Unchanged)                             ===
 # ==============================================================================
-# (Functions _sync_add_or_update_rag_cache, add_or_update_rag_cache,
-#  _sync_get_rag_cache, get_rag_cache remain exactly as provided)
+# (Functions _sync_add_or_update_rag_cache, add_or_update_rag_cache, etc. remain unchanged)
 # --- 3.1: Sync - Add/Update RAG Cache ---
 def _sync_add_or_update_rag_cache(cursor: sqlite3.Cursor, session_id: str, context_text: str) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_add_or_update_rag_cache')
@@ -405,9 +443,9 @@ async def get_rag_cache(cursor: sqlite3.Cursor, session_id: str) -> Optional[str
 
 
 # ==============================================================================
-# === 4. SQLite Inventory Operations (NEW)                                   ===
+# === 4. SQLite Inventory Operations (Existing - Unchanged)                  ===
 # ==============================================================================
-
+# (Functions _sync_get_character_inventory_data, get_character_inventory_data, etc. remain unchanged)
 # --- 4.1: Sync - Get Character Inventory Data ---
 def _sync_get_character_inventory_data(cursor: sqlite3.Cursor, session_id: str, character_name: str) -> Optional[str]:
     """
@@ -547,13 +585,90 @@ async def get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: st
 
 
 # ==============================================================================
+# === 4.5: SQLite World State Operations (NEW)                               ===
+# ==============================================================================
+
+# --- 4.5.1: Sync - Get World State ---
+def _sync_get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Synchronously retrieves the world state (season, weather) for a specific session.
+    Returns a dictionary or None if not found or error.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_get_world_state')
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable for world state."); return None
+    if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id for world state."); return None
+
+    try:
+        cursor.execute(
+            f"SELECT current_season, current_weather FROM {WORLD_STATE_TABLE_NAME} WHERE session_id = ?",
+            (session_id,)
+        )
+        result = cursor.fetchone()
+        if result:
+            season, weather = result
+            func_logger.debug(f"[{session_id}] Found world state: Season='{season}', Weather='{weather}'")
+            return {"season": season, "weather": weather}
+        else:
+            func_logger.debug(f"[{session_id}] No world state found in DB for this session.")
+            return None # Indicate not found
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error retrieving world state: {e}")
+        return None
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error retrieving world state: {e}")
+        return None
+
+# --- 4.5.2: Async - Get World State ---
+async def get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Async wrapper to retrieve the world state (season, weather) for a specific session.
+    Returns a dictionary {'season': str, 'weather': str} or None.
+    """
+    return await asyncio.to_thread(_sync_get_world_state, cursor, session_id)
+
+# --- 4.5.3: Sync - Set World State ---
+def _sync_set_world_state(cursor: sqlite3.Cursor, session_id: str, season: str, weather: str) -> bool:
+    """
+    Synchronously sets or updates the world state (season, weather) for a session
+    using INSERT OR REPLACE.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_set_world_state')
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable for setting world state."); return False
+    if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id for world state set."); return False
+    if not isinstance(season, str) or not season.strip(): func_logger.warning(f"[{session_id}] Invalid 'season' value provided for set."); season = "Unknown"
+    if not isinstance(weather, str) or not weather.strip(): func_logger.warning(f"[{session_id}] Invalid 'weather' value provided for set."); weather = "Unknown"
+
+    now_utc_timestamp = datetime.now(timezone.utc).timestamp()
+
+    try:
+        # INSERT OR REPLACE uses the PRIMARY KEY (session_id)
+        cursor.execute(
+             f"""INSERT OR REPLACE INTO {WORLD_STATE_TABLE_NAME}
+                (session_id, current_season, current_weather, last_updated_utc)
+                VALUES (?, ?, ?, ?)""",
+             (session_id, season.strip(), weather.strip(), now_utc_timestamp)
+        )
+        func_logger.info(f"[{session_id}] Successfully set/updated world state: Season='{season.strip()}', Weather='{weather.strip()}'")
+        return True
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error setting/updating world state: {e}")
+        return False
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error setting/updating world state: {e}")
+        return False
+
+# --- 4.5.4: Async - Set World State ---
+async def set_world_state(cursor: sqlite3.Cursor, session_id: str, season: str, weather: str) -> bool:
+    """
+    Async wrapper to set or update the world state (season, weather) for a session.
+    """
+    return await asyncio.to_thread(_sync_set_world_state, cursor, session_id, season, weather)
+
+
+# ==============================================================================
 # === 5. ChromaDB Tier 2 Operations (Unchanged)                              ===
 # ==============================================================================
-# (Functions _sync_get_or_create_chroma_collection, get_or_create_chroma_collection,
-#  _sync_add_to_chroma_collection, add_to_chroma_collection,
-#  _sync_query_chroma_collection, query_chroma_collection,
-#  _sync_get_chroma_collection_count, get_chroma_collection_count
-#  remain exactly as provided in the previous context)
+# (Functions _sync_get_or_create_chroma_collection, get_or_create_chroma_collection, etc. remain unchanged)
 # --- 5.1: Sync - Get/Create Chroma Collection ---
 def _sync_get_or_create_chroma_collection(
     chroma_client: Any, # Expects chromadb.ClientAPI but use Any for optional import
@@ -629,4 +744,5 @@ async def get_chroma_collection_count(collection: Any) -> int:
     return await asyncio.to_thread(_sync_get_chroma_collection_count, collection)
 
 # [[END MODIFIED database.py]]
-# --- END OF FILE database.py ---
+
+# === END MODIFIED SECTION: i4_llm_agent/database.py ===

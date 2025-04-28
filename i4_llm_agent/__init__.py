@@ -1,6 +1,8 @@
+# === START MODIFIED SECTION: i4_llm_agent/__init__.py ===
+
 # --- START OF FILE __init__.py ---
 
-# [[START MODIFIED __init__.py - Added Event Hint Constant]]
+# [[START MODIFIED __init__.py - Added World State DB Exports]]
 # i4_llm_agent/__init__.py
 import logging
 
@@ -42,7 +44,7 @@ from .cache import (
 # --- Session Management (Existing) ---
 from .session import SessionManager
 
-# --- Database Operations (Modified: Added Inventory Table/Functions) ---
+# --- Database Operations (Modified: Added World State Table/Functions) ---
 from .database import (
     # Initialization
     initialize_sqlite_tables,
@@ -58,6 +60,10 @@ from .database import (
     get_character_inventory_data,
     add_or_update_character_inventory,
     get_all_inventories_for_session,
+    # SQLite World State (NEW)
+    initialize_world_state_table, # <<< NEW
+    get_world_state,              # <<< NEW
+    set_world_state,              # <<< NEW
     # ChromaDB T2 (Existing)
     get_or_create_chroma_collection, add_to_chroma_collection,
     query_chroma_collection, get_chroma_collection_count,
@@ -138,6 +144,10 @@ __all__ = [
     "get_character_inventory_data",
     "add_or_update_character_inventory",
     "get_all_inventories_for_session",
+    # -- World State (DB) -- # <<< NEW SECTION
+    "initialize_world_state_table",
+    "get_world_state",
+    "set_world_state",
     # -- ChromaDB T2 --
     "get_or_create_chroma_collection", "add_to_chroma_collection",
     "query_chroma_collection", "get_chroma_collection_count",
@@ -154,5 +164,7 @@ __all__ = [
     # event_hints (Constants Only)
     "DEFAULT_EVENT_HINT_TEMPLATE_TEXT", # <<< ADDED
 ]
-# [[END MODIFIED __init__.py - Added Event Hint Constant]]
+# [[END MODIFIED __init__.py - Added World State DB Exports]]
 # --- END OF FILE __init__.py ---
+
+# === END MODIFIED SECTION: i4_llm_agent/__init__.py ===
