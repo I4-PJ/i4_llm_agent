@@ -289,7 +289,7 @@ class SessionPipeOrchestrator:
     # Streaming is removed
 
 
-    # --- START NEW DEBUG LOGGING HELPERS (adapted from Pipe) ---
+    # --- START DEBUG LOGGING HELPERS (adapted from Pipe) ---
     def _orchestrator_get_debug_log_path(self, suffix: str) -> Optional[str]:
         """Gets the debug log path using config and logger passed from Pipe."""
         func_logger = getattr(self, 'pipe_logger', self.logger) # Use pipe logger if available
@@ -299,13 +299,10 @@ class SessionPipeOrchestrator:
             if not base_log_path:
                 func_logger.error("Orch Debug Path: Main log_file_path config is empty.")
                 return None
-            # func_logger.debug(f"Orch Debug Path: Base log path from config: '{base_log_path}'")
             log_dir = os.path.dirname(base_log_path)
             func_logger.debug(f"Orch Debug Path: Target log directory: '{log_dir}'")
             try:
-                # func_logger.debug(f"Orch Debug Path: Attempting os.makedirs for: '{log_dir}' (exist_ok=True)")
                 os.makedirs(log_dir, exist_ok=True)
-                # func_logger.debug(f"Orch Debug Path: os.makedirs command finished for: '{log_dir}'")
             except PermissionError as pe:
                 func_logger.error(f"Orch Debug Path: PERMISSION ERROR creating log directory '{log_dir}': {pe}")
                 return None
@@ -327,7 +324,6 @@ class SessionPipeOrchestrator:
 
     def _orchestrator_log_debug_payload(self, session_id: str, payload_body: Dict):
         """Logs the final payload dictionary to the designated debug file."""
-        # Use the internal path getter
         debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_PAYLOAD")
         if not debug_log_path:
             self.logger.error(f"[{session_id}] Orch: Cannot log final payload: No path determined.")
@@ -336,24 +332,42 @@ class SessionPipeOrchestrator:
             ts = datetime.now(timezone.utc).isoformat()
             log_entry = {
                 "ts": ts,
-                "pipe_version": getattr(self.config, "version", "unknown"), # Get version from config if possible
+                "pipe_version": getattr(self.config, "version", "unknown"),
                 "sid": session_id,
                 "payload": payload_body,
             }
             self.logger.info(f"[{session_id}] Orch: Attempting write FINAL PAYLOAD debug log to: {debug_log_path}")
             with open(debug_log_path, "a", encoding="utf-8") as f:
                  f.write(f"--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- START ---\n")
-                 # Ensure 'contents' is directly under 'payload' for easier reading if present
                  if 'contents' in payload_body:
-                     log_entry_payload = payload_body.copy() # Avoid modifying original
-                     log_entry['payload']['contents'] = log_entry_payload.pop('contents', None) # Move contents up
-                     log_entry['payload_other_keys'] = log_entry_payload # Store remaining keys separately
+                     log_entry_payload = payload_body.copy()
+                     log_entry['payload']['contents'] = log_entry_payload.pop('contents', None)
+                     log_entry['payload_other_keys'] = log_entry_payload
                  json.dump(log_entry, f, indent=2)
                  f.write(f"\n--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- END ---\n\n")
             self.logger.info(f"[{session_id}] Orch: Successfully wrote FINAL PAYLOAD debug log.")
         except Exception as e:
             self.logger.error(f"[{session_id}] Orch: Failed write debug final payload log: {e}", exc_info=True)
-    # --- END NEW DEBUG LOGGING HELPERS ---
+
+    # --- NEW: Debug Logger for Inventory LLM ---
+    def _orchestrator_log_debug_inventory_llm(self, session_id: str, text: str, is_prompt: bool):
+        """Logs the Inventory LLM prompt or response text to a debug file."""
+        debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_INVENTORY_LLM")
+        if not debug_log_path:
+            self.logger.error(f"[{session_id}] Orch: Cannot log inventory LLM text: No path determined.")
+            return
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            log_type = "PROMPT" if is_prompt else "RESPONSE"
+            self.logger.info(f"[{session_id}] Orch: Attempting write INVENTORY LLM {log_type} debug log to: {debug_log_path}")
+            with open(debug_log_path, "a", encoding="utf-8") as f:
+                f.write(f"--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- START ---\n")
+                f.write(text)
+                f.write(f"\n--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- END ---\n\n")
+            self.logger.info(f"[{session_id}] Orch: Successfully wrote INVENTORY LLM {log_type} debug log.")
+        except Exception as e:
+            self.logger.error(f"[{session_id}] Orch: Failed write debug inventory LLM {log_type} log: {e}", exc_info=True)
+    # --- END DEBUG LOGGING HELPERS ---
 
     # --- Helper Methods for process_turn ---
 
@@ -531,8 +545,6 @@ class SessionPipeOrchestrator:
         return retrieved_rag_summaries, t2_retrieved_count
 
 
-    # --- orchestrator.py ---
-
     async def _prepare_and_refine_background(
         self, session_id: str, body: Dict, user_valves: Any,
         retrieved_t1_summaries: List[str], retrieved_rag_summaries: List[str],
@@ -546,43 +558,34 @@ class SessionPipeOrchestrator:
                   bypassing the Step 2 LLM for inventory inclusion guarantee.
                   Logs inventory tracing steps to a dedicated file.
         """
-        func_logger = self.logger # Use the logger assigned during Pipe init
+        func_logger = self.logger
         inventory_trace_log_path = None
         debug_inventory_trace_enabled = getattr(self.config, 'debug_log_final_payload', False)
 
-        # --- Helper to write to inventory trace log file ---
         def _log_inventory_trace(message: str):
-            nonlocal inventory_trace_log_path # Allow modification if needed
-            if not debug_inventory_trace_enabled:
-                return
+            nonlocal inventory_trace_log_path
+            if not debug_inventory_trace_enabled: return
             try:
                 if inventory_trace_log_path is None:
-                    # Attempt to get path only once per call
                     inventory_trace_log_path = self._orchestrator_get_debug_log_path(".DEBUG_INVENTORY_TRACE")
-
                 if inventory_trace_log_path:
                     ts = datetime.now(timezone.utc).isoformat()
                     log_line = f"[{ts}] [{session_id}] {message}\n"
-                    # Open in append mode, create if not exists
-                    with open(inventory_trace_log_path, "a", encoding="utf-8") as f:
-                        f.write(log_line)
+                    with open(inventory_trace_log_path, "a", encoding="utf-8") as f: f.write(log_line)
                 else:
-                    # Log error once if path couldn't be determined
-                    if inventory_trace_log_path is not False: # Check if we haven't already failed
+                    if inventory_trace_log_path is not False:
                         func_logger.error(f"[{session_id}] Inventory Trace: Cannot log, failed to determine debug path.")
-                        inventory_trace_log_path = False # Mark as failed to avoid repeated errors
+                        inventory_trace_log_path = False
             except Exception as e_log:
-                 # Log error once if writing fails
                  if inventory_trace_log_path is not False:
                     func_logger.error(f"[{session_id}] Inventory Trace: Error writing to log file '{inventory_trace_log_path}': {e_log}", exc_info=False)
-                    inventory_trace_log_path = False # Mark as failed
+                    inventory_trace_log_path = False
 
         _log_inventory_trace("--- START _prepare_and_refine_background (Bypass Logic Active) ---")
 
         await self._emit_status(event_emitter, session_id, "Status: Preparing context...")
         base_system_prompt_text = "You are helpful."; extracted_owi_context = None; initial_owi_context_tokens = -1; current_output_messages = body.get("messages", [])
 
-        # --- 1. Process System Prompt & Handle Base Text Removal ---
         _log_inventory_trace("Step 1: Processing system prompt...")
         if self._process_system_prompt_func:
              try: base_system_prompt_text, extracted_owi_context = self._process_system_prompt_func(current_output_messages)
@@ -595,99 +598,76 @@ class SessionPipeOrchestrator:
         elif not extracted_owi_context: func_logger.debug(f"[{session_id}] No OWI <context> tag found.")
         _log_inventory_trace(f"Extracted OWI Context Length: {len(extracted_owi_context) if extracted_owi_context else 0}, Tokens: {initial_owi_context_tokens}")
 
-
         if not base_system_prompt_text: base_system_prompt_text = "You are helpful."; func_logger.warning(f"[{session_id}] System prompt empty after clean. Using default.")
 
         session_text_block_to_remove = getattr(user_valves, 'text_block_to_remove', '') if user_valves else ''
         if session_text_block_to_remove:
-            # func_logger.info(f"[{session_id}] Attempting removal of text block from base system prompt...")
             original_len = len(base_system_prompt_text); temp_prompt = base_system_prompt_text.replace(session_text_block_to_remove, "")
-            if len(temp_prompt) < original_len: base_system_prompt_text = temp_prompt; _log_inventory_trace(f"Removed text block from system prompt ({original_len - len(temp_prompt)} chars).") # func_logger.info(f"[{session_id}] Removed text block ({original_len - len(temp_prompt)} chars).")
-            else: _log_inventory_trace(f"Text block for removal NOT FOUND: '{session_text_block_to_remove[:50]}...'") # func_logger.warning(f"[{session_id}] Text block for removal '{session_text_block_to_remove[:50]}...' NOT FOUND.")
-        # else: func_logger.debug(f"[{session_id}] No text block for removal specified.")
+            if len(temp_prompt) < original_len: base_system_prompt_text = temp_prompt; _log_inventory_trace(f"Removed text block from system prompt ({original_len - len(temp_prompt)} chars).")
+            else: _log_inventory_trace(f"Text block for removal NOT FOUND: '{session_text_block_to_remove[:50]}...'")
 
         session_process_owi_rag = bool(getattr(user_valves, 'process_owi_rag', True))
         if not session_process_owi_rag:
-            _log_inventory_trace("Session valve 'process_owi_rag=False'. Discarding OWI context.") # func_logger.info(f"[{session_id}] Session valve 'process_owi_rag=False'. Discarding OWI context.");
+            _log_inventory_trace("Session valve 'process_owi_rag=False'. Discarding OWI context.")
             extracted_owi_context = None; initial_owi_context_tokens = 0
 
-        # --- 2. Fetch and Format Inventory Data ---
         _log_inventory_trace("Step 2: Fetching and formatting inventory...")
         formatted_inventory_string = "[Inventory Management Disabled]"; raw_session_inventories = {}; inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
         if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._get_all_inventories_db_func and self._format_inventory_func and self.sqlite_cursor:
-            # func_logger.debug(f"[{session_id}] Inventory enabled, fetching data...")
             _log_inventory_trace("Inventory enabled, fetching data...")
             try:
                 raw_session_inventories = await self._get_all_inventories_db_func(self.sqlite_cursor, session_id)
                 if raw_session_inventories:
-                    # func_logger.info(f"[{session_id}] Retrieved inventory data for {len(raw_session_inventories)} characters.")
                     _log_inventory_trace(f"Retrieved inventory data for {len(raw_session_inventories)} characters.")
                     try:
                         formatted_inventory_string = self._format_inventory_func(raw_session_inventories);
                         _log_inventory_trace(f"Formatted inventory string generated (len: {len(formatted_inventory_string)}). Content:\n------\n{formatted_inventory_string}\n------")
-                        # func_logger.info(f"[{session_id}] Formatted inventory string generated (len: {len(formatted_inventory_string)}).")
                     except Exception as e_fmt_inv:
                         func_logger.error(f"[{session_id}] Failed to format inventory string: {e_fmt_inv}", exc_info=True);
                         formatted_inventory_string = "[Error Formatting Inventory]"
                         _log_inventory_trace(f"ERROR formatting inventory string: {e_fmt_inv}")
                 else:
                     _log_inventory_trace("No inventory data found in DB for this session.")
-                    # func_logger.info(f"[{session_id}] No inventory data found in DB for this session.");
                     formatted_inventory_string = "[No Inventory Data Available]"
             except Exception as e_get_inv:
                 func_logger.error(f"[{session_id}] Error retrieving inventory data from DB: {e_get_inv}", exc_info=True);
                 formatted_inventory_string = "[Error Retrieving Inventory]"
                 _log_inventory_trace(f"ERROR retrieving inventory data from DB: {e_get_inv}")
-        elif not inventory_enabled:
-            _log_inventory_trace("Skipping inventory fetch: Feature disabled by global valve.")
-            # func_logger.debug(f"[{session_id}] Skipping inventory fetch: Feature disabled by global valve.")
-        elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE:
-            _log_inventory_trace("Skipping inventory fetch: Module unavailable (Import failed).")
-            # func_logger.warning(f"[{session_id}] Skipping inventory fetch: Module unavailable (Import failed).")
+        elif not inventory_enabled: _log_inventory_trace("Skipping inventory fetch: Feature disabled by global valve.")
+        elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE: _log_inventory_trace("Skipping inventory fetch: Module unavailable (Import failed).")
         else:
              missing_inv_funcs = [f for f, fn in {"db_get": self._get_all_inventories_db_func, "formatter": self._format_inventory_func, "cursor": self.sqlite_cursor}.items() if not fn];
              _log_inventory_trace(f"Skipping inventory fetch: Missing prerequisites: {missing_inv_funcs}")
-             # func_logger.warning(f"[{session_id}] Skipping inventory fetch: Missing prerequisites: {missing_inv_funcs}")
              formatted_inventory_string = "[Inventory Init/Config Error]"
 
-        # --- 3. Context Refinement Logic (RAG Cache or Stateless) ---
         _log_inventory_trace("Step 3: Context Refinement Logic...")
         context_for_prompt = extracted_owi_context; refined_context_tokens = -1; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; updated_cache_text_intermediate = "[Cache not initialized or updated]"
         enable_rag_cache_global = getattr(self.config, 'enable_rag_cache', False); enable_stateless_refin_global = getattr(self.config, 'enable_stateless_refinement', False)
         _log_inventory_trace(f"RAG Cache Enabled: {enable_rag_cache_global}, Stateless Refinement Enabled: {enable_stateless_refin_global}")
 
-
         if enable_rag_cache_global and self._cache_update_func and self._cache_select_func and self._get_rag_cache_db_func and self.sqlite_cursor:
-            # --- RAG Cache Path ---
             _log_inventory_trace("RAG Cache Path Selected.")
-            # func_logger.info(f"[{session_id}] RAG Cache Feature ENABLED.")
             run_step1 = False; previous_cache_text = "";
             try: cache_result = await self._get_rag_cache_db_func(self.sqlite_cursor, session_id); previous_cache_text = cache_result if cache_result is not None else ""
             except Exception as e_get_cache: func_logger.error(f"[{session_id}] Error retrieving previous cache: {e_get_cache}", exc_info=True)
             _log_inventory_trace(f"Previous cache length: {len(previous_cache_text)}")
 
-
             if not session_process_owi_rag:
                 _log_inventory_trace("Skipping RAG Cache Step 1 (session valve 'process_owi_rag=False').")
-                # func_logger.info(f"[{session_id}] Skipping RAG Cache Step 1 (session valve 'process_owi_rag=False').");
                 cache_update_skipped = True; run_step1 = False; updated_cache_text_intermediate = previous_cache_text
             else:
                  skip_len = False; skip_sim = False; owi_content_for_check = extracted_owi_context or ""; len_thresh = getattr(self.config, 'CACHE_UPDATE_SKIP_OWI_THRESHOLD', 50)
-                 if len(owi_content_for_check.strip()) < len_thresh:
-                     skip_len = True; _log_inventory_trace(f"Cache S1 Skip: OWI len ({len(owi_content_for_check.strip())}) < {len_thresh}.") # func_logger.info(f"[{session_id}] Cache S1 Skip: OWI len < {len_thresh}.")
+                 if len(owi_content_for_check.strip()) < len_thresh: skip_len = True; _log_inventory_trace(f"Cache S1 Skip: OWI len ({len(owi_content_for_check.strip())}) < {len_thresh}.")
                  elif self._calculate_similarity_func and previous_cache_text:
                       sim_thresh = getattr(self.config, 'CACHE_UPDATE_SIMILARITY_THRESHOLD', 0.9)
                       try: sim_score = self._calculate_similarity_func(owi_content_for_check, previous_cache_text)
                       except Exception as e_sim: func_logger.error(f"[{session_id}] Error calculating similarity: {e_sim}")
                       else:
-                          if sim_score > sim_thresh:
-                              skip_sim = True; _log_inventory_trace(f"Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.") # func_logger.info(f"[{session_id}] Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.")
+                          if sim_score > sim_thresh: skip_sim = True; _log_inventory_trace(f"Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.")
                  cache_update_skipped = skip_len or skip_sim; run_step1 = not cache_update_skipped
                  if cache_update_skipped:
                      await self._emit_status(event_emitter, session_id, "Status: Skipping cache update (redundant OWI).");
-                     updated_cache_text_intermediate = previous_cache_text
-                     _log_inventory_trace("Cache Step 1 SKIPPED.")
-
+                     updated_cache_text_intermediate = previous_cache_text; _log_inventory_trace("Cache Step 1 SKIPPED.")
 
             cache_update_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'cache_update_prompt_template', DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT),}
             final_select_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'final_context_selection_prompt_template', DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT),}
@@ -696,40 +676,30 @@ class SessionPipeOrchestrator:
 
             if not (configs_ok_step1 and configs_ok_step2):
                  _log_inventory_trace("ERROR: RAG Cache Refiner config incomplete. Cannot proceed.")
-                 # func_logger.error(f"[{session_id}] Cannot proceed with RAG Cache: Refiner config missing.");
                  await self._emit_status(event_emitter, session_id, "ERROR: RAG Cache Refiner config incomplete.", done=False);
                  updated_cache_text_intermediate = previous_cache_text; run_step1 = False
             else:
-                 # --- Execute Step 1 (Cache Update) if needed ---
                  if run_step1:
                       await self._emit_status(event_emitter, session_id, "Status: Updating background cache...");
-                      # func_logger.info(f"[{session_id}] Executing RAG Cache Step 1 (Update)...")
                       _log_inventory_trace("Executing RAG Cache Step 1 (Update)...")
                       try:
                           updated_cache_text_intermediate = await self._cache_update_func( session_id=session_id, current_owi_context=extracted_owi_context, history_messages=current_active_history, latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper, sqlite_cursor=self.sqlite_cursor, cache_update_llm_config=cache_update_llm_config, history_count=getattr(self.config, 'refiner_history_count', 6), dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CacheUpdate_{session_id}",)
                           cache_update_performed = True;
                           _log_inventory_trace(f"RAG Cache Step 1 (Update) completed. Updated cache length: {len(updated_cache_text_intermediate)}")
-                          # func_logger.info(f"[{session_id}] RAG Cache Step 1 (Update) completed.")
                       except Exception as e_cache_update:
                            func_logger.error(f"[{session_id}] EXCEPTION during RAG Cache Step 1 (Update): {e_cache_update}", exc_info=True);
                            updated_cache_text_intermediate = previous_cache_text
                            _log_inventory_trace(f"EXCEPTION during RAG Cache Step 1: {e_cache_update}")
 
-
-                 # --- Prepare Input for Step 2 (Selection), Injecting Inventory ---
-                 # Inventory is NO LONGER injected here for Step 2 with the bypass logic
                  await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context...")
-
                  base_owi_context_for_selection = extracted_owi_context or ""
-                 # --- Execute Step 2 (Context Selection) ---
-                 # func_logger.info(f"[{session_id}] Executing RAG Cache Step 2 (Select) with OWI only (Inventory bypassed)...")
                  _log_inventory_trace("Executing RAG Cache Step 2 (Select) with OWI only (Inventory bypassed)...")
                  _log_inventory_trace(f"Step 2 Input Cache Length: {len(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else '')}")
                  _log_inventory_trace(f"Step 2 Input OWI Length: {len(base_owi_context_for_selection)}")
 
                  final_selected_context = await self._cache_select_func(
                      updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""),
-                     current_owi_context=base_owi_context_for_selection, # Pass OWI context only
+                     current_owi_context=base_owi_context_for_selection,
                      history_messages=current_active_history,
                      latest_user_query=latest_user_query_str,
                      llm_call_func=self._async_llm_call_wrapper,
@@ -742,103 +712,64 @@ class SessionPipeOrchestrator:
                  context_for_prompt = final_selected_context
                  log_step1_status = "Performed" if cache_update_performed else ("Skipped" if cache_update_skipped else "Not Run")
                  _log_inventory_trace(f"RAG Cache Step 2 complete. Selected context length: {len(context_for_prompt)}. Step 1: {log_step1_status}\n------\n{context_for_prompt}\n------")
-                 # func_logger.info(f"[{session_id}] RAG Cache Step 2 complete. Selected context len: {len(context_for_prompt)}. Step 1: {log_step1_status}")
                  await self._emit_status(event_emitter, session_id, "Status: Context selection complete.", done=False)
 
         elif enable_stateless_refin_global and self._stateless_refine_func:
-            # --- Stateless Refinement Path ---
             _log_inventory_trace("Stateless Refinement Path Selected.")
-            # func_logger.info(f"[{session_id}] Stateless Refinement ENABLED.")
             await self._emit_status(event_emitter, session_id, "Status: Refining OWI context (stateless)...")
-            if not extracted_owi_context:
-                _log_inventory_trace("Skipping stateless refinement: No OWI context.")
-                # func_logger.debug(f"[{session_id}] Skipping stateless refinement: No OWI context.")
-            elif not latest_user_query_str:
-                _log_inventory_trace("Skipping stateless refinement: Query empty.")
-                # func_logger.warning(f"[{session_id}] Skipping stateless refinement: Query empty.")
+            if not extracted_owi_context: _log_inventory_trace("Skipping stateless refinement: No OWI context.")
+            elif not latest_user_query_str: _log_inventory_trace("Skipping stateless refinement: Query empty.")
             else:
                  stateless_refiner_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": getattr(self.config, 'stateless_refiner_prompt_template', None),}
                  if not stateless_refiner_config["url"] or not stateless_refiner_config["key"]:
                      _log_inventory_trace("Skipping stateless refinement: Refiner URL/Key missing.")
-                     # func_logger.error(f"[{session_id}] Skipping stateless refinement: Refiner URL/Key missing.");
                      await self._emit_status(event_emitter, session_id, "ERROR: Stateless Refiner config incomplete.", done=False)
                  else:
                       try:
                           refined_stateless_context = await self._stateless_refine_func( external_context=extracted_owi_context, history_messages=current_active_history, latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper, refiner_llm_config=stateless_refiner_config, skip_threshold=getattr(self.config, 'stateless_refiner_skip_threshold', 500), history_count=getattr(self.config, 'refiner_history_count', 6), dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_StatelessRef_{session_id}",)
                           if refined_stateless_context != extracted_owi_context:
-                              context_for_prompt = refined_stateless_context;
-                              stateless_refinement_performed = True;
+                              context_for_prompt = refined_stateless_context; stateless_refinement_performed = True;
                               _log_inventory_trace(f"Stateless refinement successful. Refined length: {len(context_for_prompt)}.")
-                              # func_logger.info(f"[{session_id}] Stateless refinement successful (Length: {len(context_for_prompt)}).");
                               await self._emit_status(event_emitter, session_id, "Status: OWI context refined (stateless).", done=False)
-                          else:
-                              _log_inventory_trace("Stateless refinement resulted in no change or was skipped by length.")
-                              # func_logger.info(f"[{session_id}] Stateless refinement resulted in no change or was skipped by length.")
+                          else: _log_inventory_trace("Stateless refinement resulted in no change or was skipped by length.")
                       except Exception as e_refine_stateless:
                            func_logger.error(f"[{session_id}] EXCEPTION during stateless refinement: {e_refine_stateless}", exc_info=True)
                            _log_inventory_trace(f"EXCEPTION during stateless refinement: {e_refine_stateless}")
-
         else:
-            # --- No Refinement Path ---
             _log_inventory_trace("No context refinement feature (RAG Cache or Stateless) is enabled.")
-            # func_logger.debug(f"[{session_id}] No context refinement feature (RAG Cache or Stateless) is enabled.")
-            # context_for_prompt remains the initially extracted_owi_context
 
-        # --- 4. Calculate Refined Context Tokens ---
         _log_inventory_trace("Step 4: Calculating refined context tokens...")
         if self._count_tokens_func and self._tokenizer:
             try: token_source = context_for_prompt; refined_context_tokens = self._count_tokens_func(token_source, self._tokenizer) if token_source and isinstance(token_source, str) else 0
             except Exception as e_tok_ref: refined_context_tokens = -1; func_logger.error(f"[{session_id}] Error calculating refined tokens: {e_tok_ref}")
         else: refined_context_tokens = -1
         _log_inventory_trace(f"Final context_for_prompt tokens: {refined_context_tokens}")
-        # func_logger.debug(f"[{session_id}] Final selected context tokens ('context_for_prompt' source): {refined_context_tokens}")
 
-        # --- 5. Combine Final Background Context ---
         _log_inventory_trace("Step 5: Combining final background context...")
         combined_context_string = "[No background context generated]"
         if self._combine_context_func:
             try:
-                # <<< MODIFICATION START: Always determine if inventory is valid and pass it >>>
                 inventory_to_pass_to_combiner = None
-                is_valid_inventory_for_combine = (
-                    inventory_enabled and
-                    _ORCH_INVENTORY_MODULE_AVAILABLE and
-                    formatted_inventory_string and
-                    isinstance(formatted_inventory_string, str) and
-                    "[Error" not in formatted_inventory_string and
-                    "[Disabled]" not in formatted_inventory_string and
-                    "[No Inventory Data Available]" not in formatted_inventory_string and
-                    "[Inventory Init/Config Error]" not in formatted_inventory_string
-                )
+                is_valid_inventory_for_combine = ( inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and formatted_inventory_string and isinstance(formatted_inventory_string, str) and "[Error" not in formatted_inventory_string and "[Disabled]" not in formatted_inventory_string and "[No Inventory Data Available]" not in formatted_inventory_string and "[Inventory Init/Config Error]" not in formatted_inventory_string )
                 if is_valid_inventory_for_combine:
                     inventory_to_pass_to_combiner = formatted_inventory_string
                     _log_inventory_trace("Inventory is valid, preparing to pass to combiner.")
-                else:
-                     _log_inventory_trace("Inventory is invalid or unavailable, not passing to combiner.")
-                # <<< MODIFICATION END >>>
+                else: _log_inventory_trace("Inventory is invalid or unavailable, not passing to combiner.")
 
                 _log_inventory_trace(f"Combiner Input - final_selected_context Length: {len(context_for_prompt if isinstance(context_for_prompt, str) else '')}")
                 _log_inventory_trace(f"Combiner Input - inventory_context Length: {len(inventory_to_pass_to_combiner if inventory_to_pass_to_combiner else '')}")
 
-                # <<< Retrieve World State for Combiner (Assume fetched earlier in process_turn) >>>
-                # Note: This assumes current_day, etc. are available in the orchestrator's scope
-                # We will pass them from the main process_turn method later.
-                # For now, we just prepare the call signature.
-                # The actual values will be fetched in process_turn before this helper is called.
-
-                # --- MODIFIED CALL to pass world state ---
+                # Pass world state attributes stored on 'self'
                 combined_context_string = self._combine_context_func(
                     final_selected_context=(context_for_prompt if isinstance(context_for_prompt, str) else None),
                     t1_summaries=retrieved_t1_summaries,
                     t2_rag_results=retrieved_rag_summaries,
-                    inventory_context=inventory_to_pass_to_combiner, # Pass if valid, otherwise None
-                    # Assuming these variables are available in the orchestrator's scope where this helper is called:
-                    current_day=getattr(self, 'current_day', None),
-                    current_time_of_day=getattr(self, 'current_time_of_day', None),
-                    current_season=getattr(self, 'current_season', None),
-                    current_weather=getattr(self, 'current_weather', None)
+                    inventory_context=inventory_to_pass_to_combiner,
+                    current_day=self.current_day,
+                    current_time_of_day=self.current_time_of_day,
+                    current_season=self.current_season,
+                    current_weather=self.current_weather
                 )
-                # --- END MODIFIED CALL ---
                 _log_inventory_trace(f"Combiner Output Length: {len(combined_context_string)}\n------\n{combined_context_string}\n------")
             except Exception as e_combine:
                 func_logger.error(f"[{session_id}] Error combining context: {e_combine}", exc_info=True);
@@ -847,22 +778,9 @@ class SessionPipeOrchestrator:
         else:
             func_logger.error(f"[{session_id}] Cannot combine context: Function unavailable.")
             _log_inventory_trace("ERROR: combine_context function unavailable.")
-        # func_logger.debug(f"[{session_id}] Final combined background context length: {len(combined_context_string)}.")
         _log_inventory_trace("--- END _prepare_and_refine_background ---")
 
-
-        # Return the formatted inventory string separately for status logging purposes
-        return (
-            combined_context_string,
-            base_system_prompt_text,
-            initial_owi_context_tokens,
-            refined_context_tokens, # This now reflects the output of the selection/refinement process
-            cache_update_performed,
-            cache_update_skipped,
-            final_context_selection_performed, # Indicates if Step 2 ran
-            stateless_refinement_performed,
-            formatted_inventory_string # Still return the raw formatted string for status logging
-        )
+        return ( combined_context_string, base_system_prompt_text, initial_owi_context_tokens, refined_context_tokens, cache_update_performed, cache_update_skipped, final_context_selection_performed, stateless_refinement_performed, formatted_inventory_string )
 
 
     async def _select_t0_history_slice(self, session_id: str, history_for_processing: List[Dict]) -> Tuple[List[Dict], int]:
@@ -918,7 +836,6 @@ class SessionPipeOrchestrator:
         return status_message, final_payload_tokens
 
 
-    # --- MODIFIED Helper: Execute/Prepare Output (Non-Streaming) ---
     async def _execute_or_prepare_output(
         self, session_id: str, body: Dict, final_llm_payload_contents: Optional[List[Dict]],
         event_emitter: Optional[Callable], status_message: str, final_payload_tokens: int
@@ -932,27 +849,20 @@ class SessionPipeOrchestrator:
         if not final_llm_payload_contents:
             self.logger.error(f"[{session_id}] Final payload construction failed.");
             await self._emit_status(event_emitter, session_id, "ERROR: Final payload preparation failed.", done=True);
-            # Return error dict directly
             return {"error": "Orchestrator: Final payload construction failed.", "status_code": 500}
 
-        # Prepare the payload dictionary structure (used for logging and potentially returning)
-        output_body["messages"] = final_llm_payload_contents # This uses Google 'contents' format
+        output_body["messages"] = final_llm_payload_contents
         preserved_keys = ["model", "stream", "options", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty", "presence_penalty", "stop"];
         keys_preserved = [k for k in preserved_keys if k in body];
-        # Note: 'stream' might be preserved but won't be used for the call anymore
-        for k in keys_preserved:
-            output_body[k] = body[k]
+        for k in keys_preserved: output_body[k] = body[k]
         self.logger.info(f"[{session_id}] Output body constructed/updated. Preserved keys: {keys_preserved}.")
 
-        # Log the constructed payload HERE before deciding whether to call or return.
         if getattr(self.config, 'debug_log_final_payload', False):
             self.logger.info(f"[{session_id}] Logging final constructed payload dict due to debug valve.")
-            # Log the version that includes the messages/contents
             self._orchestrator_log_debug_payload(session_id, {"contents": final_llm_payload_contents})
         else:
             self.logger.debug(f"[{session_id}] Skipping final payload log: Debug valve is OFF.")
 
-        # Check if final LLM call is enabled
         final_url = getattr(self.config, 'final_llm_api_url', None)
         final_key = getattr(self.config, 'final_llm_api_key', None)
         url_present = bool(final_url and isinstance(final_url, str) and final_url.strip())
@@ -961,85 +871,67 @@ class SessionPipeOrchestrator:
         final_llm_triggered = url_present and key_present
 
         if final_llm_triggered:
-            # --- Execute Final LLM Call (Non-Streaming) ---
             self.logger.info(f"[{session_id}] Final LLM Call via Pipe TRIGGERED (Non-Streaming, using LiteLLM Adapter).")
             await self._emit_status(event_emitter, session_id, "Status: Executing final LLM Call...", done=False)
             final_temp = getattr(self.config, 'final_llm_temperature', 0.7);
             final_timeout = getattr(self.config, 'final_llm_timeout', 120);
-            # The wrapper expects the Google format payload dict
             final_call_payload_google_fmt = {"contents": final_llm_payload_contents}
 
             success, response_or_error = await self._async_llm_call_wrapper(
-                api_url=final_url,
-                api_key=final_key,
-                payload=final_call_payload_google_fmt, # Pass Google format
-                temperature=final_temp,
-                timeout=final_timeout,
-                caller_info=f"Orch_FinalLLM_{session_id}"
+                api_url=final_url, api_key=final_key, payload=final_call_payload_google_fmt,
+                temperature=final_temp, timeout=final_timeout, caller_info=f"Orch_FinalLLM_{session_id}"
             )
             intermediate_status = "Status: Final LLM Complete" + (" (Success)" if success else " (Failed)")
-            await self._emit_status(event_emitter, session_id, intermediate_status, done=False) # Not done=True, inventory follows
+            await self._emit_status(event_emitter, session_id, intermediate_status, done=False)
 
             if success and isinstance(response_or_error, str):
                 self.logger.info(f"[{session_id}] Final LLM call successful. Returning response string.")
-                return response_or_error # Return the string content
+                return response_or_error
             elif not success and isinstance(response_or_error, dict):
                 self.logger.error(f"[{session_id}] Final LLM call failed. Returning error dict: {response_or_error}")
-                return response_or_error # Return the error dict
+                return response_or_error
             else:
-                # Should not happen if adapter works correctly
                 self.logger.error(f"[{session_id}] Final LLM adapter returned unexpected format. Success={success}, Type={type(response_or_error)}")
                 return {"error": "Final LLM adapter returned unexpected result format.", "status_code": 500}
         else:
-            # --- Final LLM Call Disabled ---
             self.logger.info(f"[{session_id}] Final LLM Call disabled by config. Returning constructed payload dict.")
-            # Payload logging already happened above
-            # Return the payload dict as confirmed
-            return {"messages": final_llm_payload_contents} # Use 'messages' key consistent with OWI expectations
+            return {"messages": final_llm_payload_contents}
 
 
-    # ==========================================================================
-    # === Main Process Turn Method (MODIFIED for World State & Event Hints)    ===
-    # ==========================================================================
     async def process_turn(
         self,
         session_id: str,
         user_id: str,
         body: Dict,
-        user_valves: Any, # Receives the parsed object from Pipe.pipe
+        user_valves: Any,
         event_emitter: Optional[Callable],
         embedding_func: Optional[Callable] = None,
         chroma_embed_wrapper: Optional[Any] = None,
         is_regeneration_heuristic: bool = False
-    ) -> OrchestratorResult: # Return type updated
+    ) -> OrchestratorResult:
         """ Processes a single turn by calling helper methods in sequence. """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
 
-        # Update logger/path getter refs from Pipe if they were updated
         self.pipe_logger = getattr(self, 'pipe_logger', self.logger)
         self.pipe_debug_path_getter = getattr(self, 'pipe_debug_path_getter', None)
 
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
-        event_hints_enabled = getattr(self.config, 'enable_event_hints', False) # Check event hint valve
+        event_hints_enabled = getattr(self.config, 'enable_event_hints', False)
 
         self.logger.info(f"[{session_id}] Inventory Management Enabled (Global Valve): {inventory_enabled}")
-        self.logger.info(f"[{session_id}] Event Hints Enabled (Global Valve): {event_hints_enabled}") # Log event hint status
+        self.logger.info(f"[{session_id}] Event Hints Enabled (Global Valve): {event_hints_enabled}")
         self.logger.info(f"[{session_id}] Inventory Module Available (Local Import Check): {_ORCH_INVENTORY_MODULE_AVAILABLE}")
-        self.logger.info(f"[{session_id}] World State Parser Available (Local Import Check): {_WORLD_STATE_PARSER_AVAILABLE}") # <<< Log parser status
+        self.logger.info(f"[{session_id}] World State Parser Available (Local Import Check): {_WORLD_STATE_PARSER_AVAILABLE}")
 
-        # Initialize variables
         summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False
-        generated_event_hint: Optional[str] = None # Variable for the generated hint
-        # --- World state variables (default values for current turn) ---
-        # <<< Store world state on self for access in helper methods >>>
+        generated_event_hint: Optional[str] = None
         self.current_season: Optional[str] = "Unknown"
         self.current_weather: Optional[str] = "Unknown"
         self.current_day: Optional[int] = 1
         self.current_time_of_day: Optional[str] = "Unknown"
 
         try:
-            # 1. History Sync
             await self._emit_status(event_emitter, session_id, "Status: Orchestrator syncing history...")
             incoming_messages = body.get("messages", [])
             stored_history = self.session_manager.get_active_history(session_id) or []
@@ -1048,99 +940,55 @@ class SessionPipeOrchestrator:
             current_active_history = self.session_manager.get_active_history(session_id) or []
             if not current_active_history: raise ValueError("Active history is empty after sync.")
 
-
-            # 2. Determine Query
             latest_user_query_str, history_for_processing = await self._determine_effective_query( session_id, current_active_history, is_regeneration_heuristic )
             if not latest_user_query_str and not is_regeneration_heuristic: raise ValueError("Cannot proceed without an effective user query (and not regeneration).")
 
-
-            # 3. Tier 1 Summarization
             (summarization_performed, new_t1_summary_text, summarization_prompt_tokens, summarization_output_tokens) = await self._handle_tier1_summarization( session_id, user_id, current_active_history, is_regeneration_heuristic, event_emitter )
 
-
-            # 4. Tier 1 -> T2 Transition
             await self._handle_tier2_transition( session_id, summarization_performed, chroma_embed_wrapper, event_emitter )
 
-
-            # 5. Get Context Sources
             recent_t1_summaries, t1_retrieved_count = await self._get_t1_summaries(session_id)
             retrieved_rag_summaries, t2_retrieved_count = await self._get_t2_rag_results( session_id, history_for_processing, latest_user_query_str, embedding_func, chroma_embed_wrapper, event_emitter )
 
-
-            # --- 5.5 Get World State (or Initialize) --- <<< MODIFIED STEP >>>
             await self._emit_status(event_emitter, session_id, "Status: Fetching world state...")
             world_state_db_data = None
-            default_season = "Summer"
-            default_weather = "Clear"
-            default_day = 1
-            default_time = "Morning"
-            # Assign defaults initially to self attributes
-            self.current_season = default_season
-            self.current_weather = default_weather
-            self.current_day = default_day
-            self.current_time_of_day = default_time
+            default_season = "Summer"; default_weather = "Clear"; default_day = 1; default_time = "Morning"
+            self.current_season = default_season; self.current_weather = default_weather; self.current_day = default_day; self.current_time_of_day = default_time
 
             if self.sqlite_cursor and self._get_world_state_db_func and self._set_world_state_db_func:
                 try:
                     world_state_db_data = await self._get_world_state_db_func(self.sqlite_cursor, session_id)
                     if world_state_db_data and isinstance(world_state_db_data, dict):
-                        # Overwrite defaults with values from DB if they exist
                         self.current_season = world_state_db_data.get("season") or default_season
                         self.current_weather = world_state_db_data.get("weather") or default_weather
                         self.current_day = world_state_db_data.get("day") or default_day
                         self.current_time_of_day = world_state_db_data.get("time_of_day") or default_time
                         self.logger.info(f"[{session_id}] Successfully fetched world state: Season='{self.current_season}', Weather='{self.current_weather}', Day='{self.current_day}', Time='{self.current_time_of_day}'")
                     else:
-                        # Initialize if no row found
                         self.logger.info(f"[{session_id}] No world state found. Initializing with defaults.")
-                        set_success = await self._set_world_state_db_func(
-                            self.sqlite_cursor, session_id,
-                            self.current_season, self.current_weather, self.current_day, self.current_time_of_day
-                        )
-                        if set_success:
-                            self.logger.info(f"[{session_id}] Successfully initialized and saved default world state.")
-                        else:
-                            self.logger.error(f"[{session_id}] Failed to initialize/save world state in DB.")
-                            # Keep defaults but log error
+                        set_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, self.current_season, self.current_weather, self.current_day, self.current_time_of_day )
+                        if set_success: self.logger.info(f"[{session_id}] Successfully initialized and saved default world state.")
+                        else: self.logger.error(f"[{session_id}] Failed to initialize/save world state in DB.")
                 except Exception as e_world_state:
                     self.logger.error(f"[{session_id}] Error fetching/setting world state: {e_world_state}", exc_info=True)
-                    # Use defaults on error, add indicator
-                    self.current_season = "Unknown (Error)"
-                    self.current_weather = "Unknown (Error)"
-                    self.current_day = 1
-                    self.current_time_of_day = "Unknown (Error)"
+                    self.current_season = "Unknown (Error)"; self.current_weather = "Unknown (Error)"; self.current_day = 1; self.current_time_of_day = "Unknown (Error)"
             else:
                 missing_world_funcs = [f for f, fn in {"cursor": self.sqlite_cursor, "getter": self._get_world_state_db_func, "setter": self._set_world_state_db_func}.items() if not fn]
                 self.logger.error(f"[{session_id}] Cannot fetch/set world state: Missing prerequisites: {missing_world_funcs}. Using defaults.")
 
-
-            # 6. Prepare & Refine Background
-            # This helper function now implicitly uses self.current_day etc. via the modified call signature
             (combined_context_string, base_system_prompt_text, initial_owi_context_tokens, refined_context_tokens, cache_update_performed, cache_update_skipped, final_context_selection_performed, stateless_refinement_performed, formatted_inventory_string_for_status ) = await self._prepare_and_refine_background( session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries, current_active_history, latest_user_query_str, event_emitter )
 
-
-            # 7. Select T0 History
             t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
 
-
-            # 7.5. Generate Event Hint (If Enabled) - <<< MODIFIED TO PASS FULL WORLD STATE >>>
             if event_hints_enabled:
-                # <<< ADDED IMPORT DEBUG LOG >>>
                 self.logger.info(f"[{session_id}] Attempting event hint generation. Import Success: {_event_hints_import_success}, Import Path: '{_event_hints_import_path}'")
-                # <<< END ADDED IMPORT DEBUG LOG >>>
                 self.logger.info(f"[{session_id}] Event Hints feature enabled. Attempting generation...")
                 await self._emit_status(event_emitter, session_id, "Status: Checking for dynamic event hints...")
                 try:
                     generated_event_hint = await generate_event_hint(
-                        config=self.config,
-                        history_messages=current_active_history,
-                        background_context=combined_context_string,
-                        current_season=self.current_season,         # Pass fetched/default state from self
-                        current_weather=self.current_weather,       # Pass fetched/default state from self
-                        current_time_of_day=self.current_time_of_day, # Pass fetched/default state from self
-                        llm_call_func=self._async_llm_call_wrapper,
-                        logger_instance=self.logger,
-                        session_id=session_id
+                        config=self.config, history_messages=current_active_history, background_context=combined_context_string,
+                        current_season=self.current_season, current_weather=self.current_weather, current_time_of_day=self.current_time_of_day,
+                        llm_call_func=self._async_llm_call_wrapper, logger_instance=self.logger, session_id=session_id
                     )
                     if generated_event_hint:
                          self.logger.info(f"[{session_id}] Event Hint Generated: '{generated_event_hint[:80]}...'")
@@ -1148,26 +996,17 @@ class SessionPipeOrchestrator:
                     else:
                          self.logger.info(f"[{session_id}] No event hint suggested by Hint LLM.")
                          await self._emit_status(event_emitter, session_id, "Status: No event hint suggested.")
-
                 except Exception as e_hint_gen:
                     self.logger.error(f"[{session_id}] Error during event hint generation call: {e_hint_gen}", exc_info=True)
-                    generated_event_hint = None # Ensure it's None on error
+                    generated_event_hint = None
             else:
                 self.logger.debug(f"[{session_id}] Event Hints feature disabled. Skipping hint generation.")
 
-
-            # 8. Construct Payload
-            # NOTE: combine_background_context now handles world state, so no extra args needed here
             await self._emit_status(event_emitter, session_id, "Status: Constructing final request...")
             payload_dict_or_error = standalone_construct_payload(
-                system_prompt=base_system_prompt_text,
-                history=t0_raw_history_slice,
-                context=combined_context_string, # Already includes world state
-                query=latest_user_query_str,
-                long_term_goal=getattr(user_valves, 'long_term_goal', ''),
-                event_hint=generated_event_hint,
-                strategy="standard",
-                include_ack_turns=getattr(self.config, 'include_ack_turns', True),
+                system_prompt=base_system_prompt_text, history=t0_raw_history_slice, context=combined_context_string,
+                query=latest_user_query_str, long_term_goal=getattr(user_valves, 'long_term_goal', ''), event_hint=generated_event_hint,
+                strategy="standard", include_ack_turns=getattr(self.config, 'include_ack_turns', True),
             )
             if isinstance(payload_dict_or_error, dict) and "contents" in payload_dict_or_error:
                 final_llm_payload_contents = payload_dict_or_error["contents"]
@@ -1177,77 +1016,40 @@ class SessionPipeOrchestrator:
                 self.logger.error(f"[{session_id}] Standalone payload constructor failed: {error_msg}")
                 final_llm_payload_contents = None
 
-
-            # 9. Execute/Prepare Output (Non-Streaming)
             final_result = await self._execute_or_prepare_output(
-                 session_id=session_id,
-                 body=body,
-                 final_llm_payload_contents=final_llm_payload_contents,
-                 event_emitter=event_emitter,
-                 status_message="Status: Core processing complete.",
-                 final_payload_tokens=-1 # Token count calculated later
+                 session_id=session_id, body=body, final_llm_payload_contents=final_llm_payload_contents,
+                 event_emitter=event_emitter, status_message="Status: Core processing complete.", final_payload_tokens=-1
             )
 
-
-            # --- 9.5 Post-Response World State Analysis and Update <<< NEW STEP >>> ---
             if isinstance(final_result, str) and self._parse_world_state_func and self.sqlite_cursor and self._set_world_state_db_func:
                  self.logger.info(f"[{session_id}] Analyzing final response for world state changes...")
                  detected_changes = {}
-                 try:
-                     detected_changes = self._parse_world_state_func(final_result)
-                 except Exception as e_parse:
-                     self.logger.error(f"[{session_id}] Error calling world state parser: {e_parse}", exc_info=True)
-
+                 try: detected_changes = self._parse_world_state_func(final_result)
+                 except Exception as e_parse: self.logger.error(f"[{session_id}] Error calling world state parser: {e_parse}", exc_info=True)
                  if detected_changes:
-                     # Calculate new state based on current state (from self) and detected changes
                      new_day = self.current_day + detected_changes.get('day_increment', 0)
-                     new_time = detected_changes.get('time_of_day', self.current_time_of_day) # Use detected or keep current
+                     new_time = detected_changes.get('time_of_day', self.current_time_of_day)
                      new_weather = detected_changes.get('weather', self.current_weather)
                      new_season = detected_changes.get('season', self.current_season)
-
-                     # Check if anything actually changed
-                     state_changed = not (
-                         new_day == self.current_day and
-                         new_time == self.current_time_of_day and
-                         new_weather == self.current_weather and
-                         new_season == self.current_season
-                     )
-
+                     state_changed = not ( new_day == self.current_day and new_time == self.current_time_of_day and new_weather == self.current_weather and new_season == self.current_season )
                      if state_changed:
                          self.logger.info(f"[{session_id}] Attempting to save updated world state to DB: Day={new_day}, Time='{new_time}', Weather='{new_weather}', Season='{new_season}'")
                          await self._emit_status(event_emitter, session_id, "Status: Updating world state...", done=False)
                          try:
-                             update_success = await self._set_world_state_db_func(
-                                 self.sqlite_cursor, session_id,
-                                 new_season, new_weather, new_day, new_time
-                             )
+                             update_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, new_season, new_weather, new_day, new_time )
                              if update_success:
                                  self.logger.info(f"[{session_id}] World state successfully updated in DB.")
-                                 # Update self attributes for potential use later in this turn (e.g., status)
-                                 self.current_day = new_day
-                                 self.current_time_of_day = new_time
-                                 self.current_weather = new_weather
-                                 self.current_season = new_season
-                             else:
-                                 self.logger.error(f"[{session_id}] Failed to save updated world state to DB.")
-                         except Exception as e_set_world:
-                              self.logger.error(f"[{session_id}] Error saving updated world state: {e_set_world}", exc_info=True)
-                     else:
-                          self.logger.info(f"[{session_id}] Parser ran, but no net change detected in world state.")
-                 else:
-                     self.logger.info(f"[{session_id}] No world state changes detected by parser.")
+                                 self.current_day = new_day; self.current_time_of_day = new_time; self.current_weather = new_weather; self.current_season = new_season
+                             else: self.logger.error(f"[{session_id}] Failed to save updated world state to DB.")
+                         except Exception as e_set_world: self.logger.error(f"[{session_id}] Error saving updated world state: {e_set_world}", exc_info=True)
+                     else: self.logger.info(f"[{session_id}] Parser ran, but no net change detected in world state.")
+                 else: self.logger.info(f"[{session_id}] No world state changes detected by parser.")
+            elif not isinstance(final_result, str): self.logger.debug(f"[{session_id}] Skipping world state analysis: Final result was not a string (Error or Payload).")
+            elif not self._parse_world_state_func: self.logger.warning(f"[{session_id}] Skipping world state analysis: Parser function unavailable.")
 
-            elif not isinstance(final_result, str):
-                 self.logger.debug(f"[{session_id}] Skipping world state analysis: Final result was not a string (Error or Payload).")
-            elif not self._parse_world_state_func:
-                 self.logger.warning(f"[{session_id}] Skipping world state analysis: Parser function unavailable.")
-            # --- End Step 9.5 ---
-
-
-            # 10. Post-Turn Inventory Update
             if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._update_inventories_func:
                 inventory_update_completed = True
-                if isinstance(final_result, str): # Update only if final LLM call succeeded
+                if isinstance(final_result, str):
                     self.logger.info(f"[{session_id}] Performing post-turn inventory update...")
                     await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
                     try:
@@ -1266,18 +1068,15 @@ class SessionPipeOrchestrator:
                                  new_cursor = None
                                  try:
                                      new_cursor = self.sqlite_cursor.connection.cursor()
-                                     # Log inventory prompt using Pipe's helper (if available)
+                                     # --- MODIFIED CALL for Debug Logging ---
                                      if getattr(self.config, 'debug_log_final_payload', False):
-                                         # Check if pipe_logger has the method attached
-                                         if hasattr(self, 'pipe_logger') and callable(getattr(self.pipe_logger, '_log_debug_inventory_llm', None)):
-                                             self.logger.debug(f"[{session_id}] Calling Pipe's inventory logger for PROMPT.")
-                                             self.pipe_logger._log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
-                                         else:
-                                             self.logger.warning(f"[{session_id}] Cannot log inventory prompt: Pipe logger or method missing/misconfigured.")
+                                         self.logger.debug(f"[{session_id}] Calling Orch inventory logger for PROMPT.")
+                                         self._orchestrator_log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
+                                     # --- END MODIFIED CALL ---
 
                                      update_success = await self._update_inventories_func(
                                          cursor=new_cursor, session_id=session_id, main_llm_response=final_result, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str,
-                                         llm_call_func=self._async_llm_call_wrapper, # Uses litellm adapter now
+                                         llm_call_func=self._async_llm_call_wrapper,
                                          db_get_inventory_func=get_character_inventory_data,
                                          db_update_inventory_func=add_or_update_character_inventory,
                                          inventory_llm_config=inv_llm_config,
@@ -1291,29 +1090,13 @@ class SessionPipeOrchestrator:
                                           try: new_cursor.close(); self.logger.debug(f"[{session_id}] Inventory update cursor closed.")
                                           except Exception as e_close_cursor: self.logger.error(f"[{session_id}] Error closing inventory update cursor: {e_close_cursor}")
                     except Exception as e_inv_update_outer: self.logger.error(f"[{session_id}] Outer error during inventory update setup: {e_inv_update_outer}", exc_info=True); inventory_update_success_flag = False
+                elif isinstance(final_result, dict) and "error" in final_result: self.logger.warning(f"[{session_id}] Skipping inventory update due to upstream error: {final_result.get('error')}"); inventory_update_completed = False
+                elif isinstance(final_result, dict) and "messages" in final_result: self.logger.info(f"[{session_id}] Skipping inventory update: Final LLM call was disabled or skipped."); inventory_update_completed = False
+                else: self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update."); inventory_update_completed = False
+            elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE: self.logger.warning(f"[{session_id}] Skipping inventory update: Module import failed."); inventory_update_completed = False; inventory_update_success_flag = False;
+            elif inventory_enabled and not self._update_inventories_func: self.logger.error(f"[{session_id}] Skipping inventory update: Update function alias is None."); inventory_update_completed = False; inventory_update_success_flag = False;
+            else: self.logger.debug(f"[{session_id}] Skipping inventory update: Disabled by global valve."); inventory_update_completed = False; inventory_update_success_flag = False;
 
-                elif isinstance(final_result, dict) and "error" in final_result:
-                    self.logger.warning(f"[{session_id}] Skipping inventory update due to upstream error: {final_result.get('error')}")
-                    inventory_update_completed = False # Mark as not completed due to error
-                elif isinstance(final_result, dict) and "messages" in final_result: # Check if it's the payload dict
-                    self.logger.info(f"[{session_id}] Skipping inventory update: Final LLM call was disabled or skipped.")
-                    inventory_update_completed = False # Mark as not completed because final call didn't run
-                else: # Should not happen with non-streaming logic
-                    self.logger.error(f"[{session_id}] Unexpected type for final_result: {type(final_result)}. Skipping inventory update.")
-                    inventory_update_completed = False
-
-            elif inventory_enabled and not _ORCH_INVENTORY_MODULE_AVAILABLE:
-                 self.logger.warning(f"[{session_id}] Skipping inventory update: Module import failed.")
-                 inventory_update_completed = False; inventory_update_success_flag = False;
-            elif inventory_enabled and not self._update_inventories_func:
-                 self.logger.error(f"[{session_id}] Skipping inventory update: Update function alias is None.")
-                 inventory_update_completed = False; inventory_update_success_flag = False;
-            else:
-                 self.logger.debug(f"[{session_id}] Skipping inventory update: Disabled by global valve.")
-                 inventory_update_completed = False; inventory_update_success_flag = False;
-
-
-            # 11. Calculate FINAL Status
             if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
                 try: final_payload_tokens = sum(self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents if isinstance(turn, dict) for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str))
                 except Exception: final_payload_tokens = -1
@@ -1322,30 +1105,22 @@ class SessionPipeOrchestrator:
 
             final_status_string_base, _ = await self._calculate_and_format_status( session_id=session_id, t1_retrieved_count=t1_retrieved_count, t2_retrieved_count=t2_retrieved_count, session_process_owi_rag=bool(getattr(user_valves, 'process_owi_rag', True)), final_context_selection_performed=final_context_selection_performed, cache_update_skipped=cache_update_skipped, stateless_refinement_performed=stateless_refinement_performed, initial_owi_context_tokens=initial_owi_context_tokens, refined_context_tokens=refined_context_tokens, summarization_prompt_tokens=summarization_prompt_tokens, summarization_output_tokens=summarization_output_tokens, t0_dialogue_tokens=t0_dialogue_tokens, inventory_prompt_tokens=inventory_prompt_tokens, final_llm_payload_contents=final_llm_payload_contents)
 
-            # Add world state to status message using self attributes
             world_state_status = f"| World: D{self.current_day} {self.current_time_of_day} {self.current_weather} {self.current_season}"
-
             inv_stat_indicator = "Inv=OFF";
             if inventory_enabled:
                  if not _ORCH_INVENTORY_MODULE_AVAILABLE: inv_stat_indicator = "Inv=MISSING"
                  else:
-                     if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP" # Skipped (final call disabled or error)
-                     elif inventory_update_success_flag: inv_stat_indicator = "Inv=OK" # Completed successfully
-                     else: inv_stat_indicator = "Inv=FAIL" # Attempted but failed
-            final_status_string = final_status_string_base + world_state_status + f" | {inv_stat_indicator}" # Append world state and inventory status
+                     if not inventory_update_completed: inv_stat_indicator = "Inv=SKIP"
+                     elif inventory_update_success_flag: inv_stat_indicator = "Inv=OK"
+                     else: inv_stat_indicator = "Inv=FAIL"
+            final_status_string = final_status_string_base + world_state_status + f" | {inv_stat_indicator}"
             self.logger.debug(f"[{session_id}] Orchestrator: About to emit FINAL status: '{final_status_string}'")
-            # Emit final status AFTER inventory attempt
             await self._emit_status(event_emitter, session_id, final_status_string, done=True)
 
-
-            # 12. Log Final Payload (Handled inside _execute_or_prepare_output now)
-
-
-            # 13. Return
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(f"Orchestrator process_turn [{session_id}]: Finished at {pipe_end_time_iso}")
             if final_result is None: raise RuntimeError("Internal processing error, final result was None.")
-            return final_result # Returns str (success) or dict (error or skipped payload)
+            return final_result
 
         except asyncio.CancelledError:
             self.logger.info(f"[{session_id or 'unknown'}] Orchestrator process_turn cancelled."); await self._emit_status(event_emitter, session_id or 'unknown', "Status: Processing cancelled.", done=True); raise

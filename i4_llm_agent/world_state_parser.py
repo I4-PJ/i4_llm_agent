@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__) # i4_llm_agent.world_state_parser
 # Patterns for detecting a day increment
 DAY_CHANGE_PATTERNS = [
     re.compile(r'\b(next|following)\s+(day|morning)\b', re.IGNORECASE),
-    re.compile(r'\b(dawn|sunris|morn)\s+(broke|came|arrived)\b', re.IGNORECASE),
+    re.compile(r'\b(dawn|sunris|morn)\s+(broke|came|arrived)\b', re.IGNORECASE), # <<< Should match "Morning arrives"
     re.compile(r'\b(day|night)\s+(passed|went by|elapsed)\b', re.IGNORECASE),
     re.compile(r'after\s+(a|the)\s+night', re.IGNORECASE),
     re.compile(r'several\s+days\s+(passed|later)', re.IGNORECASE), # Could increment by more than 1 later
@@ -24,7 +24,7 @@ DAY_CHANGE_PATTERNS = [
 # Patterns for detecting time of day changes
 TIME_OF_DAY_PATTERNS = {
     "Morning": [
-        re.compile(r'\b(morning|dawn|sunrise)\b', re.IGNORECASE),
+        re.compile(r'\b(morning|dawn|sunrise)\b', re.IGNORECASE), # <<< Should match "Morning"
         re.compile(r'sun\s+(rose|came up)', re.IGNORECASE),
     ],
     "Afternoon": [
@@ -54,6 +54,7 @@ WEATHER_PATTERNS = {
         re.compile(r'\b(cloudy|overcast)\b', re.IGNORECASE),
         re.compile(r'clouds\s+(gathered|rolled in|covered the sky)', re.IGNORECASE),
         re.compile(r'sun\s+(hidden|obscured)', re.IGNORECASE),
+        re.compile(r'\b(grey)\b', re.IGNORECASE), # <<< ADDED for "grey and cool"
     ],
     "Rainy": [ # Simple example, could differentiate light/heavy later
         re.compile(r'\b(rain|raining|drizzle|downpour|storm)\b', re.IGNORECASE),
@@ -62,6 +63,10 @@ WEATHER_PATTERNS = {
     "Snowy": [
         re.compile(r'\b(snow|snowing|snowfall|blizzard)\b', re.IGNORECASE),
         re.compile(r'\b(started to snow|began snowing)\b', re.IGNORECASE),
+    ],
+    "Cool": [ # <<< ADDED for "grey and cool" - separate category or combine? Let's keep separate for now.
+        re.compile(r'\b(cool|chilly|cold)\b', re.IGNORECASE),
+        re.compile(r'against\s+the\s+chill', re.IGNORECASE),
     ]
     # Add Foggy, Windy, etc. as needed
 }
@@ -99,12 +104,15 @@ def parse_llm_response_for_state_changes(response_text: Optional[str]) -> Dict[s
     # Simple check: if any day change pattern matches, increment by 1.
     # More complex logic could parse day numbers or multi-day skips later.
     # We only detect the *first* match to avoid multiple increments in one response.
+    day_changed = False # Flag to track if day increment occurred
     for pattern in DAY_CHANGE_PATTERNS:
         if pattern.search(response_text):
             logger.debug(f"Detected Day Change pattern: {pattern.pattern}")
             detected_changes['day_increment'] = 1
-            # If a day changed, assume time resets to Morning unless specified otherwise
+            day_changed = True
+            # If a day changed, assume time resets to Morning unless specified otherwise later
             if 'time_of_day' not in detected_changes:
+                 logger.debug("Day changed, defaulting time_of_day to Morning (may be overridden).")
                  detected_changes['time_of_day'] = "Morning"
             break # Stop after first match
 
@@ -118,10 +126,21 @@ def parse_llm_response_for_state_changes(response_text: Optional[str]) -> Dict[s
                 logger.debug(f"Detected Time Change pattern: {pattern.pattern} -> {time_name}")
                 last_matched_time = time_name
                 # Don't break here, allow later patterns (e.g., "night") to override earlier ("evening")
-    if last_matched_time and detected_changes.get('time_of_day') != last_matched_time:
+
+    # Update time_of_day only if a new time was matched AND
+    # EITHER the day didn't change OR the matched time is different from the "Morning" default set by day change
+    if last_matched_time and (not day_changed or detected_changes.get('time_of_day') != last_matched_time):
+        logger.debug(f"Setting time_of_day to last matched: {last_matched_time}")
         detected_changes['time_of_day'] = last_matched_time
+    elif day_changed and 'time_of_day' in detected_changes:
+         logger.debug(f"Keeping time_of_day as Morning (set by day change) as no other specific time was detected.")
+    elif last_matched_time:
+         logger.debug(f"Time '{last_matched_time}' detected, but keeping existing '{detected_changes.get('time_of_day')}' (likely set by day change).")
+
 
     # --- 3. Check for Weather Change ---
+    # Collect all weather matches, prioritize more specific ones later if needed?
+    # For now, just take the last one found. Added "Cool" and "Grey" -> "Cloudy".
     last_matched_weather = None
     for weather_name, patterns in WEATHER_PATTERNS.items():
         for pattern in patterns:
@@ -129,7 +148,16 @@ def parse_llm_response_for_state_changes(response_text: Optional[str]) -> Dict[s
                 logger.debug(f"Detected Weather Change pattern: {pattern.pattern} -> {weather_name}")
                 last_matched_weather = weather_name
     if last_matched_weather:
-        detected_changes['weather'] = last_matched_weather
+        # Handle "Cool" as a descriptor, not necessarily a primary state?
+        # If the only match is "Cool", maybe don't change primary weather?
+        # Or maybe combine? e.g., "Clear and Cool"? Needs decision.
+        # For now, let's treat "Cool" like any other match.
+        # Let's map "Grey" match to "Cloudy" state.
+        if last_matched_weather == "Grey":
+            logger.debug("Mapping detected 'Grey' pattern to 'Cloudy' state.")
+            detected_changes['weather'] = "Cloudy"
+        else:
+            detected_changes['weather'] = last_matched_weather
 
     # --- 4. Check for Season Change ---
     last_matched_season = None
@@ -146,6 +174,9 @@ def parse_llm_response_for_state_changes(response_text: Optional[str]) -> Dict[s
     else:
         logger.debug("No world state changes detected in response.")
 
+    # <<< --- ADDED LOGGING --- >>>
+    logger.debug(f"Parser returning changes: {detected_changes}")
+    # <<< --- END LOGGING --- >>>
     return detected_changes
 
 # === END OF FILE i4_llm_agent/world_state_parser.py ===
