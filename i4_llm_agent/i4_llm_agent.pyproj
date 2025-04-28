@@ -34,6 +34,7 @@
     <Compile Include="prompting.py" />
     <Compile Include="session.py" />
     <Compile Include="utils.py" />
+    <Compile Include="world_state_parser.py" />
     <Compile Include="__init__.py" />
   </ItemGroup>
   <ItemGroup>

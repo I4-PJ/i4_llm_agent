@@ -597,23 +597,32 @@ def construct_final_llm_payload(
     return final_payload
 
 
-# --- Function: Combine Background Context (Existing - Unchanged) ---
+# --- Function: Combine Background Context (MODIFIED to include World State) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
     t2_rag_results: Optional[List[str]],
-    inventory_context: Optional[str] = None, # <<< ADDED parameter
-    labels: Dict[str, str] = TAG_LABELS
+    inventory_context: Optional[str] = None,
+    current_day: Optional[int] = None,          # <<< NEW Parameter
+    current_time_of_day: Optional[str] = None, # <<< NEW Parameter
+    current_season: Optional[str] = None,       # <<< NEW Parameter
+    current_weather: Optional[str] = None,      # <<< NEW Parameter
+    labels: Dict[str, str] = TAG_LABELS # Existing default labels
 ) -> str:
     """
     Combines various background context sources into a single formatted string
-    suitable for injection into the final LLM prompt. Now includes inventory.
+    suitable for injection into the final LLM prompt. Now includes world state
+    (day, time, season, weather) and inventory.
 
     Args:
         final_selected_context: Context from OWI/Cache/Stateless refinement.
         t1_summaries: List of recent Tier 1 summary strings.
         t2_rag_results: List of retrieved Tier 2 RAG result strings.
-        inventory_context: Formatted string of current character inventories. <<< ADDED
+        inventory_context: Formatted string of current character inventories.
+        current_day: The current day number for the session.
+        current_time_of_day: The current time of day string (e.g., "Morning").
+        current_season: The current season string (e.g., "Summer").
+        current_weather: The current weather string (e.g., "Clear").
         labels: Dictionary mapping context types to labels for formatting.
 
     Returns:
@@ -623,7 +632,25 @@ def combine_background_context(
     func_logger = logging.getLogger(__name__ + '.combine_background_context')
     context_parts = []
 
-    # 1. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
+    # 1. Add World State Section <<< NEW SECTION >>>
+    world_state_parts = []
+    if isinstance(current_day, int) and current_day > 0:
+        world_state_parts.append(f"Day: {current_day}")
+    if isinstance(current_time_of_day, str) and current_time_of_day.strip() and "Unknown" not in current_time_of_day:
+        world_state_parts.append(f"Time: {current_time_of_day.strip()}")
+    if isinstance(current_season, str) and current_season.strip() and "Unknown" not in current_season:
+        world_state_parts.append(f"Season: {current_season.strip()}")
+    if isinstance(current_weather, str) and current_weather.strip() and "Unknown" not in current_weather:
+        world_state_parts.append(f"Weather: {current_weather.strip()}")
+
+    if world_state_parts:
+        world_state_label = "Current World State"
+        world_state_string = ", ".join(world_state_parts)
+        context_parts.append(f"--- {world_state_label} ---\n{world_state_string}")
+        func_logger.debug(f"Adding World State section: {world_state_string}")
+    # <<< END NEW SECTION >>>
+
+    # 2. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
     selected_context_label = "Selected Background Context" # Label for this dynamic part
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
     # Check if it's empty or just the placeholder indicating nothing was relevant
@@ -631,7 +658,7 @@ def combine_background_context(
         func_logger.debug(f"Adding selected context (len: {len(safe_selected_context)}).")
         context_parts.append(f"--- {selected_context_label} ---\n{safe_selected_context}")
 
-    # 2. Add T1 Summaries
+    # 3. Add T1 Summaries
     t1_label = labels.get("t1", "Recent Summaries (T1)")
     if t1_summaries:
         # Filter out empty strings and join valid ones
@@ -640,7 +667,7 @@ def combine_background_context(
             func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
             context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
 
-    # 3. Add T2 RAG Results
+    # 4. Add T2 RAG Results
     t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
     if t2_rag_results:
         # Filter out empty strings and join valid ones
@@ -649,23 +676,22 @@ def combine_background_context(
             func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
             context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
 
-    # 4. Add Inventory Context <<< NEW SECTION >>>
+    # 5. Add Inventory Context (Existing)
     inventory_label = "Current Inventories" # Define a label
     safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
     # Check if inventory context is valid and not just a placeholder/error message
     if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
         func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
         context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
-    # <<< END NEW SECTION >>>
 
-    # 5. Combine parts or return placeholder
+    # 6. Combine parts or return placeholder
     if context_parts:
         # Join sections with double newlines for readability
         full_context_string = "\n\n".join(context_parts)
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
         return full_context_string
     else:
-        func_logger.info("No background context available from any source.")
+        func_logger.info("No background context available from any source (including world state).")
         # Return the standard placeholder if all sources were empty/invalid
         return EMPTY_CONTEXT_PLACEHOLDER
 

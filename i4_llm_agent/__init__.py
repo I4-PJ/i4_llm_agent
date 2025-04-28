@@ -1,8 +1,6 @@
-# === START MODIFIED SECTION: i4_llm_agent/__init__.py ===
+# === START OF FILE i4_llm_agent/__init__.py ===
 
-# --- START OF FILE __init__.py ---
-
-# [[START MODIFIED __init__.py - Added World State DB Exports]]
+# [[START FINAL __init__.py - Reflects World State DB Exports]]
 # i4_llm_agent/__init__.py
 import logging
 
@@ -42,6 +40,7 @@ from .cache import (
 )
 
 # --- Session Management (Existing) ---
+# NOTE: SessionManager itself wasn't modified in this round, so no direct code change here.
 from .session import SessionManager
 
 # --- Database Operations (Modified: Added World State Table/Functions) ---
@@ -61,9 +60,9 @@ from .database import (
     add_or_update_character_inventory,
     get_all_inventories_for_session,
     # SQLite World State (NEW)
-    initialize_world_state_table, # <<< NEW
-    get_world_state,              # <<< NEW
-    set_world_state,              # <<< NEW
+    initialize_world_state_table, # <<< Added previously
+    get_world_state,              # <<< Added previously
+    set_world_state,              # <<< Added previously
     # ChromaDB T2 (Existing)
     get_or_create_chroma_collection, add_to_chroma_collection,
     query_chroma_collection, get_chroma_collection_count,
@@ -71,6 +70,7 @@ from .database import (
 )
 
 # --- Orchestration (Existing) ---
+# NOTE: Orchestrator itself was modified internally, but the class name export is the same.
 from .orchestration import SessionPipeOrchestrator
 
 # --- Utilities (Existing) ---
@@ -89,12 +89,17 @@ except ImportError as e:
     def format_inventory_for_prompt(*args, **kwargs) -> str: return "[Inventory Module Error]"
     async def update_inventories_from_llm(*args, **kwargs) -> bool: return False
 
-# --- Event Hints (NEW Module Import for Constant) ---
+# --- Event Hints (Modified Module Import for Constant) ---
+# NOTE: Event hints module was modified internally, but the constant export is the same.
 try:
     from .event_hints import DEFAULT_EVENT_HINT_TEMPLATE_TEXT
 except ImportError as e:
     logging.getLogger(__name__).error(f"Failed to import event_hints module: {e}", exc_info=True)
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Template Load Error]"
+
+# --- World State Parser (Internal Use - Not Exported by default) ---
+# The orchestrator imports this directly using `from .world_state_parser import ...`
+# No need to add it to __all__ unless intended for external library users.
 
 # --- Configure basic logging for the library ---
 logger = logging.getLogger(__name__)
@@ -144,7 +149,7 @@ __all__ = [
     "get_character_inventory_data",
     "add_or_update_character_inventory",
     "get_all_inventories_for_session",
-    # -- World State (DB) -- # <<< NEW SECTION
+    # -- World State (DB) -- # <<< Added previously
     "initialize_world_state_table",
     "get_world_state",
     "set_world_state",
@@ -162,9 +167,8 @@ __all__ = [
     "update_inventories_from_llm",
     "INVENTORY_MODULE_AVAILABLE", # Flag
     # event_hints (Constants Only)
-    "DEFAULT_EVENT_HINT_TEMPLATE_TEXT", # <<< ADDED
+    "DEFAULT_EVENT_HINT_TEMPLATE_TEXT",
 ]
-# [[END MODIFIED __init__.py - Added World State DB Exports]]
-# --- END OF FILE __init__.py ---
+# [[END FINAL __init__.py - Reflects World State DB Exports]]
 
-# === END MODIFIED SECTION: i4_llm_agent/__init__.py ===
+# === END OF FILE i4_llm_agent/__init__.py ===

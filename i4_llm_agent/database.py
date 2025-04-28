@@ -79,27 +79,28 @@ async def initialize_inventory_table(cursor: sqlite3.Cursor) -> bool:
     return await asyncio.to_thread(_sync_initialize_inventory_table, cursor)
 
 
-# --- 1.2.1: Sync - Initialize World State Table (NEW) ---
+# --- 1.2.1: Sync - Initialize World State Table (MODIFIED) ---
 def _sync_initialize_world_state_table(cursor: sqlite3.Cursor) -> bool:
     """
     Synchronously initializes the session_world_state table.
-    Stores key-value pairs for world state per session (e.g., season, weather).
+    Stores key-value pairs for world state per session (e.g., season, weather, day, time).
+    MODIFIED to include current_day and time_of_day.
     """
     func_logger = logging.getLogger(__name__ + '._sync_initialize_world_state_table')
     if not cursor:
         func_logger.error("SQLite cursor is not available for world state table init.")
         return False
     try:
-        # Stores current season and weather for a session.
-        # Could be expanded later with more state variables (time_of_day, etc.)
-        # session_id is the primary key, ensuring only one state row per session.
+        # Added current_day (INTEGER) and time_of_day (TEXT)
         cursor.execute(f"""CREATE TABLE IF NOT EXISTS {WORLD_STATE_TABLE_NAME} (
                 session_id TEXT PRIMARY KEY,
                 current_season TEXT,
                 current_weather TEXT,
+                current_day INTEGER,
+                time_of_day TEXT,
                 last_updated_utc REAL NOT NULL
             )""")
-        func_logger.debug(f"Table '{WORLD_STATE_TABLE_NAME}' initialized successfully.")
+        func_logger.debug(f"Table '{WORLD_STATE_TABLE_NAME}' initialized successfully (with day/time fields).")
         return True
     except sqlite3.Error as e:
         func_logger.error(f"SQLite error initializing table '{WORLD_STATE_TABLE_NAME}': {e}")
@@ -107,6 +108,11 @@ def _sync_initialize_world_state_table(cursor: sqlite3.Cursor) -> bool:
     except Exception as e:
         func_logger.error(f"Unexpected error initializing table '{WORLD_STATE_TABLE_NAME}': {e}")
         return False
+
+# --- 1.2.2: Async - Initialize World State Table (Unchanged wrapper) ---
+async def initialize_world_state_table(cursor: sqlite3.Cursor) -> bool:
+    """Async wrapper to initialize the session_world_state table."""
+    return await asyncio.to_thread(_sync_initialize_world_state_table, cursor)
 
 # --- 1.2.2: Async - Initialize World State Table (NEW) ---
 async def initialize_world_state_table(cursor: sqlite3.Cursor) -> bool:
@@ -575,6 +581,8 @@ def _sync_get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: st
         func_logger.error(f"[{session_id}] Unexpected error retrieving all inventories: {e}")
         return {} # Return empty dict on error
 
+
+
 # --- 4.6: Async - Get All Inventories for Session ---
 async def get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: str) -> Dict[str, str]:
     """
@@ -588,11 +596,12 @@ async def get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: st
 # === 4.5: SQLite World State Operations (NEW)                               ===
 # ==============================================================================
 
-# --- 4.5.1: Sync - Get World State ---
+# --- 4.5.1: Sync - Get World State (MODIFIED) ---
 def _sync_get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Any]]:
     """
-    Synchronously retrieves the world state (season, weather) for a specific session.
+    Synchronously retrieves the world state (season, weather, day, time) for a specific session.
     Returns a dictionary or None if not found or error.
+    MODIFIED to include current_day and time_of_day.
     """
     func_logger = logging.getLogger(__name__ + '._sync_get_world_state')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable for world state."); return None
@@ -600,14 +609,16 @@ def _sync_get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[D
 
     try:
         cursor.execute(
-            f"SELECT current_season, current_weather FROM {WORLD_STATE_TABLE_NAME} WHERE session_id = ?",
+            f"SELECT current_season, current_weather, current_day, time_of_day FROM {WORLD_STATE_TABLE_NAME} WHERE session_id = ?",
             (session_id,)
         )
         result = cursor.fetchone()
         if result:
-            season, weather = result
-            func_logger.debug(f"[{session_id}] Found world state: Season='{season}', Weather='{weather}'")
-            return {"season": season, "weather": weather}
+            season, weather, day, time = result
+            # Ensure day is returned as int if not null
+            day_val = int(day) if day is not None else None
+            func_logger.debug(f"[{session_id}] Found world state: Season='{season}', Weather='{weather}', Day='{day_val}', Time='{time}'")
+            return {"season": season, "weather": weather, "day": day_val, "time_of_day": time}
         else:
             func_logger.debug(f"[{session_id}] No world state found in DB for this session.")
             return None # Indicate not found
@@ -618,37 +629,53 @@ def _sync_get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[D
         func_logger.error(f"[{session_id}] Unexpected error retrieving world state: {e}")
         return None
 
-# --- 4.5.2: Async - Get World State ---
+# --- 4.5.2: Async - Get World State (Unchanged wrapper) ---
 async def get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Any]]:
     """
-    Async wrapper to retrieve the world state (season, weather) for a specific session.
-    Returns a dictionary {'season': str, 'weather': str} or None.
+    Async wrapper to retrieve the world state (season, weather, day, time) for a specific session.
+    Returns a dictionary {'season': str, 'weather': str, 'day': int, 'time_of_day': str} or None.
     """
     return await asyncio.to_thread(_sync_get_world_state, cursor, session_id)
 
-# --- 4.5.3: Sync - Set World State ---
-def _sync_set_world_state(cursor: sqlite3.Cursor, session_id: str, season: str, weather: str) -> bool:
+# --- 4.5.3: Sync - Set World State (MODIFIED) ---
+def _sync_set_world_state(
+    cursor: sqlite3.Cursor,
+    session_id: str,
+    season: Optional[str],
+    weather: Optional[str],
+    day: Optional[int],
+    time_of_day: Optional[str]
+) -> bool:
     """
-    Synchronously sets or updates the world state (season, weather) for a session
-    using INSERT OR REPLACE.
+    Synchronously sets or updates the world state (season, weather, day, time) for a session
+    using INSERT OR REPLACE. Accepts None for values that shouldn't be updated explicitly,
+    though INSERT OR REPLACE will overwrite the whole row.
+    MODIFIED to include current_day and time_of_day.
     """
     func_logger = logging.getLogger(__name__ + '._sync_set_world_state')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable for setting world state."); return False
     if not session_id or not isinstance(session_id, str): func_logger.error("Invalid session_id for world state set."); return False
-    if not isinstance(season, str) or not season.strip(): func_logger.warning(f"[{session_id}] Invalid 'season' value provided for set."); season = "Unknown"
-    if not isinstance(weather, str) or not weather.strip(): func_logger.warning(f"[{session_id}] Invalid 'weather' value provided for set."); weather = "Unknown"
+
+    # Provide defaults if None is passed, although INSERT OR REPLACE requires all values
+    # Consider fetching existing values first if partial update is desired, but for now,
+    # this function assumes it's setting the complete state for the session.
+    final_season = season if isinstance(season, str) and season.strip() else "Unknown"
+    final_weather = weather if isinstance(weather, str) and weather.strip() else "Unknown"
+    final_day = day if isinstance(day, int) and day > 0 else 1 # Default to Day 1 if invalid
+    final_time = time_of_day if isinstance(time_of_day, str) and time_of_day.strip() else "Unknown"
 
     now_utc_timestamp = datetime.now(timezone.utc).timestamp()
 
     try:
         # INSERT OR REPLACE uses the PRIMARY KEY (session_id)
+        # Requires all columns to be provided in the VALUES clause.
         cursor.execute(
              f"""INSERT OR REPLACE INTO {WORLD_STATE_TABLE_NAME}
-                (session_id, current_season, current_weather, last_updated_utc)
-                VALUES (?, ?, ?, ?)""",
-             (session_id, season.strip(), weather.strip(), now_utc_timestamp)
+                (session_id, current_season, current_weather, current_day, time_of_day, last_updated_utc)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+             (session_id, final_season, final_weather, final_day, final_time, now_utc_timestamp)
         )
-        func_logger.info(f"[{session_id}] Successfully set/updated world state: Season='{season.strip()}', Weather='{weather.strip()}'")
+        func_logger.info(f"[{session_id}] Successfully set/updated world state: Season='{final_season}', Weather='{final_weather}', Day='{final_day}', Time='{final_time}'")
         return True
     except sqlite3.Error as e:
         func_logger.error(f"[{session_id}] SQLite error setting/updating world state: {e}")
@@ -657,13 +684,19 @@ def _sync_set_world_state(cursor: sqlite3.Cursor, session_id: str, season: str, 
         func_logger.error(f"[{session_id}] Unexpected error setting/updating world state: {e}")
         return False
 
-# --- 4.5.4: Async - Set World State ---
-async def set_world_state(cursor: sqlite3.Cursor, session_id: str, season: str, weather: str) -> bool:
+# --- 4.5.4: Async - Set World State (MODIFIED Wrapper Signature) ---
+async def set_world_state(
+    cursor: sqlite3.Cursor,
+    session_id: str,
+    season: Optional[str],
+    weather: Optional[str],
+    day: Optional[int],
+    time_of_day: Optional[str]
+) -> bool:
     """
-    Async wrapper to set or update the world state (season, weather) for a session.
+    Async wrapper to set or update the world state (season, weather, day, time) for a session.
     """
-    return await asyncio.to_thread(_sync_set_world_state, cursor, session_id, season, weather)
-
+    return await asyncio.to_thread(_sync_set_world_state, cursor, session_id, season, weather, day, time_of_day)
 
 # ==============================================================================
 # === 5. ChromaDB Tier 2 Operations (Unchanged)                              ===
