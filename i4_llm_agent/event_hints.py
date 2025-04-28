@@ -30,10 +30,11 @@ EVENT_HINT_WEATHER_PLACEHOLDER = "{current_weather}"
 EVENT_HINT_TIME_PLACEHOLDER = "{current_time_of_day}" # <<< Check: Present
 
 
-# --- Default Prompt Template (Includes Time) ---
+# === MODIFIED PROMPT TEMPLATE (v2 - Emphasize World State Hints) ===
 DEFAULT_EVENT_HINT_TEMPLATE_TEXT = f"""
-[[SYSTEM ROLE: Contextual Event Suggestor]]
-**Objective:** Analyze the dialogue, background context, and current world state (season/weather/time) to suggest ONE brief, plausible, minor environmental detail or event that fits the scene. Avoid major plot changes or commands. Focus on sensory details or small occurrences consistent with the provided environment. Output ONLY the suggestion text or "[No Suggestion]".
+[[SYSTEM ROLE: Contextual Environmental Detail Suggestor]]
+
+**Objective:** Analyze the dialogue, background context, and **current world state** (Season, Weather, Time) to suggest ONE brief, plausible, minor environmental detail or sensory event that **reflects and reinforces** the provided world state. Avoid major plot changes or character commands. Output ONLY the suggestion text or "[No Suggestion]".
 
 **Established World State (Use this as factual basis):**
 *   **Season:** {EVENT_HINT_SEASON_PLACEHOLDER}
@@ -51,13 +52,22 @@ DEFAULT_EVENT_HINT_TEMPLATE_TEXT = f"""
 ---
 
 **Instructions:**
-1.  Base your suggestion on the established Season, Weather, and Time of Day.
-2.  Keep it brief and environmental (e.g., "A gust of wind rattles the shutters," "The morning sun warms your face," "Crickets chirp in the evening air," "Snowflakes drift down lazily").
-3.  Do NOT suggest character actions, dialogue, or major plot points.
-4.  If no fitting minor detail comes to mind, output: `[No Suggestion]`
+
+1.  **Ground in World State:** Your primary goal is to generate a suggestion strongly tied to the **established Season, Weather, and Time of Day**.
+2.  **Focus on Environment/Senses:** Keep it brief and focused on sensory details or minor environmental occurrences.
+3.  **Examples Based on World State:**
+    *   If **Weather=Cloudy, Time=Night:** "The thick clouds overhead block out any moonlight."
+    *   If **Season=Spring, Weather=Clear, Time=Morning:** "Dewdrops glitter on the new spring leaves in the morning sun."
+    *   If **Season=Autumn, Weather=Windy, Time=Afternoon:** "A gust of wind sends dry autumn leaves skittering across the path."
+    *   If **Weather=Rainy:** "The steady drumming of rain on the roof is clearly audible."
+    *   If **Time=Evening:** "The shadows lengthen as evening approaches."
+    *   If **Weather=Cool:** "A cool breeze stirs the nearby branches."
+4.  **Avoid:** Do NOT suggest character actions, dialogue, major plot points, or significant weather *changes* (just reflect the *current* state).
+5.  **Output:** If a fitting detail comes to mind based on the world state, output only the suggestion text. If no fitting detail seems appropriate, output: `[No Suggestion]`
 
 **EVENT/DETAIL SUGGESTION:**
 """
+# === END MODIFIED PROMPT TEMPLATE ===
 
 EVENT_HANDLING_GUIDELINE_TEXT = """
 --- [ EVENT HANDLING GUIDELINE ] ---
@@ -116,6 +126,7 @@ def _format_event_hint_prompt(
             EVENT_HINT_WEATHER_PLACEHOLDER.strip('{}'): safe_weather,
             EVENT_HINT_TIME_PLACEHOLDER.strip('{}'): safe_time, # <<< Uses placeholder
         }
+        # Use .format() here as the template itself contains placeholders
         formatted_prompt = template.format(**format_dict)
         return formatted_prompt
     except KeyError as e:
@@ -176,21 +187,31 @@ async def generate_event_hint(
     hint_llm_url = getattr(config, 'event_hint_llm_api_url', None)
     hint_llm_key = getattr(config, 'event_hint_llm_api_key', None)
     hint_llm_temp = getattr(config, 'event_hint_llm_temperature', 0.7)
-    # Use the template defined in this file by default
+    # Use the template defined in this file by default (which is now the updated one)
     hint_llm_template = getattr(config, 'event_hint_llm_prompt_template', DEFAULT_EVENT_HINT_TEMPLATE_TEXT)
     hint_history_count = getattr(config, 'event_hint_history_count', 6)
 
     if not hint_llm_url or not hint_llm_key:
         func_logger.debug(f"[{caller_info}] Event Hint LLM URL or Key missing. Skipping hint generation.")
         return None
+    # Use the updated default template if the one from config is missing/invalid
     if not hint_llm_template or not isinstance(hint_llm_template, str):
-        func_logger.error(f"[{caller_info}] Event Hint LLM prompt template invalid or missing. Skipping.")
-        return None
+        func_logger.warning(f"[{caller_info}] Event Hint LLM prompt template invalid or missing in config. Using updated default.")
+        hint_llm_template = DEFAULT_EVENT_HINT_TEMPLATE_TEXT
+        if not hint_llm_template or not isinstance(hint_llm_template, str): # Check default again
+             func_logger.error(f"[{caller_info}] Default event hint template also invalid. Skipping.")
+             return None
+
     if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func):
         func_logger.error(f"[{caller_info}] Invalid llm_call_func provided. Skipping.")
         return None
 
     # --- Prepare Inputs ---
+    # Ensure history_messages is a list before processing
+    if not isinstance(history_messages, list):
+        func_logger.warning(f"[{caller_info}] history_messages is not a list ({type(history_messages)}). Using empty history for hint.")
+        history_messages = []
+
     recent_history_list = get_recent_turns(
         history_messages,
         hint_history_count,
@@ -206,7 +227,7 @@ async def generate_event_hint(
         current_season=current_season,         # Pass world state
         current_weather=current_weather,       # Pass world state
         current_time_of_day=current_time_of_day, # Pass world state <<< Uses param
-        template=hint_llm_template
+        template=hint_llm_template # Use the potentially updated template
     )
 
     if not event_hint_prompt_text or event_hint_prompt_text.startswith("[Error:"):
@@ -214,7 +235,7 @@ async def generate_event_hint(
         return None
 
     event_hint_payload = {"contents": [{"parts": [{"text": event_hint_prompt_text}]}]}
-    func_logger.info(f"[{caller_info}] Calling Event Hint LLM (with world state)...")
+    func_logger.info(f"[{caller_info}] Calling Event Hint LLM (with updated prompt emphasizing world state)...")
     # Optional: Log the actual prompt being sent for debugging
     # func_logger.debug(f"[{caller_info}] Event Hint Prompt Text:\n------\n{event_hint_prompt_text}\n------")
 
