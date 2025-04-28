@@ -1,9 +1,10 @@
-# === START OF FILE i4_llm_agent/world_state_parser.py ===
 # i4_llm_agent/world_state_parser.py
 
 import logging
 import json
 import asyncio # Required for Coroutine type hint
+import os # For path manipulation in debug logger
+from datetime import datetime, timezone # For timestamp in debug logger
 from typing import Dict, Any, Optional, Callable, Coroutine, List, Tuple, Union
 
 # Attempt import for history formatting (optional context for parser LLM)
@@ -77,7 +78,6 @@ DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = f"""
 
 # --- Helper Functions ---
 
-# <<< MODIFIED: Use .replace() instead of .format() >>>
 def _format_world_state_parse_prompt(
     template: str,
     llm_response_text: str,
@@ -124,11 +124,11 @@ def _format_world_state_parse_prompt(
         # Catch any unexpected errors during replacement
         func_logger.error(f"Error formatting world state parse prompt using .replace(): {e}", exc_info=True)
         return f"[Error formatting prompt with .replace(): {type(e).__name__}]"
-# <<< END MODIFICATION >>>
 
 
-# --- Core Logic (Remains the same) ---
+# --- Core Logic ---
 
+# <<< MODIFIED: Added debug_path_getter parameter and internal logging helper >>>
 async def parse_world_state_with_llm(
     llm_response_text: str,
     history_messages: List[Dict],
@@ -137,6 +137,7 @@ async def parse_world_state_with_llm(
     ws_parse_llm_config: Dict[str, Any],
     logger_instance: Optional[logging.Logger] = None,
     session_id: str = "unknown_session",
+    debug_path_getter: Optional[Callable[[str], Optional[str]]] = None # <<< ADDED PARAMETER >>>
 ) -> Dict[str, Any]:
     """
     Uses an LLM to parse the main LLM response for world state changes.
@@ -149,6 +150,7 @@ async def parse_world_state_with_llm(
         ws_parse_llm_config: Dict containing 'url', 'key', 'temp', 'prompt_template'.
         logger_instance: Optional logger instance.
         session_id: The session ID for logging.
+        debug_path_getter: Optional function to get the debug log path. <<< ADDED PARAMETER >>>
 
     Returns:
         A dictionary containing detected changes (keys: 'day_increment',
@@ -158,6 +160,51 @@ async def parse_world_state_with_llm(
     func_logger = logger_instance or logging.getLogger(__name__ + '.parse_world_state_with_llm')
     caller_info = f"WorldStateParseLLM_{session_id}"
     detected_changes: Dict[str, Any] = {}
+
+    # --- Internal Debug Logging Helper ---
+    ws_parse_debug_log_path: Optional[str] = None # Cache path to avoid repeated calls
+    ws_parse_debug_log_failed: bool = False # Flag to prevent repeated errors
+
+    def _log_ws_parse_debug(content: Any, is_input: bool):
+        nonlocal ws_parse_debug_log_path, ws_parse_debug_log_failed
+        if ws_parse_debug_log_failed: return # Don't try again if already failed
+
+        # Get log path only once
+        if ws_parse_debug_log_path is None and callable(debug_path_getter):
+            try:
+                ws_parse_debug_log_path = debug_path_getter(".DEBUG_WS_PARSE")
+                if ws_parse_debug_log_path is None:
+                    func_logger.error(f"[{caller_info}] WS Parse Debug: Getter returned None path.")
+                    ws_parse_debug_log_failed = True
+            except Exception as e_get_path:
+                func_logger.error(f"[{caller_info}] WS Parse Debug: Error calling debug_path_getter: {e_get_path}", exc_info=True)
+                ws_parse_debug_log_path = None
+                ws_parse_debug_log_failed = True
+
+        if not ws_parse_debug_log_path:
+            if not ws_parse_debug_log_failed: # Log error only once
+                func_logger.error(f"[{caller_info}] WS Parse Debug: Cannot log, no valid path.")
+                ws_parse_debug_log_failed = True
+            return
+
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            log_type = "INPUT_PROMPT" if is_input else "RAW_OUTPUT"
+            log_content_str = str(content) # Ensure it's a string
+
+            log_line = f"\n--- [{ts}] SESSION: {session_id} - WS_PARSE_LLM_{log_type} --- START ---\n"
+            log_line += log_content_str
+            log_line += f"\n--- [{ts}] SESSION: {session_id} - WS_PARSE_LLM_{log_type} --- END ---\n\n"
+
+            with open(ws_parse_debug_log_path, "a", encoding="utf-8") as f:
+                f.write(log_line)
+            func_logger.debug(f"[{caller_info}] WS Parse Debug: Successfully wrote {log_type} to {ws_parse_debug_log_path}")
+
+        except Exception as e_log:
+            func_logger.error(f"[{caller_info}] WS Parse Debug: Error writing to log file '{ws_parse_debug_log_path}': {e_log}", exc_info=False)
+            ws_parse_debug_log_failed = True # Stop trying if write fails
+    # --- End Internal Helper ---
+
 
     # --- Validate Config ---
     llm_url = ws_parse_llm_config.get('url')
@@ -222,8 +269,12 @@ async def parse_world_state_with_llm(
     # --- Call LLM ---
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     func_logger.info(f"[{caller_info}] Calling World State Parsing LLM...")
-    # Optional: Log the prompt for debugging
-    # func_logger.debug(f"[{caller_info}] World State Parse Prompt:\n------\n{prompt_text}\n------")
+
+    # <<< ADDED: Log the input prompt >>>
+    _log_ws_parse_debug(content=prompt_text, is_input=True)
+
+    success = False # Initialize success status
+    response_or_error = "Initialization Error" # Default error message
 
     try:
         success, response_or_error = await llm_call_func(
@@ -238,6 +289,9 @@ async def parse_world_state_with_llm(
         func_logger.error(f"[{caller_info}] Exception during WS Parse LLM call: {e_call}", exc_info=True)
         success = False
         response_or_error = f"LLM Call Exception: {type(e_call).__name__}"
+
+    # <<< ADDED: Log the raw output response >>>
+    _log_ws_parse_debug(content=response_or_error, is_input=False)
 
     # --- Process Response ---
     if success and isinstance(response_or_error, str):

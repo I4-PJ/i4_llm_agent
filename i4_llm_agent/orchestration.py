@@ -1,3 +1,4 @@
+
 # === START OF FILE i4_llm_agent/orchestration.py ===
 # i4_llm_agent/orchestration.py
 
@@ -60,6 +61,7 @@ from .utils import count_tokens, calculate_string_similarity, TIKTOKEN_AVAILABLE
 
 # --- MODIFIED IMPORT: Import the new LLM-based parser ---
 try:
+    # <<< MODIFIED: Import the constant used in orchestration config checks >>>
     from .world_state_parser import parse_world_state_with_llm, DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
     _WORLD_STATE_PARSER_LLM_AVAILABLE = True
 except ImportError as e_world_parser:
@@ -68,6 +70,7 @@ except ImportError as e_world_parser:
         logging.getLogger(__name__).error("Executing FALLBACK parse_world_state_with_llm due to import error.")
         await asyncio.sleep(0) # Need await for async definition
         return {}
+    # <<< MODIFIED: Ensure constant exists even if import fails >>>
     DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = "[Default World State Parse Template Load Failed]"
     _WORLD_STATE_PARSER_LLM_AVAILABLE = False
     logging.getLogger(__name__).error(
@@ -1056,6 +1059,7 @@ class SessionPipeOrchestrator:
                          "season": self.current_season
                      }
                      # --- Call the new async parser function ---
+                     # <<< MODIFIED CALL: Pass debug path getter >>>
                      detected_changes = await self._parse_world_state_func(
                          llm_response_text=final_result,
                          history_messages=current_active_history,
@@ -1063,9 +1067,10 @@ class SessionPipeOrchestrator:
                          llm_call_func=self._async_llm_call_wrapper,
                          ws_parse_llm_config=ws_parse_llm_config,
                          logger_instance=self.logger,
-                         session_id=session_id
+                         session_id=session_id,
+                         debug_path_getter=self._orchestrator_get_debug_log_path # <<< PASSING GETTER >>>
                      )
-                     # --- END MODIFIED CALL ---
+                     # <<< END MODIFIED CALL >>>
                  except Exception as e_parse:
                      self.logger.error(f"[{session_id}] Error calling world state parser LLM function: {e_parse}", exc_info=True)
 
