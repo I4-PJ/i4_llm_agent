@@ -3,10 +3,10 @@
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.18.11 - Log Consolidation)
+title: SESSION_MEMORY PIPE (v0.19.0)
 author: Petr Jilek & Assistant Gemini
-version: 0.18.11
-description: Consolidates Inventory LLM debug logs into the Final Payload debug log file. Moves final payload logging into the orchestrator. Fixes status emission logic, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.6+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
+version: 0.19.0
+description: Removes prompt template valves, relying on library/script defaults. Consolidates Inventory LLM debug logs into the Final Payload debug log file. Moves final payload logging into the orchestrator. Fixes status emission logic, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.6+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
 requirements: pydantic, chromadb, i4_llm_agent>=0.1.6, tiktoken, httpx, open_webui (internal utils)
 """
 # --- END HEADER ---
@@ -151,11 +151,13 @@ try:
         CHROMADB_AVAILABLE as I4_AGENT_CHROMADB_FLAG,
         DIALOGUE_ROLES as I4_AGENT_DIALOGUE_ROLES,
         # --- START IMPORT: Import specific default templates ---
+        # NOTE: These are now the *only* source for these prompts
         DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
         DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
         DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
         DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
         DEFAULT_EVENT_HINT_TEMPLATE_TEXT,
+        DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT,  # Added
         # --- END IMPORT ---
     )
 
@@ -194,6 +196,9 @@ except ImportError as e:
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = "[Default Inventory Prompt Load Failed]"
     DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = "[Default Stateless Prompt Load Failed]"
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Prompt Load Failed]"
+    DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = (
+        "[Default World State Parse Prompt Load Failed]"
+    )
 
 
 # /////////////////////////////////////////
@@ -213,18 +218,39 @@ except ImportError:
 
 # === SECTION 3: CONSTANTS & DEFAULTS ===
 DEFAULT_LOG_DIR = r"C:\\Utils\\OpenWebUI"
-DEFAULT_LOG_FILE_NAME = "session_memory_v18_11_pipe_log.log"  # Version updated
+DEFAULT_LOG_FILE_NAME = "session_memory_v18_12_pipe_log.log"  # Version updated
 DEFAULT_LOG_LEVEL = "DEBUG"
 ENV_VAR_LOG_FILE_PATH = "SM_LOG_FILE_PATH"
 ENV_VAR_LOG_LEVEL = "SM_LOG_LEVEL"
+
+# --- Summarizer Config (Prompt defaults to constant below) ---
 ENV_VAR_SUMMARIZER_API_URL = "SM_SUMMARIZER_API_URL"
 ENV_VAR_SUMMARIZER_API_KEY = "SM_SUMMARIZER_API_KEY"
 ENV_VAR_SUMMARIZER_TEMPERATURE = "SM_SUMMARIZER_TEMPERATURE"
-ENV_VAR_SUMMARIZER_SYSTEM_PROMPT = "SM_SUMMARIZER_SYSTEM_PROMPT"
+ENV_VAR_SUMMARIZER_SYSTEM_PROMPT = "SM_SUMMARIZER_SYSTEM_PROMPT"  # Kept for valve
 DEFAULT_SUMMARIZER_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
 DEFAULT_SUMMARIZER_API_KEY = ""
 DEFAULT_SUMMARIZER_TEMPERATURE = 0.5
-DEFAULT_SUMMARIZER_SYSTEM_PROMPT = """**Role:** Conversation Summarizer... **Concise Summary (including key names/places/items):**"""
+DEFAULT_SUMMARIZER_SYSTEM_PROMPT = """**Role:** Conversation Summarizer
+
+**Task:** Read the provided dialogue transcript. Create a concise, neutral summary focusing on:
+*   **Key Information:** Extract names, locations, important objects mentioned.
+*   **Decisions & Plans:** Note any significant choices made or plans discussed.
+*   **Emotional Shifts:** Briefly mention major changes in mood or relationship dynamics if clearly stated.
+*   **Factual Events:** Record objective actions or events that occurred.
+
+**Style:**
+*   Third-person, past tense.
+*   Neutral and objective tone.
+*   Avoid direct quotes unless essential.
+*   Focus on facts and explicit statements, not interpretation.
+*   Be concise.
+
+**Output:** Provide only the summary text.
+
+**Concise Summary (including key names/places/items):**"""  # Script default
+
+# --- Core Memory Config ---
 DEFAULT_TOKENIZER_ENCODING = "cl100k_base"
 ENV_VAR_TOKENIZER_ENCODING = "SM_TOKENIZER_ENCODING"
 DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT = 4000
@@ -233,32 +259,45 @@ DEFAULT_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET = 2000
 ENV_VAR_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET = "SM_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET"
 DEFAULT_MAX_STORED_SUMMARY_BLOCKS = 10
 ENV_VAR_MAX_STORED_SUMMARY_BLOCKS = "SM_MAX_STORED_SUMMARY_BLOCKS"
+
+# --- Paths ---
 DEFAULT_CHROMADB_PATH = os.path.join(DEFAULT_LOG_DIR, "session_summary_t2_db")
 ENV_VAR_CHROMADB_PATH = "SM_CHROMADB_PATH"
 DEFAULT_SQLITE_DB_PATH = os.path.join(
     DEFAULT_LOG_DIR, "session_memory_tier1_cache_inventory.db"
 )
 ENV_VAR_SQLITE_DB_PATH = "SM_SQLITE_DB_PATH"
+
+# --- RAG / T2 Config ---
 DEFAULT_SUMMARY_COLLECTION_PREFIX = "sm_t2_"
 ENV_VAR_SUMMARY_COLLECTION_PREFIX = "SM_SUMMARY_COLLECTION_PREFIX"
 ENV_VAR_RAGQ_LLM_API_URL = "SM_RAGQ_LLM_API_URL"
 ENV_VAR_RAGQ_LLM_API_KEY = "SM_RAGQ_LLM_API_KEY"
 ENV_VAR_RAGQ_LLM_TEMPERATURE = "SM_RAGQ_LLM_TEMPERATURE"
-ENV_VAR_RAGQ_LLM_PROMPT = "SM_RAGQ_LLM_PROMPT"
+ENV_VAR_RAGQ_LLM_PROMPT = "SM_RAGQ_LLM_PROMPT"  # Kept for valve
 DEFAULT_RAGQ_LLM_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
 DEFAULT_RAGQ_LLM_API_KEY = ""
 DEFAULT_RAGQ_LLM_TEMPERATURE = 0.3
-DEFAULT_RAGQ_LLM_PROMPT = """Based on the latest user message... Search Query:"""
+DEFAULT_RAGQ_LLM_PROMPT = """Based on the latest user message and recent dialogue context, generate a concise search query focusing on the key entities, topics, or questions raised.
+
+Latest Message: {latest_message}
+
+Dialogue Context:
+{dialogue_context}
+
+Search Query:"""  # Script default
 DEFAULT_RAG_SUMMARY_RESULTS_COUNT = 3
 ENV_VAR_RAG_SUMMARY_RESULTS_COUNT = "SM_RAG_SUMMARY_RESULTS_COUNT"
+
+# --- Refinement / RAG Cache Features (Prompts use library defaults) ---
 ENV_VAR_ENABLE_RAG_CACHE = "SM_ENABLE_RAG_CACHE"
 ENV_VAR_ENABLE_STATELESS_REFINEMENT = "SM_ENABLE_REFINEMENT"
 ENV_VAR_REFINER_API_URL = "SM_REFINER_API_URL"
 ENV_VAR_REFINER_API_KEY = "SM_REFINER_API_KEY"
 ENV_VAR_REFINER_TEMPERATURE = "SM_REFINER_TEMPERATURE"
-ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE = "SM_CACHE_UPDATE_PROMPT_TEMPLATE"
-ENV_VAR_FINAL_SELECT_PROMPT_TEMPLATE = "SM_FINAL_SELECT_PROMPT_TEMPLATE"
-ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE = "SM_REFINER_PROMPT_TEMPLATE"
+# --- REMOVED: ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE ---
+# --- REMOVED: ENV_VAR_FINAL_SELECT_PROMPT_TEMPLATE ---
+# --- REMOVED: ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE ---
 ENV_VAR_REFINER_HISTORY_COUNT = "SM_REFINER_HISTORY_COUNT"
 ENV_VAR_STATELESS_REFINER_SKIP_THRESHOLD = "SM_REFINER_SKIP_THRESHOLD"
 ENV_VAR_CACHE_UPDATE_SKIP_OWI_THRESHOLD = "SM_CACHE_UPDATE_SKIP_OWI_THRESHOLD"
@@ -272,6 +311,8 @@ DEFAULT_REFINER_HISTORY_COUNT = 6
 DEFAULT_STATELESS_REFINER_SKIP_THRESHOLD = 500
 DEFAULT_CACHE_UPDATE_SKIP_OWI_THRESHOLD = 50
 DEFAULT_CACHE_UPDATE_SIMILARITY_THRESHOLD = 0.9
+
+# --- Final LLM Pass-Through Config ---
 ENV_VAR_FINAL_LLM_API_URL = "SM_FINAL_LLM_API_URL"
 ENV_VAR_FINAL_LLM_API_KEY = "SM_FINAL_LLM_API_KEY"
 ENV_VAR_FINAL_LLM_TEMPERATURE = "SM_FINAL_LLM_TEMPERATURE"
@@ -280,6 +321,37 @@ DEFAULT_FINAL_LLM_API_URL = ""
 DEFAULT_FINAL_LLM_API_KEY = ""
 DEFAULT_FINAL_LLM_TEMPERATURE = 0.7
 DEFAULT_FINAL_LLM_TIMEOUT = 120
+
+# --- Inventory Management Feature (Prompt uses library default) ---
+DEFAULT_ENABLE_INVENTORY_MANAGEMENT = False
+ENV_VAR_ENABLE_INVENTORY_MANAGEMENT = "SM_ENABLE_INVENTORY"
+ENV_VAR_INV_LLM_API_URL = "SM_INV_LLM_API_URL"
+ENV_VAR_INV_LLM_API_KEY = "SM_INV_LLM_API_KEY"
+ENV_VAR_INV_LLM_TEMPERATURE = "SM_INV_LLM_TEMPERATURE"
+# --- REMOVED: ENV_VAR_INV_LLM_PROMPT_TEMPLATE ---
+DEFAULT_INV_LLM_API_URL = DEFAULT_REFINER_API_URL
+DEFAULT_INV_LLM_API_KEY = ""
+DEFAULT_INV_LLM_TEMPERATURE = DEFAULT_REFINER_TEMPERATURE
+# Default template comes from library import
+
+# --- Event Hint Feature (Prompt uses library default) ---
+DEFAULT_ENABLE_EVENT_HINTS = False
+ENV_VAR_ENABLE_EVENT_HINTS = "SM_ENABLE_EVENT_HINTS"
+ENV_VAR_EVENT_HINT_LLM_API_URL = "SM_EVENT_HINT_LLM_API_URL"
+ENV_VAR_EVENT_HINT_LLM_API_KEY = "SM_EVENT_HINT_LLM_API_KEY"
+ENV_VAR_EVENT_HINT_LLM_TEMPERATURE = "SM_EVENT_HINT_LLM_TEMPERATURE"
+# --- REMOVED: ENV_VAR_EVENT_HINT_LLM_PROMPT_TEMPLATE ---
+ENV_VAR_EVENT_HINT_HISTORY_COUNT = "SM_EVENT_HINT_HISTORY_COUNT"
+DEFAULT_EVENT_HINT_LLM_API_URL = DEFAULT_RAGQ_LLM_API_URL
+DEFAULT_EVENT_HINT_LLM_API_KEY = ""
+DEFAULT_EVENT_HINT_LLM_TEMPERATURE = 0.7
+DEFAULT_EVENT_HINT_HISTORY_COUNT = 6
+# Default template comes from library import
+
+# --- World State Parser Feature (Prompt uses library default) ---
+# --- REMOVED: ENV_VAR_WORLD_STATE_PARSE_PROMPT_TEMPLATE --- # No valve needed
+
+# --- General & Debug ---
 DEFAULT_INCLUDE_ACK_TURNS = True
 ENV_VAR_INCLUDE_ACK_TURNS = "SM_INCLUDE_ACK_TURNS"
 DEFAULT_EMIT_STATUS_UPDATES = True
@@ -288,33 +360,9 @@ DEFAULT_DEBUG_LOG_FINAL_PAYLOAD = False
 ENV_VAR_DEBUG_LOG_FINAL_PAYLOAD = "SM_DEBUG_LOG_PAYLOAD"
 DEFAULT_DEBUG_LOG_RAW_INPUT = False
 ENV_VAR_DEBUG_LOG_RAW_INPUT = "SM_DEBUG_LOG_RAW_INPUT"
-DEFAULT_ENABLE_INVENTORY_MANAGEMENT = False
-ENV_VAR_ENABLE_INVENTORY_MANAGEMENT = "SM_ENABLE_INVENTORY"
-ENV_VAR_INV_LLM_API_URL = "SM_INV_LLM_API_URL"
-ENV_VAR_INV_LLM_API_KEY = "SM_INV_LLM_API_KEY"
-ENV_VAR_INV_LLM_TEMPERATURE = "SM_INV_LLM_TEMPERATURE"
-ENV_VAR_INV_LLM_PROMPT_TEMPLATE = "SM_INV_LLM_PROMPT_TEMPLATE"
-DEFAULT_INV_LLM_API_URL = DEFAULT_REFINER_API_URL
-DEFAULT_INV_LLM_API_KEY = ""
-DEFAULT_INV_LLM_TEMPERATURE = DEFAULT_REFINER_TEMPERATURE
-DEFAULT_INV_LLM_PROMPT_TEMPLATE_VAL = DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT
-
-# --- NEW: Event Hint Defaults ---
-DEFAULT_ENABLE_EVENT_HINTS = False
-ENV_VAR_ENABLE_EVENT_HINTS = "SM_ENABLE_EVENT_HINTS"
-ENV_VAR_EVENT_HINT_LLM_API_URL = "SM_EVENT_HINT_LLM_API_URL"
-ENV_VAR_EVENT_HINT_LLM_API_KEY = "SM_EVENT_HINT_LLM_API_KEY"
-ENV_VAR_EVENT_HINT_LLM_TEMPERATURE = "SM_EVENT_HINT_LLM_TEMPERATURE"
-ENV_VAR_EVENT_HINT_LLM_PROMPT_TEMPLATE = "SM_EVENT_HINT_LLM_PROMPT_TEMPLATE"
-ENV_VAR_EVENT_HINT_HISTORY_COUNT = "SM_EVENT_HINT_HISTORY_COUNT"
-DEFAULT_EVENT_HINT_LLM_API_URL = DEFAULT_RAGQ_LLM_API_URL  # Default to same small model
-DEFAULT_EVENT_HINT_LLM_API_KEY = ""
-DEFAULT_EVENT_HINT_LLM_TEMPERATURE = 0.7  # Slightly higher for creativity
-DEFAULT_EVENT_HINT_HISTORY_COUNT = 6
-# Default template comes from library import
 
 # --- Logger Setup ---
-logger = logging.getLogger("SessionMemoryPipeV18_11Logger")  # Version updated
+logger = logging.getLogger("SessionMemoryPipeV18_12Logger")  # Version updated
 logging.basicConfig(level=logging.INFO)
 
 
@@ -363,12 +411,11 @@ class ChromaDBCompatibleEmbedder:
         return embeddings
 
 
-# === SECTION 5: PIPE CLASS DEFINITION (WITH ENHANCED DEBUG LOGGING) ===
+# === SECTION 5: PIPE CLASS DEFINITION (Prompt Valves Removed) ===
 class Pipe:
-    version = "0.18.11"  # Version updated
+    version = "0.18.12"  # Version updated
 
-    # === SECTION 5.1: VALVES DEFINITION ===
-    # (Valves class definition remains unchanged)
+    # === SECTION 5.1: VALVES DEFINITION (Prompt Valves Removed) ===
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -411,7 +458,7 @@ class Pipe:
                 )
             )
         )
-        # --- Summarizer LLM ---
+        # --- Summarizer LLM (Prompt uses script default) ---
         summarizer_api_url: str = Field(
             default=os.getenv(ENV_VAR_SUMMARIZER_API_URL, DEFAULT_SUMMARIZER_API_URL)
         )
@@ -425,12 +472,13 @@ class Pipe:
                 )
             )
         )
+        # --- KEPT: Summarizer System Prompt (Uses script default) ---
         summarizer_system_prompt: str = Field(
             default=os.getenv(
                 ENV_VAR_SUMMARIZER_SYSTEM_PROMPT, DEFAULT_SUMMARIZER_SYSTEM_PROMPT
             )
         )
-        # --- RAG Query LLM ---
+        # --- RAG Query LLM (Prompt uses script default) ---
         ragq_llm_api_url: str = Field(
             default=os.getenv(ENV_VAR_RAGQ_LLM_API_URL, DEFAULT_RAGQ_LLM_API_URL)
         )
@@ -442,6 +490,7 @@ class Pipe:
                 os.getenv(ENV_VAR_RAGQ_LLM_TEMPERATURE, DEFAULT_RAGQ_LLM_TEMPERATURE)
             )
         )
+        # --- KEPT: RAG Query LLM Prompt (Uses script default) ---
         ragq_llm_prompt: str = Field(
             default=os.getenv(ENV_VAR_RAGQ_LLM_PROMPT, DEFAULT_RAGQ_LLM_PROMPT)
         )
@@ -473,7 +522,7 @@ class Pipe:
         final_llm_timeout: int = Field(
             default=int(os.getenv(ENV_VAR_FINAL_LLM_TIMEOUT, DEFAULT_FINAL_LLM_TIMEOUT))
         )
-        # --- Refinement / RAG Cache Features ---
+        # --- Refinement / RAG Cache Features (Prompts use library defaults) ---
         enable_rag_cache: bool = Field(
             default=str(
                 os.getenv(ENV_VAR_ENABLE_RAG_CACHE, str(DEFAULT_ENABLE_RAG_CACHE))
@@ -505,28 +554,9 @@ class Pipe:
                 os.getenv(ENV_VAR_REFINER_HISTORY_COUNT, DEFAULT_REFINER_HISTORY_COUNT)
             )
         )
-        cache_update_prompt_template: str = Field(
-            default=os.getenv(ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE)
-            or DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
-            description="Prompt template for RAG Cache Step 1 (Update).",
-        )
-        final_context_selection_prompt_template: str = Field(
-            default=os.getenv(ENV_VAR_FINAL_SELECT_PROMPT_TEMPLATE)
-            or DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
-            description="Prompt template for RAG Cache Step 2 (Select).",
-        )
-        stateless_refiner_prompt_template: Optional[str] = Field(
-            default=(
-                os.getenv(ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE)
-                if os.getenv(ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE) is not None
-                else (
-                    DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE
-                    if DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE
-                    else None
-                )
-            ),
-            description="Prompt template for Stateless Refinement (Optional).",
-        )
+        # --- REMOVED: cache_update_prompt_template ---
+        # --- REMOVED: final_context_selection_prompt_template ---
+        # --- REMOVED: stateless_refiner_prompt_template ---
         CACHE_UPDATE_SKIP_OWI_THRESHOLD: int = Field(
             default=int(
                 os.getenv(
@@ -551,7 +581,7 @@ class Pipe:
                 )
             )
         )
-        # --- Inventory Management Feature ---
+        # --- Inventory Management Feature (Prompt uses library default) ---
         enable_inventory_management: bool = Field(
             default=str(
                 os.getenv(
@@ -573,13 +603,9 @@ class Pipe:
                 os.getenv(ENV_VAR_INV_LLM_TEMPERATURE, DEFAULT_INV_LLM_TEMPERATURE)
             )
         )
-        inv_llm_prompt_template: str = Field(
-            default=os.getenv(ENV_VAR_INV_LLM_PROMPT_TEMPLATE)
-            or DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
-            description="Prompt template for the Inventory Update LLM.",
-        )
+        # --- REMOVED: inv_llm_prompt_template ---
 
-        # --- Event Hint Feature ---
+        # --- Event Hint Feature (Prompt uses library default) ---
         enable_event_hints: bool = Field(
             default=str(
                 os.getenv(ENV_VAR_ENABLE_EVENT_HINTS, str(DEFAULT_ENABLE_EVENT_HINTS))
@@ -605,11 +631,7 @@ class Pipe:
                 )
             )
         )
-        event_hint_llm_prompt_template: str = Field(
-            default=os.getenv(ENV_VAR_EVENT_HINT_LLM_PROMPT_TEMPLATE)
-            or DEFAULT_EVENT_HINT_TEMPLATE_TEXT,  # Use imported default
-            description="Prompt template for the Event Hint LLM.",
-        )
+        # --- REMOVED: event_hint_llm_prompt_template ---
         event_hint_history_count: int = Field(
             default=int(
                 os.getenv(
@@ -617,6 +639,7 @@ class Pipe:
                 )
             )
         )
+        # --- REMOVED: world_state_parse_prompt_template ---
 
         # --- General & Debug ---
         include_ack_turns: bool = Field(
@@ -631,16 +654,14 @@ class Pipe:
             ).lower()
             == "true"
         )
-        debug_log_final_payload: bool = (
-            Field(  # <<< This enables logging in orchestrator now
-                default=str(
-                    os.getenv(
-                        ENV_VAR_DEBUG_LOG_FINAL_PAYLOAD,
-                        str(DEFAULT_DEBUG_LOG_FINAL_PAYLOAD),
-                    )
-                ).lower()
-                == "true"
-            )
+        debug_log_final_payload: bool = Field(
+            default=str(
+                os.getenv(
+                    ENV_VAR_DEBUG_LOG_FINAL_PAYLOAD,
+                    str(DEFAULT_DEBUG_LOG_FINAL_PAYLOAD),
+                )
+            ).lower()
+            == "true"
         )
         debug_log_raw_input: bool = Field(
             default=str(
@@ -651,7 +672,7 @@ class Pipe:
 
         # --- Post Init Validation ---
         def model_post_init(self, __context: Any) -> None:
-            # (Validation logic remains the same)
+            # (Validation logic remains the same for remaining valves)
             if self.t0_active_history_token_limit <= 0:
                 self.t0_active_history_token_limit = (
                     DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT
@@ -691,14 +712,6 @@ class Pipe:
                     DEFAULT_STATELESS_REFINER_SKIP_THRESHOLD
                 )
                 logger.warning("Reset stateless_refiner_skip_threshold.")
-            if (
-                self.stateless_refiner_prompt_template is not None
-                and not self.stateless_refiner_prompt_template.strip()
-            ):
-                self.stateless_refiner_prompt_template = None
-                logger.warning(
-                    "Reset stateless_refiner_prompt_template to None (was empty)."
-                )
             if self.CACHE_UPDATE_SKIP_OWI_THRESHOLD < 0:
                 self.CACHE_UPDATE_SKIP_OWI_THRESHOLD = (
                     DEFAULT_CACHE_UPDATE_SKIP_OWI_THRESHOLD
@@ -718,6 +731,16 @@ class Pipe:
             if self.event_hint_history_count < 0:
                 self.event_hint_history_count = DEFAULT_EVENT_HINT_HISTORY_COUNT
                 logger.warning("Reset event_hint_history_count to default.")
+            # --- Check kept prompt defaults ---
+            if not self.summarizer_system_prompt or not isinstance(
+                self.summarizer_system_prompt, str
+            ):
+                self.summarizer_system_prompt = DEFAULT_SUMMARIZER_SYSTEM_PROMPT
+                logger.warning("Reset summarizer_system_prompt to script default.")
+            if not self.ragq_llm_prompt or not isinstance(self.ragq_llm_prompt, str):
+                self.ragq_llm_prompt = DEFAULT_RAGQ_LLM_PROMPT
+                logger.warning("Reset ragq_llm_prompt to script default.")
+
             logger.info("Valves model_post_init validation complete.")
 
     # --- User Valves ---
@@ -737,9 +760,8 @@ class Pipe:
 
     # === SECTION 5.2: INITIALIZATION METHOD ===
     def __init__(self):
-        # (Initialization logic remains unchanged)
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Log Consolidation)"  # Version updated
+        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Simplify Prompts)"
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
@@ -748,11 +770,16 @@ class Pipe:
             raise ImportError(error_msg)
         try:
             self.valves = self.Valves()
+            # Modified logging to exclude removed prompt valves
             init_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
-                if "api_key" not in k and "prompt" not in k
+                if "api_key" not in k
             }
+            # Remove prompt keys explicitly for logging if they weren't removed by the filter
+            init_log_valves.pop("summarizer_system_prompt", None)
+            init_log_valves.pop("ragq_llm_prompt", None)
+            # Add feature flags
             init_log_valves["INIT_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
@@ -762,7 +789,10 @@ class Pipe:
             init_log_valves["INIT_debug_log_final_payload"] = getattr(
                 self.valves, "debug_log_final_payload", "LOAD_FAILED"
             )
-            self.logger.info(f"Pipe.__init__: self.valves loaded: {init_log_valves}")
+            self.logger.info(
+                f"Pipe.__init__: self.valves loaded (Prompts use defaults): {init_log_valves}"
+            )
+            # Warnings for missing keys remain the same
             if not self.valves.summarizer_api_key:
                 self.logger.warning("Global Summarizer API Key MISSING.")
             if not self.valves.ragq_llm_api_key:
@@ -798,6 +828,7 @@ class Pipe:
         except Exception as e:
             print(f"CRITICAL Logger config error: {e}")
             self.logger.critical(f"Logger config failed: {e}", exc_info=True)
+        # --- DB and Manager Initialization (Unchanged) ---
         self._sqlite_conn = None
         self._sqlite_cursor = None
         try:
@@ -842,6 +873,7 @@ class Pipe:
             )
             raise RuntimeError("Failed to initialize SessionManager") from e
         try:
+            # Pass self.valves which now lacks prompt template fields
             self.orchestrator = SessionPipeOrchestrator(
                 config=self.valves,
                 session_manager=self.session_manager,
@@ -913,7 +945,7 @@ class Pipe:
         if self._sqlite_cursor:
             try:
                 self.logger.info(
-                    "Attempting main SQLite table initialization (T1, Cache, Inv)..."
+                    "Attempting main SQLite table initialization (T1, Cache, Inv, WorldState)..."
                 )
                 init_success_main = await asyncio.to_thread(
                     initialize_sqlite_tables, self._sqlite_cursor
@@ -932,6 +964,7 @@ class Pipe:
                     f"Error during main SQLite table initialization: {e}", exc_info=True
                 )
                 init_success_main = False
+            # Explicit checks remain useful for debugging specific table issues
             self.logger.info("Explicitly attempting Inventory table initialization...")
             try:
                 from i4_llm_agent.database import _sync_initialize_inventory_table
@@ -957,6 +990,35 @@ class Pipe:
                     f"Error during explicit Inventory table initialization: {e_inv}",
                     exc_info=True,
                 )
+
+            self.logger.info(
+                "Explicitly attempting World State table initialization..."
+            )
+            try:
+                from i4_llm_agent.database import _sync_initialize_world_state_table
+
+                init_success_ws = await asyncio.to_thread(
+                    _sync_initialize_world_state_table, self._sqlite_cursor
+                )
+                (
+                    self.logger.info(
+                        "Explicit World State table initialization reported success."
+                    )
+                    if init_success_ws
+                    else self.logger.warning(
+                        "Explicit World State table initialization reported failure (may already exist or error occurred)."
+                    )
+                )
+            except ImportError:
+                self.logger.error(
+                    "Failed to import _sync_initialize_world_state_table for explicit check."
+                )
+            except Exception as e_ws:
+                self.logger.error(
+                    f"Error during explicit World State table initialization: {e_ws}",
+                    exc_info=True,
+                )
+
         else:
             self.logger.warning(
                 "SQLite cursor not available on startup. Cannot initialize tables."
@@ -999,7 +1061,7 @@ class Pipe:
         self.logger.info(f"'{self.name}' shutdown complete.")
 
     async def on_valves_updated(self):
-        # (No changes needed here - orchestrator config is updated)
+        # (Simplified logging due to removed prompt valves)
         self.logger.info(
             f"on_valves_updated: Reloading global settings for '{self.name}'..."
         )
@@ -1009,26 +1071,29 @@ class Pipe:
         old_chromadb_path = getattr(self.valves, "chromadb_path", None)
         try:
             self.valves = self.Valves()
+            # Modified logging to exclude removed prompt valves
             update_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
-                if "api_key" not in k and "prompt" not in k
+                if "api_key" not in k
             }
+            update_log_valves.pop("summarizer_system_prompt", None)
+            update_log_valves.pop("ragq_llm_prompt", None)
+            # Add feature flags
             update_log_valves["UPDATE_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
             update_log_valves["UPDATE_enable_event_hints"] = getattr(
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
-            update_log_valves["UPDATE_debug_log_final_payload"] = (
-                getattr(  # <<< Log debug setting
-                    self.valves, "debug_log_final_payload", "LOAD_FAILED"
-                )
+            update_log_valves["UPDATE_debug_log_final_payload"] = getattr(
+                self.valves, "debug_log_final_payload", "LOAD_FAILED"
             )
             self.logger.info(
-                f"Pipe.on_valves_updated: self.valves RE-loaded: {update_log_valves}"
+                f"Pipe.on_valves_updated: self.valves RE-loaded (Prompts use defaults): {update_log_valves}"
             )
             if hasattr(self, "orchestrator"):
+                # Pass the updated config (without prompt templates) to orchestrator
                 self.orchestrator.config = self.valves
                 self.logger.info("Orchestrator config updated.")
             else:
@@ -1040,6 +1105,7 @@ class Pipe:
                 f"Error re-initializing global valves: {e}. Pipe may use old settings.",
                 exc_info=True,
             )
+        # --- Checks for path/log changes remain ---
         new_log_path = getattr(self.valves, "log_file_path", None)
         new_log_level = getattr(self.valves, "log_level", None)
         if old_log_path != new_log_path or old_log_level != new_log_level:
@@ -1118,7 +1184,7 @@ class Pipe:
             self.logger.error(f"Embeddings: Error during retrieval: {e}", exc_info=True)
         return embedding_func
 
-    # === SECTION 5.8 & 5.9: HELPER - Debug Logging (ADDED LOGGING) ===
+    # === SECTION 5.8 & 5.9: HELPER - Debug Logging (Unchanged) ===
     def _get_debug_log_path(self, suffix: str) -> Optional[str]:
         # (No changes needed here)
         func_logger = self.logger
@@ -1190,58 +1256,9 @@ class Pipe:
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
             )
 
-    # <<< FUNCTION REMOVED >>> - Handled by orchestrator now
-    # def _log_debug_final_payload(self, session_id: str, payload_body: Dict):
-    #     ...
+    # --- REMOVED: _log_debug_inventory_llm (Handled by orchestrator) ---
 
-    # --- MODIFIED: Inventory Log uses .DEBUG_PAYLOAD file ---
-    def _log_debug_inventory_llm(self, session_id: str, content: Any, is_prompt: bool):
-        # <<< MODIFIED HERE >>>
-        # Log to the same file as the final payload for consolidation.
-        debug_log_path = self._get_debug_log_path(".DEBUG_PAYLOAD")
-        if not debug_log_path:
-            self.logger.error(
-                f"[{session_id}] Cannot log inventory LLM data: No path determined."
-            )
-            return
-        # Only log if the main debug payload logging is enabled
-        if not getattr(self.valves, "debug_log_final_payload", False):
-            return
-
-        log_type = "PROMPT" if is_prompt else "RESPONSE"
-        try:
-            ts = datetime.now(timezone.utc).isoformat()
-            log_content = content
-            if not is_prompt and isinstance(content, str):
-                try:
-                    parsed = json.loads(content)
-                    log_content = json.dumps(parsed, indent=2)
-                except json.JSONDecodeError:
-                    pass  # Keep as string if not valid JSON
-
-            self.logger.debug(
-                f"[{session_id}] Attempting to write INVENTORY LLM ({log_type}) debug log to: {debug_log_path}"
-            )
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(
-                    f"\n--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- START ---\n"
-                )
-                f.write(str(log_content))
-                f.write(
-                    f"\n--- [{ts}] SESSION: {session_id} - INVENTORY LLM {log_type} --- END ---\n\n"
-                )
-            self.logger.debug(
-                f"[{session_id}] Successfully wrote INVENTORY LLM ({log_type}) debug log."
-            )
-        except Exception as e:
-            self.logger.error(
-                f"[{session_id}] Failed write debug inventory LLM log ({log_type}): {e}",
-                exc_info=True,
-            )
-
-    # --- END MODIFICATION ---
-
-    # === SECTION 5.11: MAIN PIPE METHOD (Payload Logging Removed) ===
+    # === SECTION 5.11: MAIN PIPE METHOD (Unchanged) ===
     async def pipe(
         self,
         body: dict,
@@ -1254,7 +1271,7 @@ class Pipe:
         __task__=None,
         __task_body__: Optional[dict] = None,
     ) -> Union[dict, AsyncGenerator[str, None], str]:
-        # (Logic mostly unchanged, just removed the final payload logging block)
+        # (Logic mostly unchanged, uses updated orchestrator config)
         pipe_start_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Pipe.pipe v{self.version}: Entered at {pipe_start_time_iso}")
         self._current_event_emitter = __event_emitter__
@@ -1335,13 +1352,10 @@ class Pipe:
 
             # --- Orchestrator Config Update ---
             if hasattr(self, "orchestrator") and hasattr(self, "valves"):
+                # Pass the potentially updated self.valves (without prompt templates)
                 self.orchestrator.config = self.valves
-                self.orchestrator.pipe_logger = (
-                    self.logger
-                )  # Pass logger for debug helpers
-                self.orchestrator.pipe_debug_path_getter = (
-                    self._get_debug_log_path
-                )  # Pass path getter
+                self.orchestrator.pipe_logger = self.logger
+                self.orchestrator.pipe_debug_path_getter = self._get_debug_log_path
                 self.logger.debug(
                     f"[{session_id}] Pipe: Force-updated orchestrator config, logger, and path getter refs."
                 )
@@ -1488,6 +1502,7 @@ class Pipe:
             # --- Call Orchestrator ---
             await emit_status("Status: Pipe delegating to orchestrator...")
             self.logger.info(f"[{session_id}] Calling orchestrator.process_turn...")
+            # Orchestrator will use its internally referenced config (updated above)
             orchestrator_result = await self.orchestrator.process_turn(
                 session_id=session_id,
                 user_id=user_id,
@@ -1501,9 +1516,6 @@ class Pipe:
             self.logger.info(
                 f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
             )
-
-            # --- REMOVED: Final Payload Debug Logging Check ---
-            # (This logic is now inside the orchestrator)
 
             # --- Final Cleanup & Return ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
