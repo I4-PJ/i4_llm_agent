@@ -29,32 +29,39 @@ WS_PARSE_CURRENT_DAY_PLACEHOLDER = "{current_day}"
 WS_PARSE_CURRENT_TIME_PLACEHOLDER = "{current_time_of_day}"
 # Removed Weather/Season placeholders
 
-# === MODIFIED: Simplified Default prompt template for Day/Time Parsing ===
+# === MODIFIED V2: Stricter Default prompt template for Day/Time Parsing ===
 DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = f"""
 [[SYSTEM ROLE: Day and Time Change Detector]]
 
-**Objective:** Analyze the provided 'LLM Response Text' and 'Recent History' to identify explicit or strongly implied *changes* ONLY to the Day number and Time of Day, relative to the 'Current State'. Output ONLY a JSON object containing the detected changes.
+**Objective:** Analyze ONLY the 'LLM Response Text' provided below to identify explicit or strongly implied *changes* to the Day number and Time of Day, relative to the 'Current State'. Output ONLY a JSON object containing the detected changes.
 
-**Current State (Reference Point):**
+**Current State (Reference Point - State BEFORE the LLM Response Text):**
 *   Day: {WS_PARSE_CURRENT_DAY_PLACEHOLDER}
 *   Time of Day: {WS_PARSE_CURRENT_TIME_PLACEHOLDER}
 
-**LLM Response Text (Analyze This Primarily):**
+**LLM Response Text (Analyze THIS TEXT ONLY for time progression):**
 ---
 {WS_PARSE_RESPONSE_PLACEHOLDER}
 ---
 
-**Recent History (For Context):**
+**Recent History (Provided ONLY for understanding context - DO NOT extract time changes from here):**
 ---
 {WS_PARSE_HISTORY_PLACEHOLDER}
 ---
 
 **Instructions:**
 
-1.  **Focus on Day/Time Changes:** Compare the events described in the 'LLM Response Text' against the 'Current State'. Identify ONLY clear changes to Day or Time of Day.
-2.  **Day Increment:** If the text indicates one or more full days have passed (e.g., "next morning", "the following day", "two days later"), set `day_increment` to the integer number of days passed (usually 1). Otherwise, set it to `0`.
-3.  **Time of Day:** If the text explicitly states or strongly implies a *new* time of day (Morning, Afternoon, Evening, Night) that is *different* from the 'Current State', set `time_of_day` to the new value (e.g., "Morning"). Otherwise, set it to `null`. If the day increments, the time *usually* resets to "Morning" unless specified otherwise in the text. Ignore vague terms like "later".
-4.  **Output Format:** Respond ONLY with a valid JSON object with the following structure. Use `0` or `null` for fields where no change was detected relative to the current state.
+1.  **Analyze ONLY the LLM Response Text:** Your primary task is to read the 'LLM Response Text' and determine if the *narrative events described within it* demonstrate a change in Day or Time of Day compared to the 'Current State'.
+2.  **Day Increment:**
+    *   If the 'LLM Response Text' explicitly states or clearly shows through narrative progression that one or more full days have passed *since the Current State* (e.g., "The next morning...", "Dawn arrived...", "Two days later, they...", narrative describes sleeping and waking up), set `day_increment` to the integer number of days passed (usually 1, sometimes more if explicitly stated *in the LLM Response Text*).
+    *   Otherwise, set `day_increment` to `0`.
+    *   **Crucially: Do NOT increment the day based on mentions of time differences (e.g., 'advantage', 'behind'), future plans ('tomorrow'), or past events ('yesterday', 'when we were camping') found in the 'Recent History'. The change MUST be evident *within the LLM Response Text itself*.**
+3.  **Time of Day:**
+    *   If the 'LLM Response Text' explicitly states or strongly implies a *new* time of day (Morning, Afternoon, Evening, Night) that is *different* from the 'Current State' *and occurs within the narrative progression of the LLM Response Text*, set `time_of_day` to the new value (e.g., "Morning").
+    *   If the day increments (based on analysis of the LLM Response Text), the time *usually* resets to "Morning" unless the text specifies otherwise (e.g., "Two days later, in the afternoon...").
+    *   Otherwise (if no change is evident *in the LLM Response Text*), set `time_of_day` to `null`. Ignore vague terms like "later".
+    *   **Do NOT change the time based on information found only in the 'Recent History'.**
+4.  **Output Format:** Respond ONLY with a valid JSON object with the following structure. Use `0` or `null` for fields where no change was detected *in the LLM Response Text*.
 
     ```json
     {{{{  # Escaped literal brace
@@ -63,11 +70,13 @@ DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = f"""
     }}}}  # Escaped literal brace
     ```
 
-5.  **Accuracy:** Only report changes explicitly stated or very strongly implied by narrative progression (e.g., mentioning sunrise implies morning). Do not infer subtle shifts. If unsure, report no change (`0` or `null`).
-6.  **No Changes:** If the text describes events happening within the *current* day/time without changing it, output: `{{"day_increment": 0, "time_of_day": null}}`
+5.  **Accuracy:** Only report changes explicitly stated or very strongly implied by narrative progression *within the LLM Response Text*. Do not infer subtle shifts. If unsure, report no change (`0` or `null`).
+6.  **No Changes:** If the 'LLM Response Text' describes events happening within the *current* day/time (relative to the 'Current State') without demonstrating a change, output: `{{"day_increment": 0, "time_of_day": null}}`
 
 **JSON Output:**
 """
+# === END MODIFIED V2 ===
+
 
 # === NEW: Prompt Template for Weather Confirmation ===
 WEATHER_CONFIRM_PROMPT_TEMPLATE = """
@@ -182,10 +191,11 @@ async def parse_world_state_with_llm(
 ) -> Dict[str, Any]:
     """
     Uses an LLM to parse the main LLM response for **Day and Time of Day** changes only.
+    Focuses analysis strictly on the provided llm_response_text narrative.
 
     Args:
         llm_response_text: The text generated by the main LLM.
-        history_messages: Recent dialogue history for context.
+        history_messages: Recent dialogue history for context (used by formatter).
         current_day: Current day number (for prompt context).
         current_time_of_day: Current time string (for prompt context).
         llm_call_func: The async function wrapper to call the LLM.
@@ -228,20 +238,28 @@ async def parse_world_state_with_llm(
     llm_url = ws_parse_llm_config.get('url')
     llm_key = ws_parse_llm_config.get('key')
     llm_temp = ws_parse_llm_config.get('temp', 0.3)
+    # Use the potentially overridden prompt template from config, otherwise the (modified) default
     prompt_template = ws_parse_llm_config.get('prompt_template', DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT)
 
     if not llm_url or not llm_key: func_logger.error(f"[{caller_info}] LLM URL/Key missing. Skipping."); return {}
-    if not prompt_template or not isinstance(prompt_template, str): prompt_template = DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT; func_logger.warning(f"[{caller_info}] Invalid prompt template, using default.");
-    if not prompt_template or not isinstance(prompt_template, str): func_logger.error(f"[{caller_info}] Default prompt template invalid. Cannot proceed."); return {}
+    # Check against the actual default text in case config didn't provide one
+    if not prompt_template or not isinstance(prompt_template, str):
+         prompt_template = DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
+         func_logger.warning(f"[{caller_info}] Invalid prompt template in config, using default (stricter version).")
+    # Final check if even the default is somehow broken (shouldn't happen with code generation)
+    if not prompt_template or not isinstance(prompt_template, str):
+        func_logger.error(f"[{caller_info}] Default prompt template invalid. Cannot proceed."); return {}
+
     if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func): func_logger.error(f"[{caller_info}] Invalid llm_call_func. Skipping."); return {}
     if not llm_response_text or not isinstance(llm_response_text, str): func_logger.debug(f"[{caller_info}] No response text. Skipping."); return {}
 
     # --- Prepare Inputs ---
     if not isinstance(history_messages, list): history_messages = []; func_logger.warning(f"[{caller_info}] history_messages not list.")
+    # History is only needed for formatting the context section of the prompt
     history_context_turns = get_recent_turns(history_messages, 4, DIALOGUE_ROLES, exclude_last=False)
     recent_history_str = format_history_for_llm(history_context_turns)
 
-    # Format the simplified prompt
+    # Format the stricter prompt
     prompt_text = _format_world_state_parse_prompt(
         template=prompt_template,
         llm_response_text=llm_response_text,
@@ -254,7 +272,7 @@ async def parse_world_state_with_llm(
 
     # --- Call LLM ---
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    func_logger.info(f"[{caller_info}] Calling Day/Time Parsing LLM...")
+    func_logger.info(f"[{caller_info}] Calling Day/Time Parsing LLM (stricter prompt)...")
     _log_ws_parse_debug(content=prompt_text, is_input=True, log_suffix=".DEBUG_DAYTIME_PARSE") # Use specific suffix
 
     success = False; response_or_error = "Init Error"
@@ -289,6 +307,7 @@ async def parse_world_state_with_llm(
 
                 # Extract Time of Day
                 time_of_day = parsed_json.get('time_of_day')
+                # Check if it's a valid string and not 'null' (case-insensitive)
                 if isinstance(time_of_day, str) and time_of_day.strip() and time_of_day.lower() != 'null':
                     # Check if it differs from current time before storing change
                     if time_of_day != current_time_of_day:
@@ -297,6 +316,7 @@ async def parse_world_state_with_llm(
                     else:
                          func_logger.debug(f"[{caller_info}] LLM reported time '{time_of_day}', matches current. No change recorded.")
                          detected_changes['time_of_day'] = None # Explicitly no change
+                # Check if it's explicitly null or None
                 elif time_of_day is None or (isinstance(time_of_day, str) and time_of_day.lower() == 'null'):
                     func_logger.debug(f"[{caller_info}] LLM reported null time_of_day. No change recorded.")
                     detected_changes['time_of_day'] = None # Explicitly no change

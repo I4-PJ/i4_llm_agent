@@ -603,7 +603,7 @@ class SessionPipeOrchestrator:
         except Exception as e_rag_outer: self.logger.error(f"[{session_id}] Unexpected error during outer T2 RAG processing: {e_rag_outer}", exc_info=True); retrieved_rag_summaries = []; t2_retrieved_count = 0
         return retrieved_rag_summaries, t2_retrieved_count
 
-    # === _prepare_and_refine_background (MODIFIED - Added debug_log_path_getter pass-through) ===
+# === START OF MODIFIED _prepare_and_refine_background ===
     async def _prepare_and_refine_background(
         self, session_id: str, body: Dict, user_valves: Any,
         retrieved_t1_summaries: List[str], # Pass T1 summaries here
@@ -682,33 +682,83 @@ class SessionPipeOrchestrator:
 
             if not session_process_owi_rag: _log_inventory_trace("Skipping RAG Cache Step 1 (session valve 'process_owi_rag=False')."); cache_update_skipped = True; run_step1 = False; updated_cache_text_intermediate = previous_cache_text
             else:
-                 skip_len = False; skip_sim = False; owi_content_for_check = extracted_owi_context or ""; len_thresh = getattr(self.config, 'CACHE_UPDATE_SKIP_OWI_THRESHOLD', 50)
-                 if len(owi_content_for_check.strip()) < len_thresh: skip_len = True; _log_inventory_trace(f"Cache S1 Skip: OWI len ({len(owi_content_for_check.strip())}) < {len_thresh}.")
-                 elif self._calculate_similarity_func and previous_cache_text:
-                      sim_thresh = getattr(self.config, 'CACHE_UPDATE_SIMILARITY_THRESHOLD', 0.9)
-                      try: sim_score = self._calculate_similarity_func(owi_content_for_check, previous_cache_text)
-                      except Exception as e_sim: func_logger.error(f"[{session_id}] Error calculating similarity: {e_sim}")
-                      else:
-                          if sim_score > sim_thresh: skip_sim = True; _log_inventory_trace(f"Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.")
-                 cache_update_skipped = skip_len or skip_sim; run_step1 = not cache_update_skipped
-                 if cache_update_skipped: await self._emit_status(event_emitter, session_id, "Status: Skipping cache update (redundant OWI)."); updated_cache_text_intermediate = previous_cache_text; _log_inventory_trace("Cache Step 1 SKIPPED.")
+                 skip_len = False
+                 skip_sim = False # <<< Initialize skip_sim to False
+                 owi_content_for_check = extracted_owi_context or "";
+                 len_thresh = getattr(self.config, 'CACHE_UPDATE_SKIP_OWI_THRESHOLD', 50)
+
+                 if len(owi_content_for_check.strip()) < len_thresh:
+                     skip_len = True
+                     _log_inventory_trace(f"Cache S1 Skip: OWI len ({len(owi_content_for_check.strip())}) < {len_thresh}.")
+                 # --- START DISABLED SIMILARITY CHECK ---
+                 # elif self._calculate_similarity_func and previous_cache_text:
+                 #      # This block is computationally expensive for large strings
+                 #      _log_inventory_trace("Performing similarity check (can be slow)...")
+                 #      sim_thresh = getattr(self.config, 'CACHE_UPDATE_SIMILARITY_THRESHOLD', 0.9)
+                 #      try:
+                 #          sim_score = self._calculate_similarity_func(owi_content_for_check, previous_cache_text)
+                 #          _log_inventory_trace(f"Similarity check complete. Score: {sim_score:.4f}")
+                 #      except Exception as e_sim:
+                 #          func_logger.error(f"[{session_id}] Error calculating similarity: {e_sim}")
+                 #          # Optionally decide not to skip if calculation fails
+                 #      else:
+                 #          if sim_score > sim_thresh:
+                 #              skip_sim = True # <<< This is now always False
+                 #              _log_inventory_trace(f"Cache S1 Skip: Sim ({sim_score:.2f}) > {sim_thresh:.2f}.")
+                 else:
+                      # Log if similarity check would have run but is disabled
+                      if self._calculate_similarity_func and previous_cache_text:
+                          _log_inventory_trace("Cache S1 Skip: Similarity check DISABLED.")
+                 # --- END DISABLED SIMILARITY CHECK ---
+
+                 cache_update_skipped = skip_len or skip_sim # skip_sim is always False now
+                 run_step1 = not cache_update_skipped
+                 if cache_update_skipped:
+                     await self._emit_status(event_emitter, session_id, "Status: Skipping cache update (short OWI).") # Modified status
+                     updated_cache_text_intermediate = previous_cache_text
+                     _log_inventory_trace("Cache Step 1 SKIPPED (OWI length or disabled similarity).") # Modified log
 
             cache_update_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,}
             final_select_llm_config = { "url": getattr(self.config, 'refiner_llm_api_url', None), "key": getattr(self.config, 'refiner_llm_api_key', None), "temp": getattr(self.config, 'refiner_llm_temperature', 0.3), "prompt_template": DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,}
             configs_ok_step1 = all([cache_update_llm_config["url"], cache_update_llm_config["key"], cache_update_llm_config["prompt_template"] != "[Default Cache Prompt Load Failed]"])
             configs_ok_step2 = all([final_select_llm_config["url"], final_select_llm_config["key"], final_select_llm_config["prompt_template"] != "[Default Select Prompt Load Failed]"])
 
-            if not (configs_ok_step1 and configs_ok_step2): _log_inventory_trace("ERROR: RAG Cache Refiner config incomplete or default prompt failed load. Cannot proceed."); await self._emit_status(event_emitter, session_id, "ERROR: RAG Cache Refiner config incomplete.", done=False); updated_cache_text_intermediate = previous_cache_text; run_step1 = False
+            if not (configs_ok_step1 and configs_ok_step2):
+                _log_inventory_trace("ERROR: RAG Cache Refiner config incomplete or default prompt failed load. Cannot proceed.");
+                await self._emit_status(event_emitter, session_id, "ERROR: RAG Cache Refiner config incomplete.", done=False);
+                updated_cache_text_intermediate = previous_cache_text;
+                run_step1 = False # Ensure step 1 doesn't run if config is bad
             else:
                  if run_step1:
-                      await self._emit_status(event_emitter, session_id, "Status: Updating background cache..."); _log_inventory_trace("Executing RAG Cache Step 1 (Update)...")
+                      await self._emit_status(event_emitter, session_id, "Status: Updating background cache...");
+                      _log_inventory_trace("Executing RAG Cache Step 1 (Update)...")
                       try:
-                          updated_cache_text_intermediate = await self._cache_update_func( session_id=session_id, current_owi_context=extracted_owi_context, history_messages=current_active_history, latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper, sqlite_cursor=self.sqlite_cursor, cache_update_llm_config=cache_update_llm_config, history_count=getattr(self.config, 'refiner_history_count', 6), dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CacheUpdate_{session_id}",)
-                          cache_update_performed = True; _log_inventory_trace(f"RAG Cache Step 1 (Update) completed. Updated cache length: {len(updated_cache_text_intermediate)}")
-                      except Exception as e_cache_update: func_logger.error(f"[{session_id}] EXCEPTION during RAG Cache Step 1 (Update): {e_cache_update}", exc_info=True); updated_cache_text_intermediate = previous_cache_text; _log_inventory_trace(f"EXCEPTION during RAG Cache Step 1: {e_cache_update}")
+                          updated_cache_text_intermediate = await self._cache_update_func(
+                              session_id=session_id,
+                              current_owi_context=extracted_owi_context,
+                              history_messages=current_active_history,
+                              latest_user_query=latest_user_query_str,
+                              llm_call_func=self._async_llm_call_wrapper,
+                              sqlite_cursor=self.sqlite_cursor,
+                              cache_update_llm_config=cache_update_llm_config,
+                              history_count=getattr(self.config, 'refiner_history_count', 6),
+                              dialogue_only_roles=self._dialogue_roles,
+                              caller_info=f"Orch_CacheUpdate_{session_id}",
+                          )
+                          cache_update_performed = True;
+                          _log_inventory_trace(f"RAG Cache Step 1 (Update) completed. Updated cache length: {len(updated_cache_text_intermediate)}")
+                      except Exception as e_cache_update:
+                          func_logger.error(f"[{session_id}] EXCEPTION during RAG Cache Step 1 (Update): {e_cache_update}", exc_info=True);
+                          updated_cache_text_intermediate = previous_cache_text; # Revert to previous cache on error
+                          _log_inventory_trace(f"EXCEPTION during RAG Cache Step 1: {e_cache_update}")
 
-                 await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context..."); base_owi_context_for_selection = extracted_owi_context or ""; _log_inventory_trace("Executing RAG Cache Step 2 (Select)..."); _log_inventory_trace(f"Step 2 Input Cache Length: {len(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else '')}"); _log_inventory_trace(f"Step 2 Input OWI Length: {len(base_owi_context_for_selection)}")
-                 # --- MODIFIED CALL: Pass the debug log path getter ---
+                 # --- Step 2: Select Final Context (remains unchanged) ---
+                 await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context...");
+                 base_owi_context_for_selection = extracted_owi_context or "";
+                 _log_inventory_trace("Executing RAG Cache Step 2 (Select)...");
+                 _log_inventory_trace(f"Step 2 Input Cache Length: {len(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else '')}");
+                 _log_inventory_trace(f"Step 2 Input OWI Length: {len(base_owi_context_for_selection)}")
+
                  final_selected_context = await self._cache_select_func(
                      updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""),
                      current_owi_context=base_owi_context_for_selection,
@@ -719,10 +769,13 @@ class SessionPipeOrchestrator:
                      history_count=getattr(self.config, 'refiner_history_count', 6),
                      dialogue_only_roles=self._dialogue_roles,
                      caller_info=f"Orch_CtxSelect_{session_id}",
-                     debug_log_path_getter=self._orchestrator_get_debug_log_path # <-- NEW ARGUMENT
+                     debug_log_path_getter=self._orchestrator_get_debug_log_path # Pass the debug log path getter
                  )
-                 # --- END MODIFIED CALL ---
-                 final_context_selection_performed = True; refined_context_str = final_selected_context; log_step1_status = "Performed" if cache_update_performed else ("Skipped" if cache_update_skipped else "Not Run"); _log_inventory_trace(f"RAG Cache Step 2 complete. Selected context length: {len(refined_context_str)}. Step 1: {log_step1_status}")
+
+                 final_context_selection_performed = True;
+                 refined_context_str = final_selected_context;
+                 log_step1_status = "Performed" if cache_update_performed else ("Skipped" if cache_update_skipped else "Not Run");
+                 _log_inventory_trace(f"RAG Cache Step 2 complete. Selected context length: {len(refined_context_str)}. Step 1: {log_step1_status}")
                  await self._emit_status(event_emitter, session_id, "Status: Context selection complete.", done=False)
 
         elif enable_stateless_refin_global and self._stateless_refine_func:
@@ -736,11 +789,29 @@ class SessionPipeOrchestrator:
                      _log_inventory_trace("Skipping stateless refinement: Refiner URL/Key missing or default prompt failed load."); await self._emit_status(event_emitter, session_id, "ERROR: Stateless Refiner config incomplete.", done=False)
                  else:
                       try:
-                          refined_stateless_context = await self._stateless_refine_func( external_context=extracted_owi_context, history_messages=current_active_history, latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper, refiner_llm_config=stateless_refiner_config, skip_threshold=getattr(self.config, 'stateless_refiner_skip_threshold', 500), history_count=getattr(self.config, 'refiner_history_count', 6), dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_StatelessRef_{session_id}",)
-                          if refined_stateless_context != extracted_owi_context: refined_context_str = refined_stateless_context; stateless_refinement_performed = True; _log_inventory_trace(f"Stateless refinement successful. Refined length: {len(refined_context_str)}."); await self._emit_status(event_emitter, session_id, "Status: OWI context refined (stateless).", done=False)
-                          else: _log_inventory_trace("Stateless refinement resulted in no change or was skipped by length.")
-                      except Exception as e_refine_stateless: func_logger.error(f"[{session_id}] EXCEPTION during stateless refinement: {e_refine_stateless}", exc_info=True); _log_inventory_trace(f"EXCEPTION during stateless refinement: {e_refine_stateless}")
-        else: _log_inventory_trace("No context refinement feature (RAG Cache or Stateless) is enabled.")
+                          refined_stateless_context = await self._stateless_refine_func(
+                              external_context=extracted_owi_context,
+                              history_messages=current_active_history,
+                              latest_user_query=latest_user_query_str,
+                              llm_call_func=self._async_llm_call_wrapper,
+                              refiner_llm_config=stateless_refiner_config,
+                              skip_threshold=getattr(self.config, 'stateless_refiner_skip_threshold', 500),
+                              history_count=getattr(self.config, 'refiner_history_count', 6),
+                              dialogue_only_roles=self._dialogue_roles,
+                              caller_info=f"Orch_StatelessRef_{session_id}",
+                          )
+                          if refined_stateless_context != extracted_owi_context:
+                              refined_context_str = refined_stateless_context;
+                              stateless_refinement_performed = True;
+                              _log_inventory_trace(f"Stateless refinement successful. Refined length: {len(refined_context_str)}.");
+                              await self._emit_status(event_emitter, session_id, "Status: OWI context refined (stateless).", done=False)
+                          else:
+                              _log_inventory_trace("Stateless refinement resulted in no change or was skipped by length.")
+                      except Exception as e_refine_stateless:
+                          func_logger.error(f"[{session_id}] EXCEPTION during stateless refinement: {e_refine_stateless}", exc_info=True);
+                          _log_inventory_trace(f"EXCEPTION during stateless refinement: {e_refine_stateless}")
+        else:
+            _log_inventory_trace("No context refinement feature (RAG Cache or Stateless) is enabled.")
 
         _log_inventory_trace("Step 4: Calculating refined context tokens...")
         if self._count_tokens_func and self._tokenizer:
@@ -757,7 +828,7 @@ class SessionPipeOrchestrator:
             initial_owi_context_tokens,
             refined_context_tokens,
             cache_update_performed,
-            cache_update_skipped,
+            cache_update_skipped, # Will now only be True if OWI len was below threshold
             final_context_selection_performed,
             stateless_refinement_performed,
             formatted_inventory_string # Use the actual formatted string here
@@ -1334,4 +1405,6 @@ class SessionPipeOrchestrator:
             except Exception: pass
             return {"error": f"Orchestrator failed: {type(e_orch).__name__}", "status_code": 500}
 
-# === END OF FILE i4_llm_agent/orchestration.py ===
+
+
+

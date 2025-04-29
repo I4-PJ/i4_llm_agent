@@ -1,6 +1,7 @@
 
 - Database file path to be reflected as set in valve
 - Message refresh should prevent inventory items duplicates
+- Inventory definitely needs reworking
 - Debug logs now containing sometimes all the content in message which is not needed => too much information
 - Debug / Info level valve should really reflect the level of logging in the file for all outputs
 - Rename Inv Llm Api Url to Inventory and World related APIs
