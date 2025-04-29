@@ -634,6 +634,7 @@ async def generate_rag_query(
 
 
 # --- Function: Construct Final LLM Payload (Existing - Unchanged structure) ---
+# === START MODIFIED construct_final_llm_payload ===
 def construct_final_llm_payload(
     system_prompt: str,
     history: List[Dict],
@@ -641,18 +642,20 @@ def construct_final_llm_payload(
     query: str,
     long_term_goal: Optional[str] = None,
     event_hint: Optional[str] = None,
+    period_setting: Optional[str] = None, # <<< NEW PARAMETER
     strategy: str = 'standard',
     include_ack_turns: bool = True
 ) -> Dict[str, Any]:
     """
     Constructs the final payload for the LLM in Google's 'contents' format,
-    injecting the long-term goal, event hint/guideline, and weather guideline
-    into the payload.
+    injecting the long-term goal, event hint/guideline, weather guideline,
+    and period setting into the payload.
     """
     func_logger = logging.getLogger(__name__ + '.construct_final_llm_payload')
     func_logger.debug(
         f"Constructing final LLM payload. Strategy: {strategy}, ACKs: {include_ack_turns}, "
-        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}"
+        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}, "
+        f"Period Setting Provided: '{period_setting or 'None'}'" # MODIFIED LOG
     )
 
     gemini_contents = []
@@ -698,6 +701,18 @@ The background information may contain a "Proposed Weather Change: From X to Y".
     final_system_instructions += weather_suggestion_guideline
     func_logger.debug(f"Appended weather suggestion guideline to system instructions text.")
 
+    # --- NEW: Append Period Setting (if provided) ---
+    safe_period_setting = period_setting.strip() if isinstance(period_setting, str) else None
+    if safe_period_setting:
+        period_block = f"""
+
+--- [ Period Setting ] ---
+[[Setting Instruction: Generate content appropriate for a '{safe_period_setting}' setting.]]
+--- [ END Period Setting ] ---"""
+        final_system_instructions += period_block
+        func_logger.debug(f"Appended period setting instruction ('{safe_period_setting}') to system instructions text.")
+    # --- END NEW ---
+
     # 2. Add the combined System Instructions turn and optional ACK
     if final_system_instructions:
         gemini_contents.append({"role": "user", "parts": [{"text": f"System Instructions:\n{final_system_instructions}"}]})
@@ -705,6 +720,8 @@ The background information may contain a "Proposed Weather Change: From X to Y".
             ack_text = "Understood. I will follow these instructions."
             if safe_long_term_goal:
                  ack_text += " I will also keep the long-term goal in mind."
+            if safe_period_setting: # Add to ACK if setting provided
+                ack_text += f" I will also maintain a '{safe_period_setting}' setting."
             gemini_contents.append({"role": "model", "parts": [{"text": ack_text}]})
 
     # 3. Prepare History Turns (Filter for valid roles/content)
@@ -741,12 +758,12 @@ The background information may contain a "Proposed Weather Change: From X to Y".
     final_query_turn = {"role": "user", "parts": [{"text": final_query_text}]} # Use the potentially modified text
 
     # 6. Assemble Payload based on Strategy
-    if strategy == 'standard': # [Sys+Goal+Guidelines] -> Hist -> [Ctx] -> Query
+    if strategy == 'standard': # [Sys+Goal+Guidelines+Period] -> Hist -> [Ctx] -> Query
         gemini_contents.extend(history_turns)
         if context_turn: gemini_contents.append(context_turn)
         if ack_turn: gemini_contents.append(ack_turn)
         gemini_contents.append(final_query_turn)
-    elif strategy == 'advanced': # [Sys+Goal+Guidelines] -> [Ctx] -> Hist -> Query
+    elif strategy == 'advanced': # [Sys+Goal+Guidelines+Period] -> [Ctx] -> Hist -> Query
         if context_turn: gemini_contents.append(context_turn)
         if ack_turn: gemini_contents.append(ack_turn)
         gemini_contents.extend(history_turns)
@@ -758,6 +775,7 @@ The background information may contain a "Proposed Weather Change: From X to Y".
     final_payload = {"contents": gemini_contents}
     func_logger.debug(f"Final payload constructed with {len(gemini_contents)} turns using strategy '{strategy}'.")
     return final_payload
+# === END MODIFIED construct_final_llm_payload ===
 
 
 # --- Function: Combine Background Context (MODIFIED to include Scene Description) ---

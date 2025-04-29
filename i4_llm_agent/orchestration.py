@@ -844,13 +844,13 @@ class SessionPipeOrchestrator:
 
 
 
-    # === MAIN PROCESSING METHOD (MODIFIED - Dynamic Scene Config) ===
+# === MAIN PROCESSING METHOD (MODIFIED - Period Setting Injection) ===
     async def process_turn(
         self,
         session_id: str,
         user_id: str,
         body: Dict,
-        user_valves: Any,
+        user_valves: Any, # Expects an object with user valve attributes
         event_emitter: Optional[Callable],
         embedding_func: Optional[Callable] = None,
         chroma_embed_wrapper: Optional[Any] = None,
@@ -861,6 +861,7 @@ class SessionPipeOrchestrator:
         inventory, and memory management.
         Loads Scene LLM config dynamically.
         Uses library default prompts for Summarizer and RAG Query.
+        Injects 'period_setting' from user_valves into Scene, Hint, and Final LLM prompts.
         """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
@@ -871,6 +872,14 @@ class SessionPipeOrchestrator:
         self.logger.info(f"[{session_id}] Event Hints/Weather Proposal Enabled: {event_hints_enabled} (Module Avail: {_EVENT_HINTS_AVAILABLE})")
         self.logger.info(f"[{session_id}] Scene Generation Enabled: {scene_generation_enabled} (Module Avail: {_SCENE_GENERATOR_AVAILABLE})")
         self.logger.info(f"[{session_id}] World State Day/Time Parser Enabled: {_WORLD_STATE_PARSER_LLM_AVAILABLE}")
+
+        # --- NEW: Read period setting from user valves ---
+        session_period_setting = getattr(user_valves, 'period_setting', '').strip()
+        if session_period_setting:
+            self.logger.info(f"[{session_id}] Using Period Setting from User Valves: '{session_period_setting}'")
+        else:
+            self.logger.debug(f"[{session_id}] No Period Setting provided in User Valves.")
+        # --- END NEW ---
 
         # Initialize state variables
         summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False;
@@ -900,7 +909,7 @@ class SessionPipeOrchestrator:
             if not latest_user_query_str and not is_regeneration_heuristic: raise ValueError("Cannot proceed without an effective user query (and not regeneration).")
             safe_previous_llm_response_str = previous_llm_response_str if previous_llm_response_str is not None else ""
 
-            # <<< Scene Assessment / Generation Block (Dynamic Config) >>>
+            # <<< Scene Assessment / Generation Block (MODIFIED - Passes Period Setting) >>>
             previous_scene_state_dict: Optional[Dict] = None
             effective_scene_data: Dict = {"keywords": [], "description": ""}
             default_empty_scene = {"keywords": [], "description": ""}
@@ -969,16 +978,17 @@ class SessionPipeOrchestrator:
                             self.logger.info(f"[{session_id}] No previous scene state found in DB.")
                             parsed_previous_scene_data = default_empty_scene
 
-                        # 2. Call assessment/generation function
-                        self.logger.info(f"[{session_id}] Calling assess_and_generate_scene with dynamic config.")
+                        # 2. Call assessment/generation function (MODIFIED: Pass period_setting)
+                        self.logger.info(f"[{session_id}] Calling assess_and_generate_scene with dynamic config and period setting ('{session_period_setting}').")
                         effective_scene_data = await self._assess_scene_func(
                             previous_llm_response=safe_previous_llm_response_str,
                             current_user_query=latest_user_query_str,
                             previous_scene_data=parsed_previous_scene_data,
-                            scene_llm_config=dynamic_scene_llm_config, # Pass dynamic config
+                            scene_llm_config=dynamic_scene_llm_config,
                             llm_call_func=self._async_llm_call_wrapper,
                             logger_instance=self.logger,
-                            session_id=session_id
+                            session_id=session_id,
+                            period_setting=session_period_setting # <-- PASSING NEW ARG
                         )
 
                         # 3. Check if description changed
@@ -1076,12 +1086,12 @@ class SessionPipeOrchestrator:
             else: missing_world_funcs = [f for f, fn in {"cursor": self.sqlite_cursor, "getter": self._get_world_state_db_func, "setter": self._set_world_state_db_func}.items() if not fn]; self.logger.error(f"[{session_id}] Cannot fetch/set world state: Missing prerequisites: {missing_world_funcs}. Using defaults.")
 
 
-            # --- Generate Hint and Weather Proposal ---
+            # --- Generate Hint and Weather Proposal (MODIFIED - Passes Period Setting) ---
             hint_background_context = effective_scene_description
             hint_background_context += f"\n(Day: {self.current_day}, Time: {self.current_time_of_day}, Weather: {self.current_weather})"
 
             if event_hints_enabled and self._generate_hint_func:
-                self.logger.info(f"[{session_id}] Attempting event hint & weather proposal generation...")
+                self.logger.info(f"[{session_id}] Attempting event hint & weather proposal generation (Period: '{session_period_setting}')...") # MODIFIED LOG
                 await self._emit_status(event_emitter, session_id, "Status: Generating hint & weather proposal...")
                 hint_llm_url = getattr(self.config, 'event_hint_llm_api_url', None)
                 hint_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
@@ -1090,6 +1100,7 @@ class SessionPipeOrchestrator:
                      generated_weather_proposal = {"previous_weather": self.current_weather, "new_weather": self.current_weather}
                 else:
                     try:
+                        # MODIFIED: Pass period_setting
                         generated_event_hint_text, generated_weather_proposal = await self._generate_hint_func(
                             config=self.config,
                             history_messages=current_active_history,
@@ -1098,7 +1109,9 @@ class SessionPipeOrchestrator:
                             current_weather=self.current_weather,
                             current_time_of_day=self.current_time_of_day,
                             llm_call_func=self._async_llm_call_wrapper,
-                            logger_instance=self.logger, session_id=session_id
+                            logger_instance=self.logger,
+                            session_id=session_id,
+                            period_setting=session_period_setting # <-- PASSING NEW ARG
                         )
                         if generated_event_hint_text: self.logger.info(f"[{session_id}] Event Hint Generated: '{generated_event_hint_text[:80]}...'")
                         else: self.logger.info(f"[{session_id}] No event hint suggested.")
@@ -1132,7 +1145,7 @@ class SessionPipeOrchestrator:
                 weather_proposal=generated_weather_proposal
             )
 
-            # --- Construct Final Payload ---
+            # --- Construct Final Payload (MODIFIED - Passes Period Setting) ---
             await self._emit_status(event_emitter, session_id, "Status: Constructing final request...")
             payload_dict_or_error = self._construct_payload_func(
                  system_prompt=base_system_prompt_text, history=t0_raw_history_slice,
@@ -1140,6 +1153,7 @@ class SessionPipeOrchestrator:
                  query=latest_user_query_str,
                  long_term_goal=getattr(user_valves, 'long_term_goal', ''),
                  event_hint=generated_event_hint_text,
+                 period_setting=session_period_setting, # <-- PASSING NEW ARG
                  strategy="standard", include_ack_turns=getattr(self.config, 'include_ack_turns', True),)
 
             if isinstance(payload_dict_or_error, dict) and "contents" in payload_dict_or_error: final_llm_payload_contents = payload_dict_or_error["contents"]; self.logger.info(f"[{session_id}] Constructed final payload ({len(final_llm_payload_contents)} turns).")

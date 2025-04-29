@@ -90,21 +90,32 @@ You may occasionally receive an [[Event Suggestion: ...]] within the user's inpu
 # === Helper Functions ===
 
 # Helper: _format_event_hint_prompt (unchanged, uses the template passed to it)
+# === START MODIFIED _format_event_hint_prompt ===
 def _format_event_hint_prompt(
     recent_history_str: str,
     background_context: str,
     current_season: Optional[str],
     current_weather: Optional[str],
     current_time_of_day: Optional[str],
-    template: str
+    template: str,
+    period_setting: Optional[str] = None # <<< NEW PARAMETER
 ) -> str:
     """
     Formats the prompt for the Event Hint LLM, including world state (season, weather, time).
-    (Remains unchanged, relies on the template string provided)
+    Optionally prepends a period setting instruction.
     """
     func_logger = logging.getLogger(__name__ + '._format_event_hint_prompt')
     if not template or not isinstance(template, str):
         return "[Error: Invalid Template for Event Hint]"
+
+    # --- NEW: Prepend Period Setting Instruction ---
+    if period_setting and isinstance(period_setting, str):
+        clean_period = period_setting.strip()
+        if clean_period:
+            instruction = f"[[Setting Instruction: Generate content appropriate for a '{clean_period}' setting.]]\n\n"
+            template = instruction + template # Prepend the instruction
+            func_logger.debug(f"Prepended period setting instruction: '{clean_period}'")
+    # --- END NEW ---
 
     season_text = current_season if current_season else "Not Specified"
     weather_text = current_weather if current_weather else "Not Specified"
@@ -124,6 +135,7 @@ def _format_event_hint_prompt(
             EVENT_HINT_WEATHER_PLACEHOLDER.strip('{}'): safe_weather,
             EVENT_HINT_TIME_PLACEHOLDER.strip('{}'): safe_time,
         }
+        # Use the potentially modified template string
         formatted_prompt = template.format(**format_dict)
         return formatted_prompt
     except KeyError as e:
@@ -132,6 +144,7 @@ def _format_event_hint_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting event hint prompt: {e}", exc_info=True)
         return f"[Error formatting event hint prompt: {type(e).__name__}]"
+# === END MODIFIED _format_event_hint_prompt ===
 
 # Helper: format_hint_for_query (unchanged)
 def format_hint_for_query(event_hint: str) -> str:
@@ -147,6 +160,7 @@ def format_hint_for_query(event_hint: str) -> str:
 # === Core Logic ===
 
 # --- MODIFIED Core Function: Returns hint text AND weather proposal dict ---
+# === START MODIFIED generate_event_hint ===
 async def generate_event_hint(
     config: Any,
     history_messages: List[Dict],
@@ -157,10 +171,12 @@ async def generate_event_hint(
     llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]],
     logger_instance: Optional[logging.Logger] = None,
     session_id: str = "unknown_session",
+    period_setting: Optional[str] = None # <<< NEW PARAMETER
 ) -> Tuple[Optional[str], Dict[str, Optional[str]]]:
     """
     Generates a dynamic event hint AND proposes a weather change using a
     secondary LLM based on context and world state.
+    Optionally includes a period setting instruction in the LLM prompt.
 
     Args:
         config: Configuration object containing valves like 'event_hint_llm_api_url', etc.
@@ -172,6 +188,7 @@ async def generate_event_hint(
         llm_call_func: The async function wrapper to call the LLM.
         logger_instance: Optional logger instance.
         session_id: The session ID for logging.
+        period_setting: Optional string describing the historical period/setting.
 
     Returns:
         A tuple containing:
@@ -224,14 +241,15 @@ async def generate_event_hint(
     )
     recent_history_str = format_history_for_llm(recent_history_list) if recent_history_list else "[No Recent History]"
 
-    # Format the prompt using the helper (which uses the v3 template now)
+    # Format the prompt using the helper (MODIFIED: Pass period_setting)
     event_hint_prompt_text = _format_event_hint_prompt(
         recent_history_str=recent_history_str,
         background_context=background_context,
         current_season=current_season,
         current_weather=current_weather,
         current_time_of_day=current_time_of_day,
-        template=hint_llm_template # Use the v3 template
+        template=hint_llm_template, # Use the v3 template
+        period_setting=period_setting # <-- PASSING NEW ARG
     )
 
     if not event_hint_prompt_text or event_hint_prompt_text.startswith("[Error:"):
@@ -240,8 +258,6 @@ async def generate_event_hint(
 
     event_hint_payload = {"contents": [{"parts": [{"text": event_hint_prompt_text}]}]}
     func_logger.info(f"[{caller_info}] Calling Event Hint LLM (v3 prompt for hint + weather)...")
-    # Optional: Log the actual prompt being sent for debugging
-    # func_logger.debug(f"[{caller_info}] Event Hint Prompt Text (v3):\n------\n{event_hint_prompt_text}\n------")
 
     # --- Call LLM ---
     success = False
@@ -331,5 +347,6 @@ async def generate_event_hint(
 
     # Return the final parsed results (or defaults if errors occurred)
     return hint_text_result, weather_proposal_result
+# === END MODIFIED generate_event_hint ===
 
 # === END OF FILE i4_llm_agent/event_hints.py ===

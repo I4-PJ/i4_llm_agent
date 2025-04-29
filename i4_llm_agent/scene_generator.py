@@ -75,28 +75,37 @@ DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
 """
 
 # --- Helper Functions ---
-
+# === START MODIFIED _format_scene_assessment_prompt ===
 def _format_scene_assessment_prompt(
     template: str,
     previous_llm_response: str,
     current_user_query: str,
     previous_keywords_json: str, # Expecting stringified JSON list
-    previous_description: str
+    previous_description: str,
+    period_setting: Optional[str] = None # <<< NEW PARAMETER
 ) -> str:
-    """Formats the prompt for the Scene Assessment/Generation LLM."""
+    """
+    Formats the prompt for the Scene Assessment/Generation LLM.
+    Optionally prepends a period setting instruction.
+    """
     func_logger = logging.getLogger(__name__ + '._format_scene_assessment_prompt')
     if not template or not isinstance(template, str):
         return "[Error: Invalid Template for Scene Assessment]"
+
+    # --- NEW: Prepend Period Setting Instruction ---
+    if period_setting and isinstance(period_setting, str):
+        clean_period = period_setting.strip()
+        if clean_period:
+            instruction = f"[[Setting Instruction: Generate content appropriate for a '{clean_period}' setting.]]\n\n"
+            template = instruction + template # Prepend the instruction
+            func_logger.debug(f"Prepended period setting instruction: '{clean_period}'")
+    # --- END NEW ---
 
     # Basic safety for inputs
     safe_prev_resp = str(previous_llm_response)
     safe_curr_query = str(current_user_query)
     safe_prev_keys = str(previous_keywords_json)
     safe_prev_desc = str(previous_description)
-
-    # Double-check safety for JSON embedding - ensure it's treated as literal string
-    # The template expects keywords JSON and description string literally embedded
-    # Need to escape braces within the description itself if using .format, but .replace is safer here.
 
     try:
         # Use replace for safety, especially with potentially complex description strings
@@ -105,9 +114,7 @@ def _format_scene_assessment_prompt(
         formatted_prompt = formatted_prompt.replace(PREVIOUS_KEYWORDS_PLACEHOLDER, safe_prev_keys)
 
         # Special handling for description placeholder within the "NO CHANGE" JSON example
-        # We need to insert the description *escaped* for JSON within that example block
         escaped_prev_desc_for_json = json.dumps(safe_prev_desc) # Get JSON escaped string
-        # Remove the outer quotes added by dumps for direct insertion
         if escaped_prev_desc_for_json.startswith('"') and escaped_prev_desc_for_json.endswith('"'):
              escaped_prev_desc_for_json = escaped_prev_desc_for_json[1:-1]
 
@@ -131,10 +138,12 @@ def _format_scene_assessment_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting scene assessment prompt: {e}", exc_info=True)
         return f"[Error formatting scene assessment prompt: {type(e).__name__}]"
+# === END MODIFIED _format_scene_assessment_prompt ===
 
 
 # --- Core Logic ---
 
+# === START MODIFIED assess_and_generate_scene ===
 async def assess_and_generate_scene(
     previous_llm_response: str,
     current_user_query: str,
@@ -142,12 +151,14 @@ async def assess_and_generate_scene(
     scene_llm_config: Dict[str, Any],
     llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]],
     logger_instance: Optional[logging.Logger] = None,
-    session_id: str = "unknown_session"
+    session_id: str = "unknown_session",
+    period_setting: Optional[str] = None # <<< NEW PARAMETER
 ) -> Dict[str, Any]:
     """
     Assesses if the scene has changed based on the latest interaction and previous state.
     If changed, generates new keywords and description using an LLM.
     If not changed, returns the previous scene data.
+    Optionally includes a period setting instruction in the LLM prompt.
 
     Args:
         previous_llm_response: The narrative response from the previous turn.
@@ -157,6 +168,7 @@ async def assess_and_generate_scene(
         llm_call_func: The async function wrapper to call the LLM.
         logger_instance: Optional logger instance.
         session_id: The session ID for logging.
+        period_setting: Optional string describing the historical period/setting (e.g., 'Late Medieval').
 
     Returns:
         A dictionary containing the effective 'keywords' (list) and 'description' (str) for the current turn.
@@ -194,13 +206,14 @@ async def assess_and_generate_scene(
     if not prompt_template or not isinstance(prompt_template, str): func_logger.error(f"[{caller_info}] Default scene prompt template invalid. Cannot proceed."); return previous_scene_data or default_empty_scene
     if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func): func_logger.error(f"[{caller_info}] Invalid llm_call_func. Returning previous state."); return previous_scene_data or default_empty_scene
 
-    # --- Format Prompt ---
+    # --- Format Prompt (MODIFIED: Pass period_setting) ---
     prompt_text = _format_scene_assessment_prompt(
         template=prompt_template,
         previous_llm_response=previous_llm_response,
         current_user_query=current_user_query,
         previous_keywords_json=previous_keywords_json_str,
-        previous_description=prev_description_str
+        previous_description=prev_description_str,
+        period_setting=period_setting # <-- PASSING NEW ARG
     )
 
     if not prompt_text or prompt_text.startswith("[Error:"):
@@ -209,7 +222,6 @@ async def assess_and_generate_scene(
     # --- Call LLM ---
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     func_logger.info(f"[{caller_info}] Calling Scene Assessment/Generation LLM...")
-    # Optional: Add debug logging for prompt/response here if needed
 
     success = False; response_or_error = "Init Error"
     try:
@@ -266,5 +278,4 @@ async def assess_and_generate_scene(
         error_details = str(response_or_error)
         func_logger.warning(f"[{caller_info}] Scene LLM call failed or returned invalid type. Error: '{error_details}'. Returning previous state.")
         return previous_scene_data or default_empty_scene
-
-# === END OF FILE i4_llm_agent/scene_generator.py ===
+# === END MODIFIED assess_and_generate_scene ===
