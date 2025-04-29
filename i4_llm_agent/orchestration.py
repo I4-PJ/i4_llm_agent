@@ -61,13 +61,22 @@ from .utils import count_tokens, calculate_string_similarity, TIKTOKEN_AVAILABLE
 
 # === MODIFIED WORLD STATE IMPORT: Import default directly ===
 try:
-    from .world_state_parser import parse_world_state_with_llm, DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
+    from .world_state_parser import (
+        parse_world_state_with_llm,
+        confirm_weather_change_with_llm,
+        DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
+    )
     _WORLD_STATE_PARSER_LLM_AVAILABLE = True
 except ImportError as e_world_parser:
     async def parse_world_state_with_llm(*args, **kwargs) -> Dict:
         logging.getLogger(__name__).error("Executing FALLBACK parse_world_state_with_llm due to import error.")
         await asyncio.sleep(0)
         return {}
+
+    async def confirm_weather_change_with_llm(*args, **kwargs) -> bool: # <<< ADD FALLBACK
+        logging.getLogger(__name__).error("Executing FALLBACK confirm_weather_change_with_llm due to import error.")
+        return False
+
     DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = "[Default World State Parse Template Load Failed]"
     _WORLD_STATE_PARSER_LLM_AVAILABLE = False
     logging.getLogger(__name__).error(
@@ -199,11 +208,16 @@ class SessionPipeOrchestrator:
         self._update_char_inventory_db_func = add_or_update_character_inventory
         self._get_world_state_db_func = get_world_state
         self._set_world_state_db_func = set_world_state
+        self._construct_payload_func = standalone_construct_payload
 
+        # Alias for the simplified Day/Time parser
         if _WORLD_STATE_PARSER_LLM_AVAILABLE:
-            self._parse_world_state_func = parse_world_state_with_llm
+            self._parse_daytime_func = parse_world_state_with_llm
+            self._confirm_weather_func = confirm_weather_change_with_llm # <<< ADDED ALIAS
         else:
-            self._parse_world_state_func = parse_world_state_with_llm # Fallback dummy
+            # Use fallbacks if module failed import
+            self._parse_daytime_func = parse_world_state_with_llm # Fallback dummy
+            self._confirm_weather_func = confirm_weather_change_with_llm # Fallback dummy <<< ADDED FALLBACK ALIAS
 
         if _ORCH_INVENTORY_MODULE_AVAILABLE:
             self._format_inventory_func = _real_format_inventory_func
@@ -212,7 +226,7 @@ class SessionPipeOrchestrator:
             self._format_inventory_func = _dummy_format_inventory
             self._update_inventories_func = _dummy_update_inventories
 
-        self.logger.info("SessionPipeOrchestrator initialized (Non-Streaming, Default Prompts).")
+        self.logger.info("SessionPipeOrchestrator initialized (Non-Streaming, Default Prompts, Weather Proposal Logic).")
 
     # --- Internal Helper: Status Emitter ---
     async def _emit_status(
@@ -774,20 +788,29 @@ class SessionPipeOrchestrator:
         chroma_embed_wrapper: Optional[Any] = None,
         is_regeneration_heuristic: bool = False
     ) -> OrchestratorResult:
-        """ Processes a single turn by calling helper methods in sequence. """
+        """ Processes a single turn with weather proposal and confirmation logic. """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
         self.pipe_logger = getattr(self, 'pipe_logger', self.logger); self.pipe_debug_path_getter = getattr(self, 'pipe_debug_path_getter', None)
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False); event_hints_enabled = getattr(self.config, 'enable_event_hints', False)
         self.logger.info(f"[{session_id}] Inventory Mgmt Enabled: {inventory_enabled} (Module Avail: {_ORCH_INVENTORY_MODULE_AVAILABLE})")
-        self.logger.info(f"[{session_id}] Event Hints Enabled: {event_hints_enabled} (Import Success: {_event_hints_import_success}, Path: '{_event_hints_import_path}')")
-        self.logger.info(f"[{session_id}] World State Parser Enabled: {_WORLD_STATE_PARSER_LLM_AVAILABLE}")
+        self.logger.info(f"[{session_id}] Event Hints/Weather Proposal Enabled: {event_hints_enabled} (Import Success: {_event_hints_import_success}, Path: '{_event_hints_import_path}')")
+        self.logger.info(f"[{session_id}] World State Day/Time Parser Enabled: {_WORLD_STATE_PARSER_LLM_AVAILABLE}")
 
         # Initialize state variables
-        summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False; generated_event_hint: Optional[str] = None
-        self.current_season: Optional[str] = "Unknown"; self.current_weather: Optional[str] = "Unknown"; self.current_day: Optional[int] = 1; self.current_time_of_day: Optional[str] = "Unknown"
+        summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False;
+        generated_event_hint_text: Optional[str] = None # <<< Store hint text separately
+        generated_weather_proposal: Dict[str, Optional[str]] = {} # <<< Store weather proposal
+
+        # World state variables (initialized with defaults)
+        default_season = "Summer"; default_weather = "Clear"; default_day = 1; default_time = "Morning";
+        self.current_season: Optional[str] = default_season
+        self.current_weather: Optional[str] = default_weather
+        self.current_day: Optional[int] = default_day
+        self.current_time_of_day: Optional[str] = default_time
 
         try:
+            # --- History Sync ---
             await self._emit_status(event_emitter, session_id, "Status: Orchestrator syncing history...")
             incoming_messages = body.get("messages", []); stored_history = self.session_manager.get_active_history(session_id) or []
             if incoming_messages != stored_history: self.session_manager.set_active_history(session_id, incoming_messages.copy()); self.logger.debug(f"[{session_id}] Updating active history (Len: {len(incoming_messages)}).")
@@ -795,108 +818,224 @@ class SessionPipeOrchestrator:
             current_active_history = self.session_manager.get_active_history(session_id) or []
             if not current_active_history: raise ValueError("Active history is empty after sync.")
 
+            # --- Determine Query and History Slice ---
             latest_user_query_str, history_for_processing = await self._determine_effective_query( session_id, current_active_history, is_regeneration_heuristic )
             if not latest_user_query_str and not is_regeneration_heuristic: raise ValueError("Cannot proceed without an effective user query (and not regeneration).")
 
+            # --- Memory Management (T1/T2) ---
             (summarization_performed, new_t1_summary_text, summarization_prompt_tokens, summarization_output_tokens) = await self._handle_tier1_summarization( session_id, user_id, current_active_history, is_regeneration_heuristic, event_emitter )
             await self._handle_tier2_transition( session_id, summarization_performed, chroma_embed_wrapper, event_emitter )
             recent_t1_summaries, t1_retrieved_count = await self._get_t1_summaries(session_id)
             retrieved_rag_summaries, t2_retrieved_count = await self._get_t2_rag_results( session_id, history_for_processing, latest_user_query_str, embedding_func, chroma_embed_wrapper, event_emitter )
 
+            # --- Fetch Initial World State ---
             await self._emit_status(event_emitter, session_id, "Status: Fetching world state...")
-            world_state_db_data = None; default_season = "Summer"; default_weather = "Clear"; default_day = 1; default_time = "Morning"; self.current_season = default_season; self.current_weather = default_weather; self.current_day = default_day; self.current_time_of_day = default_time
+            world_state_db_data = None
             if self.sqlite_cursor and self._get_world_state_db_func and self._set_world_state_db_func:
                 try:
                     world_state_db_data = await self._get_world_state_db_func(self.sqlite_cursor, session_id)
                     if world_state_db_data and isinstance(world_state_db_data, dict):
-                        self.current_season = world_state_db_data.get("season") or default_season; self.current_weather = world_state_db_data.get("weather") or default_weather; self.current_day = world_state_db_data.get("day") or default_day; self.current_time_of_day = world_state_db_data.get("time_of_day") or default_time
-                        self.logger.info(f"[{session_id}] Successfully fetched world state: Season='{self.current_season}', Weather='{self.current_weather}', Day='{self.current_day}', Time='{self.current_time_of_day}'")
+                        self.current_season = world_state_db_data.get("season") or default_season;
+                        self.current_weather = world_state_db_data.get("weather") or default_weather;
+                        self.current_day = world_state_db_data.get("day") or default_day;
+                        self.current_time_of_day = world_state_db_data.get("time_of_day") or default_time
+                        self.logger.info(f"[{session_id}] Fetched world state: Day={self.current_day}, Time={self.current_time_of_day}, Weather={self.current_weather}, Season={self.current_season}")
                     else:
-                        self.logger.info(f"[{session_id}] No world state found. Initializing with defaults."); set_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, self.current_season, self.current_weather, self.current_day, self.current_time_of_day )
-                        if set_success: self.logger.info(f"[{session_id}] Successfully initialized and saved default world state.")
-                        else: self.logger.error(f"[{session_id}] Failed to initialize/save world state in DB.")
-                except Exception as e_world_state: self.logger.error(f"[{session_id}] Error fetching/setting world state: {e_world_state}", exc_info=True); self.current_season = "Unknown (Error)"; self.current_weather = "Unknown (Error)"; self.current_day = 1; self.current_time_of_day = "Unknown (Error)"
+                        self.logger.info(f"[{session_id}] No world state found. Initializing with defaults.");
+                        self.current_season, self.current_weather, self.current_day, self.current_time_of_day = default_season, default_weather, default_day, default_time
+                        set_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, self.current_season, self.current_weather, self.current_day, self.current_time_of_day )
+                        if set_success: self.logger.info(f"[{session_id}] Saved default world state.")
+                        else: self.logger.error(f"[{session_id}] Failed to save default world state.")
+                except Exception as e_world_state: self.logger.error(f"[{session_id}] Error fetching/setting world state: {e_world_state}", exc_info=True); self.current_season, self.current_weather, self.current_day, self.current_time_of_day = "Err", "Err", 1, "Err"
             else: missing_world_funcs = [f for f, fn in {"cursor": self.sqlite_cursor, "getter": self._get_world_state_db_func, "setter": self._set_world_state_db_func}.items() if not fn]; self.logger.error(f"[{session_id}] Cannot fetch/set world state: Missing prerequisites: {missing_world_funcs}. Using defaults.")
 
-            (combined_context_string, base_system_prompt_text, initial_owi_context_tokens, refined_context_tokens, cache_update_performed, cache_update_skipped, final_context_selection_performed, stateless_refinement_performed, formatted_inventory_string_for_status ) = await self._prepare_and_refine_background( session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries, current_active_history, latest_user_query_str, event_emitter )
-            t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
-
-            # --- Uses imported default prompt for hints ---
+            # --- Generate Hint and Weather Proposal (Stage 1) ---
+            # Uses updated generate_event_hint which returns (hint_text, weather_proposal_dict)
             if event_hints_enabled and _event_hints_import_success:
-                self.logger.info(f"[{session_id}] Attempting event hint generation...")
-                await self._emit_status(event_emitter, session_id, "Status: Checking for dynamic event hints...")
+                self.logger.info(f"[{session_id}] Attempting event hint & weather proposal generation...")
+                await self._emit_status(event_emitter, session_id, "Status: Generating hint & weather proposal...")
                 hint_llm_url = getattr(self.config, 'event_hint_llm_api_url', None)
                 hint_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
                 if not hint_llm_url or not hint_llm_key:
-                     self.logger.warning(f"[{session_id}] Skipping event hint generation: Config incomplete (URL/Key).")
+                     self.logger.warning(f"[{session_id}] Skipping hint/proposal: Config incomplete (URL/Key).")
+                     generated_weather_proposal = {"previous_weather": self.current_weather, "new_weather": self.current_weather} # Use current state
                 else:
                     try:
-                        # generate_event_hint implicitly uses DEFAULT_EVENT_HINT_TEMPLATE_TEXT if not passed
-                        generated_event_hint = await generate_event_hint(
+                        # Call the updated function using the Hint LLM config
+                        generated_event_hint_text, generated_weather_proposal = await generate_event_hint(
                             config=self.config, # Pass for URL, key, temp, history count
-                            history_messages=current_active_history, background_context=combined_context_string,
+                            history_messages=current_active_history, background_context="[Context Placeholder - Provided Later]", # Context not fully ready yet, but needed structure
                             current_season=self.current_season, current_weather=self.current_weather, current_time_of_day=self.current_time_of_day,
                             llm_call_func=self._async_llm_call_wrapper, logger_instance=self.logger, session_id=session_id
                         )
-                        if generated_event_hint: self.logger.info(f"[{session_id}] Event Hint Generated: '{generated_event_hint[:80]}...'"); await self._emit_status(event_emitter, session_id, "Status: Event hint generated.")
-                        else: self.logger.info(f"[{session_id}] No event hint suggested by Hint LLM."); await self._emit_status(event_emitter, session_id, "Status: No event hint suggested.")
-                    except Exception as e_hint_gen: self.logger.error(f"[{session_id}] Error during event hint generation call: {e_hint_gen}", exc_info=True); generated_event_hint = None
-            elif event_hints_enabled and not _event_hints_import_success: self.logger.error(f"[{session_id}] Skipping event hint generation: Module import failed.")
-            else: self.logger.debug(f"[{session_id}] Event Hints feature disabled. Skipping hint generation.")
+                        if generated_event_hint_text: self.logger.info(f"[{session_id}] Event Hint Generated: '{generated_event_hint_text[:80]}...'")
+                        else: self.logger.info(f"[{session_id}] No event hint suggested.")
+                        self.logger.info(f"[{session_id}] Weather Proposal Generated: {generated_weather_proposal}")
+                        await self._emit_status(event_emitter, session_id, "Status: Hint/Proposal generated.")
+                    except Exception as e_hint_gen: self.logger.error(f"[{session_id}] Error during hint/proposal generation call: {e_hint_gen}", exc_info=True); generated_event_hint_text = None; generated_weather_proposal = {"previous_weather": self.current_weather, "new_weather": self.current_weather}
+            elif event_hints_enabled and not _event_hints_import_success: self.logger.error(f"[{session_id}] Skipping hint/proposal: Module import failed.")
+            else: self.logger.debug(f"[{session_id}] Event Hints/Weather Proposal disabled. Skipping.")
+            # Ensure generated_weather_proposal is always a dict, even if generation failed/skipped
+            if not isinstance(generated_weather_proposal, dict) or not generated_weather_proposal:
+                 generated_weather_proposal = {"previous_weather": self.current_weather, "new_weather": self.current_weather}
+                 self.logger.warning(f"[{session_id}] Weather proposal was invalid/empty, reset to current state: {generated_weather_proposal}")
 
+
+            # --- Prepare Background Context (Now includes weather proposal) ---
+            (combined_context_string, base_system_prompt_text, initial_owi_context_tokens, refined_context_tokens, cache_update_performed, cache_update_skipped, final_context_selection_performed, stateless_refinement_performed, formatted_inventory_string_for_status ) = await self._prepare_and_refine_background( session_id, body, user_valves, recent_t1_summaries, retrieved_rag_summaries, current_active_history, latest_user_query_str, event_emitter )
+            t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
+
+            # --- Construct Final Payload (Pass hint text and the combined context which includes weather proposal text) ---
             await self._emit_status(event_emitter, session_id, "Status: Constructing final request...")
-            payload_dict_or_error = standalone_construct_payload( system_prompt=base_system_prompt_text, history=t0_raw_history_slice, context=combined_context_string, query=latest_user_query_str, long_term_goal=getattr(user_valves, 'long_term_goal', ''), event_hint=generated_event_hint, strategy="standard", include_ack_turns=getattr(self.config, 'include_ack_turns', True),)
-            if isinstance(payload_dict_or_error, dict) and "contents" in payload_dict_or_error: final_llm_payload_contents = payload_dict_or_error["contents"]; self.logger.info(f"[{session_id}] Constructed final payload using standalone function ({len(final_llm_payload_contents)} turns).")
-            else: error_msg = payload_dict_or_error.get("error", "Unknown payload construction error") if isinstance(payload_dict_or_error, dict) else "Invalid return type"; self.logger.error(f"[{session_id}] Standalone payload constructor failed: {error_msg}"); final_llm_payload_contents = None
+            # Call combine_background_context AGAIN here, this time passing the weather proposal
+            final_combined_context = self._combine_context_func(
+                final_selected_context=combined_context_string, # Use result from _prepare_and_refine_background
+                t1_summaries=recent_t1_summaries,
+                t2_rag_results=retrieved_rag_summaries,
+                inventory_context=formatted_inventory_string_for_status, # Use inventory string already formatted
+                current_day=self.current_day,
+                current_time_of_day=self.current_time_of_day,
+                current_season=self.current_season,
+                current_weather=self.current_weather,
+                weather_proposal=generated_weather_proposal # <<< PASS PROPOSAL HERE
+            )
 
+            payload_dict_or_error = self._construct_payload_func(
+                 system_prompt=base_system_prompt_text, history=t0_raw_history_slice,
+                 context=final_combined_context, # Use the context WITH the proposal text
+                 query=latest_user_query_str,
+                 long_term_goal=getattr(user_valves, 'long_term_goal', ''),
+                 event_hint=generated_event_hint_text, # Pass only the hint text here
+                 strategy="standard", include_ack_turns=getattr(self.config, 'include_ack_turns', True),)
+
+            if isinstance(payload_dict_or_error, dict) and "contents" in payload_dict_or_error: final_llm_payload_contents = payload_dict_or_error["contents"]; self.logger.info(f"[{session_id}] Constructed final payload ({len(final_llm_payload_contents)} turns).")
+            else: error_msg = payload_dict_or_error.get("error", "Unknown payload construction error") if isinstance(payload_dict_or_error, dict) else "Invalid return type"; self.logger.error(f"[{session_id}] Payload constructor failed: {error_msg}"); final_llm_payload_contents = None
+
+            # --- Execute Final LLM Call or Prepare Output ---
             final_result = await self._execute_or_prepare_output( session_id=session_id, body=body, final_llm_payload_contents=final_llm_payload_contents, event_emitter=event_emitter, status_message="Status: Core processing complete.", final_payload_tokens=-1)
 
-            # --- Uses imported default prompt for world state parse ---
-            if isinstance(final_result, str) and self._parse_world_state_func and self.sqlite_cursor and self._set_world_state_db_func and _WORLD_STATE_PARSER_LLM_AVAILABLE:
-                 self.logger.info(f"[{session_id}] Analyzing final response for world state changes (using LLM)...")
-                 detected_changes = {}
-                 ws_parse_llm_url = getattr(self.config, 'event_hint_llm_api_url', None)
-                 ws_parse_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
-                 # Use imported default template directly
-                 ws_parse_llm_template = DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
+            # --- Post-Turn Processing (State Confirmation - Stage 2) ---
+            if isinstance(final_result, str): # Only process if we got a text response
+                narrative_response_text = final_result
+                self.logger.info(f"[{session_id}] Analyzing final response for world state changes (Day/Time LLM, Weather Confirm LLM)...")
+                await self._emit_status(event_emitter, session_id, "Status: Confirming world state changes...", done=False)
 
-                 if not ws_parse_llm_url or not ws_parse_llm_key or ws_parse_llm_template == "[Default World State Parse Prompt Load Failed]":
-                      self.logger.warning(f"[{session_id}] Skipping world state parse: Config incomplete or default template failed load.")
-                 else:
-                     try:
-                         ws_parse_llm_config = { "url": ws_parse_llm_url, "key": ws_parse_llm_key, "temp": getattr(self.config, 'event_hint_llm_temperature', 0.3), "prompt_template": ws_parse_llm_template,}
-                         current_state_dict = { "day": self.current_day, "time_of_day": self.current_time_of_day, "weather": self.current_weather, "season": self.current_season }
-                         detected_changes = await self._parse_world_state_func( llm_response_text=final_result, history_messages=current_active_history, current_state=current_state_dict, llm_call_func=self._async_llm_call_wrapper, ws_parse_llm_config=ws_parse_llm_config, logger_instance=self.logger, session_id=session_id, debug_path_getter=self._orchestrator_get_debug_log_path)
-                     except Exception as e_parse: self.logger.error(f"[{session_id}] Error calling world state parser LLM function: {e_parse}", exc_info=True)
+                # 1. Get Day/Time changes based on narrative (using simplified parser)
+                day_time_changes = {}
+                if self._parse_daytime_func and _WORLD_STATE_PARSER_LLM_AVAILABLE:
+                    ws_parse_llm_url = getattr(self.config, 'event_hint_llm_api_url', None) # Use Hint/Parse LLM config
+                    ws_parse_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
+                    ws_parse_llm_template = DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT # Simplified template
+                    if not ws_parse_llm_url or not ws_parse_llm_key: self.logger.warning(f"[{session_id}] Skipping Day/Time parse: Hint/Parse LLM Config incomplete.")
+                    else:
+                        try:
+                            daytime_parse_config = { "url": ws_parse_llm_url, "key": ws_parse_llm_key, "temp": getattr(self.config, 'event_hint_llm_temperature', 0.3), "prompt_template": ws_parse_llm_template,}
+                            day_time_changes = await self._parse_daytime_func(
+                                llm_response_text=narrative_response_text,
+                                history_messages=current_active_history,
+                                current_day=self.current_day,
+                                current_time_of_day=self.current_time_of_day,
+                                llm_call_func=self._async_llm_call_wrapper,
+                                ws_parse_llm_config=daytime_parse_config,
+                                logger_instance=self.logger, session_id=session_id,
+                                debug_path_getter=self._orchestrator_get_debug_log_path
+                            )
+                        except Exception as e_parse_dt: self.logger.error(f"[{session_id}] Error calling Day/Time parser function: {e_parse_dt}", exc_info=True)
+                elif not _WORLD_STATE_PARSER_LLM_AVAILABLE: self.logger.warning(f"[{session_id}] Skipping Day/Time parse: LLM Parser function unavailable.")
 
-                 if detected_changes:
-                     self.logger.debug(f"[{session_id}] LLM Parser detected changes: {detected_changes}")
-                     new_day = self.current_day + detected_changes.get('day_increment', 0); new_time = detected_changes.get('time_of_day', self.current_time_of_day); new_weather = detected_changes.get('weather', self.current_weather); new_season = detected_changes.get('season', self.current_season)
-                     state_changed = not (new_day == self.current_day and new_time == self.current_time_of_day and new_weather == self.current_weather and new_season == self.current_season)
-                     if state_changed:
-                         self.logger.info(f"[{session_id}] World state change detected by LLM Parser. Attempting DB update.")
-                         await self._emit_status(event_emitter, session_id, "Status: Updating world state...", done=False)
-                         try:
-                             self.logger.debug(f"[{session_id}] Attempting DB update with: Day={new_day}, Time='{new_time}', Weather='{new_weather}', Season='{new_season}'")
-                             update_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, new_season, new_weather, new_day, new_time)
-                             self.logger.debug(f"[{session_id}] DB update success status: {update_success}")
-                             if update_success: self.logger.info(f"[{session_id}] World state successfully updated in DB."); self.current_day = new_day; self.current_time_of_day = new_time; self.current_weather = new_weather; self.current_season = new_season
-                             else: self.logger.error(f"[{session_id}] Failed to save updated world state to DB (set function returned False).")
-                         except Exception as e_set_world: self.logger.error(f"[{session_id}] Error saving updated world state: {e_set_world}", exc_info=True)
-                     else: self.logger.info(f"[{session_id}] LLM Parser ran, but no net change detected compared to current world state.")
-                 else: self.logger.info(f"[{session_id}] No world state changes detected by LLM parser (empty dict returned).")
+                narrative_day_increment = day_time_changes.get("day_increment", 0)
+                narrative_time_of_day = day_time_changes.get("time_of_day") # Can be None
+
+                # 2. Confirm Weather Change (using proposal + narrative check)
+                confirmed_weather = self.current_weather # Start with current weather
+                contradiction_found = False
+                proposed_new_weather = generated_weather_proposal.get("new_weather")
+                proposed_prev_weather = generated_weather_proposal.get("previous_weather")
+
+                # Check if a change was actually proposed
+                if proposed_new_weather is not None and proposed_new_weather != proposed_prev_weather:
+                    self.logger.info(f"[{session_id}] Weather change proposed: {proposed_prev_weather} -> {proposed_new_weather}. Checking narrative consistency...")
+                    if self._confirm_weather_func and _WORLD_STATE_PARSER_LLM_AVAILABLE: # Check if func alias is valid
+                         weather_confirm_llm_url = getattr(self.config, 'inv_llm_api_url', None) # Use Inventory LLM config
+                         weather_confirm_llm_key = getattr(self.config, 'inv_llm_api_key', None)
+                         if not weather_confirm_llm_url or not weather_confirm_llm_key: self.logger.warning(f"[{session_id}] Skipping Weather Confirm check: Inventory LLM Config incomplete.")
+                         else:
+                             try:
+                                 weather_confirm_config = { "url": weather_confirm_llm_url, "key": weather_confirm_llm_key, "temp": getattr(self.config, 'inv_llm_temperature', 0.3),}
+                                 contradiction_found = await self._confirm_weather_func(
+                                     proposed_weather_change=generated_weather_proposal,
+                                     llm_response_text=narrative_response_text,
+                                     llm_call_func=self._async_llm_call_wrapper,
+                                     weather_confirm_llm_config=weather_confirm_config,
+                                     logger_instance=self.logger, session_id=session_id,
+                                     debug_path_getter=self._orchestrator_get_debug_log_path
+                                 )
+                             except Exception as e_confirm_w: self.logger.error(f"[{session_id}] Error calling Weather Confirm function: {e_confirm_w}", exc_info=True); contradiction_found = False # Default to no contradiction on error
+                    elif not _WORLD_STATE_PARSER_LLM_AVAILABLE: self.logger.warning(f"[{session_id}] Skipping Weather Confirm check: LLM Parser module unavailable (needed for confirm func).")
+
+
+                    # Update weather based on confirmation
+                    if not contradiction_found:
+                        confirmed_weather = proposed_new_weather
+                        self.logger.info(f"[{session_id}] Weather proposal confirmed (no narrative contradiction). New weather: {confirmed_weather}")
+                    else:
+                        confirmed_weather = proposed_prev_weather # Revert to previous if contradicted
+                        self.logger.info(f"[{session_id}] Weather proposal rejected (narrative contradiction found). Weather remains: {confirmed_weather}")
+                else:
+                     self.logger.info(f"[{session_id}] No weather change proposed or proposal invalid. Weather remains: {self.current_weather}")
+                     confirmed_weather = self.current_weather # Ensure it's the current one
+
+                # 3. Determine Final State and Update DB if Changed
+                final_day = self.current_day + narrative_day_increment
+                # If day incremented, time usually resets to Morning unless narrative specified otherwise
+                if narrative_day_increment > 0 and narrative_time_of_day is None:
+                    final_time = default_time # Reset to default time (Morning)
+                elif narrative_time_of_day is not None:
+                    final_time = narrative_time_of_day # Use time specified by narrative
+                else:
+                    final_time = self.current_time_of_day # No change detected
+
+                final_weather = confirmed_weather
+                final_season = self.current_season # Season changes not handled by this mechanism currently
+
+                # Check if any state component actually changed
+                state_changed = (
+                    final_day != self.current_day or
+                    final_time != self.current_time_of_day or
+                    final_weather != self.current_weather or
+                    final_season != self.current_season # Include season just in case
+                )
+
+                if state_changed:
+                    self.logger.info(f"[{session_id}] World state change detected. Attempting DB update. New State: Day={final_day}, Time={final_time}, Weather={final_weather}, Season={final_season}")
+                    await self._emit_status(event_emitter, session_id, "Status: Updating world state...", done=False)
+                    if self.sqlite_cursor and self._set_world_state_db_func:
+                        try:
+                            update_success = await self._set_world_state_db_func(
+                                self.sqlite_cursor, session_id, final_season, final_weather, final_day, final_time
+                            )
+                            if update_success:
+                                self.logger.info(f"[{session_id}] World state successfully updated in DB.")
+                                # Update orchestrator's internal state for next turn's status
+                                self.current_day = final_day
+                                self.current_time_of_day = final_time
+                                self.current_weather = final_weather
+                                self.current_season = final_season
+                            else: self.logger.error(f"[{session_id}] Failed to save updated world state to DB (set function returned False).")
+                        except Exception as e_set_world: self.logger.error(f"[{session_id}] Error saving updated world state: {e_set_world}", exc_info=True)
+                    else: missing_ws_update = [f for f, fn in {"cursor": self.sqlite_cursor, "setter": self._set_world_state_db_func}.items() if not fn]; self.logger.warning(f"[{session_id}] Skipping world state update: Missing prerequisites: {missing_ws_update}")
+                else:
+                    self.logger.info(f"[{session_id}] No net change detected in world state after confirmation.")
+
             elif not isinstance(final_result, str): self.logger.debug(f"[{session_id}] Skipping world state analysis: Final result was not a string (Type: {type(final_result).__name__}).")
-            elif not _WORLD_STATE_PARSER_LLM_AVAILABLE: self.logger.warning(f"[{session_id}] Skipping world state analysis: LLM Parser function unavailable (import failed).")
-            elif not self.sqlite_cursor or not self._set_world_state_db_func: missing_ws_update = [f for f, fn in {"cursor": self.sqlite_cursor, "setter": self._set_world_state_db_func}.items() if not fn]; self.logger.warning(f"[{session_id}] Skipping world state update: Missing prerequisites: {missing_ws_update}")
 
-            # --- Uses imported default prompt for inventory ---
+            # --- Post-Turn Inventory Update (Logic Unchanged) ---
             if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._update_inventories_func:
                 inventory_update_completed = True
                 if isinstance(final_result, str):
                     self.logger.info(f"[{session_id}] Performing post-turn inventory update...")
                     await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
                     inv_llm_url = getattr(self.config, 'inv_llm_api_url', None); inv_llm_key = getattr(self.config, 'inv_llm_api_key', None);
-                    # Use imported default template directly
                     inv_llm_prompt_template = DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT
                     template_seems_valid = inv_llm_prompt_template != "[Default Inventory Prompt Load Failed]"
 
@@ -931,12 +1070,14 @@ class SessionPipeOrchestrator:
             elif inventory_enabled and not self._update_inventories_func: self.logger.error(f"[{session_id}] Skipping inventory update: Update function alias is None."); inventory_update_completed = False; inventory_update_success_flag = False;
             else: self.logger.debug(f"[{session_id}] Skipping inventory update: Disabled by global valve."); inventory_update_completed = False; inventory_update_success_flag = False;
 
-            # Final status calculation and emission (unchanged logic, uses calculated values)
+            # --- Final Status Calculation and Emission ---
+            # Use the *updated* internal state (self.current_...) for status
             if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
                 try: final_payload_tokens = sum(self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents if isinstance(turn, dict) for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str))
                 except Exception: final_payload_tokens = -1
             elif not final_llm_payload_contents: final_payload_tokens = 0
             final_status_string_base, _ = await self._calculate_and_format_status( session_id=session_id, t1_retrieved_count=t1_retrieved_count, t2_retrieved_count=t2_retrieved_count, session_process_owi_rag=bool(getattr(user_valves, 'process_owi_rag', True)), final_context_selection_performed=final_context_selection_performed, cache_update_skipped=cache_update_skipped, stateless_refinement_performed=stateless_refinement_performed, initial_owi_context_tokens=initial_owi_context_tokens, refined_context_tokens=refined_context_tokens, summarization_prompt_tokens=summarization_prompt_tokens, summarization_output_tokens=summarization_output_tokens, t0_dialogue_tokens=t0_dialogue_tokens, inventory_prompt_tokens=inventory_prompt_tokens, final_llm_payload_contents=final_llm_payload_contents)
+            # Use the potentially updated self.current_... values here
             world_state_status = f"| World: D{self.current_day} {self.current_time_of_day} {self.current_weather} {self.current_season}"
             inv_stat_indicator = "Inv=OFF";
             if inventory_enabled:
@@ -954,7 +1095,7 @@ class SessionPipeOrchestrator:
             if final_result is None: raise RuntimeError("Internal processing error, final result was None.")
             return final_result
 
-        # === MODIFIED: Fixed Syntax in Exception Handlers ===
+        # --- Exception Handling (Unchanged) ---
         except asyncio.CancelledError:
             self.logger.info(f"[{session_id or 'unknown'}] Orchestrator process_turn cancelled.")
             await self._emit_status(event_emitter, session_id or 'unknown', "Status: Processing cancelled.", done=True)
@@ -962,20 +1103,14 @@ class SessionPipeOrchestrator:
         except ValueError as ve:
             session_id_for_log = session_id if 'session_id' in locals() else 'unknown'
             self.logger.error(f"[{session_id_for_log}] Orchestrator ValueError in process_turn: {ve}")
-            try:
-                await self._emit_status(event_emitter, session_id_for_log, f"ERROR: {ve}", done=True)
-            except Exception:
-                pass # Ignore errors during error reporting
+            try: await self._emit_status(event_emitter, session_id_for_log, f"ERROR: {ve}", done=True)
+            except Exception: pass
             return {"error": f"Orchestrator failed: {ve}", "status_code": 500}
         except Exception as e_orch:
             session_id_for_log = session_id if 'session_id' in locals() else 'unknown'
             self.logger.critical(f"[{session_id_for_log}] Orchestrator UNHANDLED EXCEPTION in process_turn: {e_orch}", exc_info=True)
-            try:
-                await self._emit_status(event_emitter, session_id_for_log, f"ERROR: Orchestrator Failed ({type(e_orch).__name__})", done=True)
-            except Exception:
-                pass # Ignore errors during error reporting
+            try: await self._emit_status(event_emitter, session_id_for_log, f"ERROR: Orchestrator Failed ({type(e_orch).__name__})", done=True)
+            except Exception: pass
             return {"error": f"Orchestrator failed: {type(e_orch).__name__}", "status_code": 500}
-        # === END MODIFIED EXCEPTION HANDLERS ===
-
 
 # === END OF FILE i4_llm_agent/orchestration.py ===

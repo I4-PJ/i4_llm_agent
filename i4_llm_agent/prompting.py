@@ -17,6 +17,7 @@ except ImportError:
 
 
 try:
+    # Import the guideline text constant and the formatter for event hints
     from .event_hints import EVENT_HANDLING_GUIDELINE_TEXT, format_hint_for_query
 except ImportError:
     EVENT_HANDLING_GUIDELINE_TEXT = "[EVENT GUIDELINE LOAD FAILED]"
@@ -38,12 +39,10 @@ TAG_LABELS = {
 }
 EMPTY_CONTEXT_PLACEHOLDER = "[No Background Information Available]"
 
-# --- Constants for Stateless Refiner ---
+# --- Constants for Stateless Refiner (Existing) ---
 STATELESS_REFINER_QUERY_PLACEHOLDER = "{query}"
 STATELESS_REFINER_CONTEXT_PLACEHOLDER = "{external_context}"
 STATELESS_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
-
-# Default Template for Stateless Refinement
 DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Roleplay Context Extractor
@@ -72,16 +71,12 @@ DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
 
 Concise Relevant Information (for final answer generation):
 """
-# --- NEW: Constants for Two-Step RAG Cache Refinement ---
 
-# Placeholders for Step 1 (Cache Update)
+# --- Constants for Two-Step RAG Cache Refinement (Existing) ---
 CACHE_UPDATE_QUERY_PLACEHOLDER = "{query}"
 CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
-
-# [[[ START MODIFIED PROMPT TEMPLATE - v2.2 No Change Marker ]]]
-# Default Template Text for Step 1 (Cache Update) - v2.2 (Adds NO_CACHE_UPDATE marker)
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Cache Maintainer
@@ -114,7 +109,7 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 5.  **Output Format:**
     *   Produce the complete, updated SESSION CACHE text.
     *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
-    *   **<<< MODIFIED >>> No Change:** If analysis shows no significant additions/updates/removals are needed, output ONLY the exact text: `[NO_CACHE_UPDATE]`
+    *   **No Change:** If analysis shows no significant additions/updates/removals are needed, output ONLY the exact text: `[NO_CACHE_UPDATE]`
     *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
 
 **INPUTS:**
@@ -139,18 +134,11 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Updated Session Cache Text - Structured, or [NO_CACHE_UPDATE], or [No relevant background context found]):**
 """
-# [[[ END MODIFIED PROMPT TEMPLATE - v2.2 No Change Marker ]]]
-
 
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
-FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
+FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
-
-
-# --- prompting.py ---
-
-# Default Template Text for Step 2 (Final Context Selection) - MODIFIED v5 (Inventory Handling Removed - Bypass Logic)
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Query-Focused Context Selector
@@ -194,6 +182,78 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Selected Relevant Cache/OWI Snippets):**
 """
+
+# Placeholders for Inventory Update LLM (Existing)
+INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
+INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
+INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Inventory Log Keeper
+**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
+**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
+
+**Supported Direct Command Formats (Priority 1):**
+*   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: CLEAR CharacterName`
+*(Note: Use `__USER__` for the player character if their specific name isn't provided)*
+
+**Instructions (Follow in Order):**
+
+1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 2.
+
+2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 3.
+
+3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
+    *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
+    *   Generate JSON `updates` based *only* on these dialogue events.
+
+4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+    ```json
+    {{
+      "updates": [
+        // One entry for each detected change (from command OR dialogue)
+        {{
+          "character_name": "Name or __USER__",
+          "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
+          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
+          "quantity": <integer>,
+          "description": "<optional string>" // Typically only for 'add' from dialogue
+        }}
+        // ... more updates if needed
+      ]
+    }}
+    ```
+    *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
+
+5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
+6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
+
+**INPUTS:**
+
+**USER QUERY (Check for commands first):**
+{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
+
+**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
+---
+{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
+---
+{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (JSON object with detected inventory updates):**
+"""
+
+# --- Function Implementations (Existing ones remain largely unchanged) ---
 
 # --- Function: Clean Context Tags (Existing - Unchanged) ---
 def clean_context_tags(system_content: str) -> str:
@@ -312,7 +372,7 @@ async def refine_external_context(external_context: str, history_messages: List[
         func_logger.warning(f"[{caller_info}] Stateless refinement failed. Error: '{error_details}'. Returning original context.")
         return external_context
 
-# --- NEW: Format Cache Update Prompt (Unchanged from previous step) ---
+# --- Function: Format Cache Update Prompt (Existing - Unchanged) ---
 def format_cache_update_prompt(
     previous_cache: str,
     current_owi_rag: str,
@@ -340,7 +400,7 @@ def format_cache_update_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in cache update prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting cache update prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# --- NEW: Format Final Context Selection Prompt (Unchanged from previous step) ---
+# --- Function: Format Final Context Selection Prompt (Existing - Unchanged) ---
 def format_final_context_selection_prompt(
     updated_cache: str,
     current_owi_rag: str, # Include current OWI for secondary check
@@ -405,28 +465,29 @@ async def generate_rag_query(
         if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
         else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
-# --- Function: Construct Final LLM Payload (Existing - Unchanged) ---
+# --- Function: Construct Final LLM Payload (MODIFIED to include Weather Guideline) ---
 def construct_final_llm_payload(
     system_prompt: str,
     history: List[Dict],
     context: Optional[str],
     query: str,
     long_term_goal: Optional[str] = None,
-    event_hint: Optional[str] = None, # <<< New parameter
+    event_hint: Optional[str] = None,
     strategy: str = 'standard',
     include_ack_turns: bool = True
 ) -> Dict[str, Any]:
     """
     Constructs the final payload for the LLM in Google's 'contents' format,
-    injecting the long-term goal and event hint/guideline into the payload.
+    injecting the long-term goal, event hint/guideline, and weather guideline
+    into the payload.
 
     Args:
         system_prompt (str): The base system instructions (without OWI context tags).
         history (List[Dict]): List of dialogue messages (e.g., T0 slice).
-        context (Optional[str]): Combined background information string.
+        context (Optional[str]): Combined background information string (may include proposed weather change text).
         query (str): The latest user query.
         long_term_goal (Optional[str]): A session-specific goal instruction.
-        event_hint (Optional[str]): A dynamically generated event suggestion. <<< ADDED
+        event_hint (Optional[str]): A dynamically generated event suggestion.
         strategy (str): Payload construction strategy ('standard' or 'advanced').
         include_ack_turns (bool): Whether to include "Understood" turns.
 
@@ -437,12 +498,12 @@ def construct_final_llm_payload(
     func_logger = logging.getLogger(__name__ + '.construct_final_llm_payload')
     func_logger.debug(
         f"Constructing final LLM payload. Strategy: {strategy}, ACKs: {include_ack_turns}, "
-        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}" # <<< Log hint status
+        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}"
     )
 
     gemini_contents = []
 
-    # 1. Prepare the combined system instructions including goal and event guideline
+    # 1. Prepare the combined system instructions including goal and guidelines
     base_system_prompt_text = system_prompt.strip() if system_prompt else "You are a helpful assistant."
     final_system_instructions = base_system_prompt_text
 
@@ -475,6 +536,17 @@ def construct_final_llm_payload(
         final_system_instructions += EVENT_HANDLING_GUIDELINE_TEXT
         func_logger.debug(f"Appended event handling guideline to system instructions text.")
 
+    # <<< NEW: Append Weather Suggestion Guideline >>>
+    weather_suggestion_guideline = """
+
+--- [ Weather Suggestion Guideline ] ---
+The background information may contain a "Proposed Weather Change: From X to Y". This indicates a potential shift in the environment suggested by the system. Treat this as context or inspiration. You are NOT required to follow this suggestion if your narrative or character actions dictate different weather. Feel free to describe the weather naturally as the scene unfolds.
+--- [ END Weather Suggestion Guideline ] ---"""
+    final_system_instructions += weather_suggestion_guideline
+    func_logger.debug(f"Appended weather suggestion guideline to system instructions text.")
+    # <<< END NEW SECTION >>>
+
+
     # 2. Add the combined System Instructions turn and optional ACK
     if final_system_instructions:
         gemini_contents.append({"role": "user", "parts": [{"text": f"System Instructions:\n{final_system_instructions}"}]})
@@ -496,9 +568,10 @@ def construct_final_llm_payload(
 
     # 4. Prepare Context Turn (if context exists) and optional ACK
     context_turn = None; ack_turn = None
+    # Context now potentially includes world state, summaries, inventory, AND proposed weather change
     has_real_context = bool(context and context.strip() and context.strip() != EMPTY_CONTEXT_PLACEHOLDER)
     if has_real_context:
-        safe_context = context.strip().replace("---", "===")
+        safe_context = context.strip().replace("---", "===") # Basic separator replacement
         context_injection_text = f"Background Information (Use this to inform your response):\n{safe_context}"
         context_turn = {"role": "user", "parts": [{"text": context_injection_text}]}
         if include_ack_turns: ack_turn = {"role": "model", "parts": [{"text": "Understood. I have reviewed the background information."}]}
@@ -518,12 +591,12 @@ def construct_final_llm_payload(
     final_query_turn = {"role": "user", "parts": [{"text": final_query_text}]} # Use the potentially modified text
 
     # 6. Assemble Payload based on Strategy
-    if strategy == 'standard': # [Sys+Goal] -> Hist -> [Ctx] -> Query
+    if strategy == 'standard': # [Sys+Goal+Guidelines] -> Hist -> [Ctx] -> Query
         gemini_contents.extend(history_turns)
         if context_turn: gemini_contents.append(context_turn)
         if ack_turn: gemini_contents.append(ack_turn)
         gemini_contents.append(final_query_turn)
-    elif strategy == 'advanced': # [Sys+Goal] -> [Ctx] -> Hist -> Query
+    elif strategy == 'advanced': # [Sys+Goal+Guidelines] -> [Ctx] -> Hist -> Query
         if context_turn: gemini_contents.append(context_turn)
         if ack_turn: gemini_contents.append(ack_turn)
         gemini_contents.extend(history_turns)
@@ -537,22 +610,23 @@ def construct_final_llm_payload(
     return final_payload
 
 
-# --- Function: Combine Background Context (MODIFIED to include World State) ---
+# --- Function: Combine Background Context (MODIFIED to include World State AND Proposed Weather) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
     t2_rag_results: Optional[List[str]],
     inventory_context: Optional[str] = None,
-    current_day: Optional[int] = None,          # <<< NEW Parameter
-    current_time_of_day: Optional[str] = None, # <<< NEW Parameter
-    current_season: Optional[str] = None,       # <<< NEW Parameter
-    current_weather: Optional[str] = None,      # <<< NEW Parameter
-    labels: Dict[str, str] = TAG_LABELS # Existing default labels
+    current_day: Optional[int] = None,
+    current_time_of_day: Optional[str] = None,
+    current_season: Optional[str] = None,
+    current_weather: Optional[str] = None,
+    weather_proposal: Optional[Dict[str, Optional[str]]] = None, # <<< NEW Parameter
+    labels: Dict[str, str] = TAG_LABELS
 ) -> str:
     """
     Combines various background context sources into a single formatted string
-    suitable for injection into the final LLM prompt. Now includes world state
-    (day, time, season, weather) and inventory.
+    suitable for injection into the final LLM prompt. Now includes world state,
+    inventory, and the proposed weather change.
 
     Args:
         final_selected_context: Context from OWI/Cache/Stateless refinement.
@@ -563,6 +637,7 @@ def combine_background_context(
         current_time_of_day: The current time of day string (e.g., "Morning").
         current_season: The current season string (e.g., "Summer").
         current_weather: The current weather string (e.g., "Clear").
+        weather_proposal: Dict from Hint LLM, e.g., {"previous_weather": "X", "new_weather": "Y"}.
         labels: Dictionary mapping context types to labels for formatting.
 
     Returns:
@@ -572,7 +647,7 @@ def combine_background_context(
     func_logger = logging.getLogger(__name__ + '.combine_background_context')
     context_parts = []
 
-    # 1. Add World State Section <<< NEW SECTION >>>
+    # 1. Add World State Section
     world_state_parts = []
     if isinstance(current_day, int) and current_day > 0:
         world_state_parts.append(f"Day: {current_day}")
@@ -581,61 +656,90 @@ def combine_background_context(
     if isinstance(current_season, str) and current_season.strip() and "Unknown" not in current_season:
         world_state_parts.append(f"Season: {current_season.strip()}")
     if isinstance(current_weather, str) and current_weather.strip() and "Unknown" not in current_weather:
-        world_state_parts.append(f"Weather: {current_weather.strip()}")
+        world_state_parts.append(f"Current Weather: {current_weather.strip()}") # Label explicitly as current
 
     if world_state_parts:
         world_state_label = "Current World State"
         world_state_string = ", ".join(world_state_parts)
         context_parts.append(f"--- {world_state_label} ---\n{world_state_string}")
         func_logger.debug(f"Adding World State section: {world_state_string}")
+
+    # <<< NEW: Add Proposed Weather Change Section >>>
+    if isinstance(weather_proposal, dict):
+        prev_w = weather_proposal.get("previous_weather")
+        new_w = weather_proposal.get("new_weather")
+        # Only add if both seem valid and potentially different (LLM handles interpretation)
+        if isinstance(prev_w, str) and isinstance(new_w, str):
+            proposal_label = "Proposed Weather Change"
+            proposal_string = f"From '{prev_w}' to '{new_w}'"
+            context_parts.append(f"--- {proposal_label} ---\n{proposal_string}")
+            func_logger.debug(f"Adding Weather Proposal section: {proposal_string}")
+        else:
+            func_logger.debug("Skipping weather proposal section: Invalid data types in proposal dict.")
     # <<< END NEW SECTION >>>
 
-    # 2. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
-    selected_context_label = "Selected Background Context" # Label for this dynamic part
+    # 3. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
+    selected_context_label = "Selected Background Context"
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
-    # Check if it's empty or just the placeholder indicating nothing was relevant
     if safe_selected_context and "[No relevant background context found" not in safe_selected_context:
         func_logger.debug(f"Adding selected context (len: {len(safe_selected_context)}).")
         context_parts.append(f"--- {selected_context_label} ---\n{safe_selected_context}")
 
-    # 3. Add T1 Summaries
+    # 4. Add T1 Summaries
     t1_label = labels.get("t1", "Recent Summaries (T1)")
     if t1_summaries:
-        # Filter out empty strings and join valid ones
         combined_t1 = "\n---\n".join(s.strip() for s in t1_summaries if isinstance(s, str) and s.strip())
         if combined_t1:
             func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
             context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
 
-    # 4. Add T2 RAG Results
+    # 5. Add T2 RAG Results
     t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
     if t2_rag_results:
-        # Filter out empty strings and join valid ones
         combined_t2 = "\n---\n".join(s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip())
         if combined_t2:
             func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
             context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
 
-    # 5. Add Inventory Context (Existing)
-    inventory_label = "Current Inventories" # Define a label
+    # 6. Add Inventory Context
+    inventory_label = "Current Inventories"
     safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
-    # Check if inventory context is valid and not just a placeholder/error message
     if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
         func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
         context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
 
-    # 6. Combine parts or return placeholder
+    # 7. Combine parts or return placeholder
     if context_parts:
-        # Join sections with double newlines for readability
         full_context_string = "\n\n".join(context_parts)
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
         return full_context_string
     else:
-        func_logger.info("No background context available from any source (including world state).")
-        # Return the standard placeholder if all sources were empty/invalid
+        func_logger.info("No background context available from any source.")
         return EMPTY_CONTEXT_PLACEHOLDER
 
-# --- Less Relevant Functions (Keep for potential internal use/completeness) ---
+
+# --- Remaining functions (Unchanged but included for completeness) ---
+
+# --- Function: Format Inventory Update Prompt (Existing - Unchanged) ---
+def format_inventory_update_prompt(
+    main_llm_response: str,
+    user_query: str,
+    recent_history_str: str,
+    template: str # Expecting the specific template for this step
+) -> str:
+    """Formats the prompt for the Post-Turn Inventory Update LLM."""
+    func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
+    if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
+    try:
+        formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
+        return formatted_prompt
+    except Exception as e:
+        func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
+        return f"[Error formatting inventory update prompt: {type(e).__name__}]"
+
+# --- Less Relevant Functions (Stubs - Unchanged) ---
 def assemble_tagged_context(base_prompt: str, contexts: Dict[str, Union[str, List[str]]]) -> str:
     """Assembles tagged context into the base prompt (Simplified stub)."""
     logger.warning("assemble_tagged_context is a simplified stub and may not function as originally intended.")
@@ -651,101 +755,5 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         match = re.search(pattern, system_content, re.DOTALL | re.IGNORECASE)
         if match: extracted[key] = match.group(1).strip()
     return extracted
-
-
-# Placeholders for Inventory Update LLM
-INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
-INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
-INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
-
-# --- START REVISED TEMPLATE (Hybrid Approach - Unchanged) ---
-DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
-[[SYSTEM DIRECTIVE]]
-**Role:** Inventory Log Keeper
-**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
-**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
-
-**Supported Direct Command Formats (Priority 1):**
-*   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: CLEAR CharacterName`
-*(Note: Use `__USER__` for the player character if their specific name isn't provided)*
-
-**Instructions (Follow in Order):**
-
-1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-    *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
-    *   If NO: Proceed to Instruction 2.
-
-2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-    *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
-    *   If NO: Proceed to Instruction 3.
-
-3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
-    *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
-    *   Generate JSON `updates` based *only* on these dialogue events.
-
-4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
-    ```json
-    {{
-      "updates": [
-        // One entry for each detected change (from command OR dialogue)
-        {{
-          "character_name": "Name or __USER__",
-          "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
-          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
-          "quantity": <integer>,
-          "description": "<optional string>" // Typically only for 'add' from dialogue
-        }}
-        // ... more updates if needed
-      ]
-    }}
-    ```
-    *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
-
-5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
-6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
-
-**INPUTS:**
-
-**USER QUERY (Check for commands first):**
-{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
-
-**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
----
-{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
----
-
-**RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
----
-{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
----
-
-**OUTPUT (JSON object with detected inventory updates):**
-"""
-# --- END REVISED TEMPLATE (Hybrid Approach) ---
-
-# --- Function: Format Inventory Update Prompt (Existing - Unchanged) ---
-def format_inventory_update_prompt(
-    main_llm_response: str,
-    user_query: str,
-    recent_history_str: str,
-    template: str # Expecting the specific template for this step
-) -> str:
-    """Formats the prompt for the Post-Turn Inventory Update LLM."""
-    func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
-    if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
-    # Use basic replace for safety, assuming placeholders are unique enough
-    try:
-        formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
-        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
-        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
-        return formatted_prompt
-    except Exception as e:
-        func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
-        return f"[Error formatting inventory update prompt: {type(e).__name__}]"
-
-
 
 # === END OF FILE i4_llm_agent/prompting.py ===
