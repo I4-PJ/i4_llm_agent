@@ -5,8 +5,10 @@ import sqlite3
 import asyncio
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any, Callable, Coroutine, Tuple, Union
+import json
+import os # Import os for path joining
 
-# --- Library Dependencies ---
+## --- Library Dependencies ---
 try:
     from .history import get_recent_turns, format_history_for_llm, DIALOGUE_ROLES
     HISTORY_UTILS_AVAILABLE = True
@@ -36,6 +38,8 @@ RAG_CACHE_TABLE_NAME = "session_rag_cache"
 EMPTY_CACHE_PLACEHOLDER = "[No previous cache available]"
 EMPTY_OWI_CONTEXT_PLACEHOLDER = "[No current OWI context provided]"
 EMPTY_HISTORY_PLACEHOLDER = "[No recent history available]"
+NO_RELEVANT_CONTEXT_FLAG = "[No relevant background context found for the current query]" # Specific flag LLM might return
+DEBUG_LOG_SUFFIX = ".DEBUG_CTX_SELECT" # Suffix for the debug file
 
 # ==============================================================================
 # === SQLite Storage/Retrieval Functions (Keep as generated before)          ===
@@ -111,7 +115,6 @@ async def update_rag_cache(
     # --- Input Checks ---
     if not llm_call_func or not PROMPTING_UTILS_AVAILABLE or not HISTORY_UTILS_AVAILABLE:
         func_logger.error(f"[{caller_info}][{session_id}] Missing core function dependencies. Aborting update.")
-        # Fallback: Return current OWI if available, else empty
         return current_owi_context or ""
     if not sqlite_cursor:
         func_logger.error(f"[{caller_info}][{session_id}] SQLite cursor not provided. Aborting update.")
@@ -125,7 +128,6 @@ async def update_rag_cache(
          func_logger.error(f"[{caller_info}][{session_id}] Missing prompt template for cache update. Aborting update.")
          return current_owi_context or ""
 
-
     # --- Retrieve Previous Cache ---
     previous_cache_text = EMPTY_CACHE_PLACEHOLDER
     retrieved_cache: Optional[str] = None
@@ -138,8 +140,7 @@ async def update_rag_cache(
              func_logger.info(f"[{caller_info}][{session_id}] No previous RAG cache found.")
     except Exception as e_get:
         func_logger.error(f"[{caller_info}][{session_id}] Error retrieving RAG cache: {e_get}", exc_info=True)
-        previous_cache_text = "[Error retrieving previous cache]" # Signal error
-
+        previous_cache_text = "[Error retrieving previous cache]"
 
     # --- Prepare Inputs for LLM ---
     recent_history_str = EMPTY_HISTORY_PLACEHOLDER
@@ -155,13 +156,12 @@ async def update_rag_cache(
         previous_cache=previous_cache_text,
         current_owi_rag=current_owi_rag_text,
         recent_history_str=recent_history_str,
-        query=latest_user_query or "[No query provided]", # Use placeholder if query empty
+        query=latest_user_query or "[No query provided]",
         template=cache_update_llm_config['prompt_template']
     )
 
     if not prompt_text or prompt_text.startswith("[Error:"):
         func_logger.error(f"[{caller_info}][{session_id}] Failed to format cache update prompt: {prompt_text}. Aborting update.")
-        # Fallback: Return previous cache if it was retrieved, else current OWI
         return retrieved_cache if retrieved_cache is not None else (current_owi_context or "")
 
     # --- Call Cache Update LLM ---
@@ -171,7 +171,7 @@ async def update_rag_cache(
         success, response_or_error = await llm_call_func(
             api_url=cache_update_llm_config['url'], api_key=cache_update_llm_config['key'],
             payload=payload, temperature=cache_update_llm_config['temp'],
-            timeout=120, # Allow reasonable time for update
+            timeout=120,
             caller_info=f"{caller_info}_LLM"
         )
     except Exception as e_call: func_logger.error(f"[{caller_info}][{session_id}] Exception during LLM call: {e_call}", exc_info=True); success = False; response_or_error = "LLM Call Exception"
@@ -179,28 +179,24 @@ async def update_rag_cache(
     # --- Process Result & Update DB ---
     if success and isinstance(response_or_error, str):
         updated_cache_text = response_or_error.strip()
-        # Handle case where LLM indicates no relevant context
-        if updated_cache_text == "[No relevant background context found]":
+        # Handle case where LLM indicates no relevant context (use constant)
+        if updated_cache_text == NO_RELEVANT_CONTEXT_FLAG: # Use flag constant
              updated_cache_text = "" # Store empty if nothing relevant
-             func_logger.info(f"[{caller_info}][{session_id}] Cache update LLM indicated no relevant context found.")
+             func_logger.info(f"[{caller_info}][{session_id}] Cache update LLM indicated no relevant context found ('{NO_RELEVANT_CONTEXT_FLAG}').")
         else:
             func_logger.info(f"[{caller_info}][{session_id}] Cache update LLM call successful (Output len: {len(updated_cache_text)}).")
 
-        # Attempt to save the updated cache
         try:
             save_success = await add_or_update_rag_cache(session_id, updated_cache_text, sqlite_cursor)
             if save_success: func_logger.info(f"[{caller_info}][{session_id}] Successfully saved updated RAG cache to DB.")
-            else: func_logger.error(f"[{caller_info}][{session_id}] Failed to save updated RAG cache to DB!") # Log error, but proceed
-        except Exception as e_save: func_logger.error(f"[{caller_info}][{session_id}] Exception saving updated RAG cache: {e_save}", exc_info=True) # Log error, proceed
+            else: func_logger.error(f"[{caller_info}][{session_id}] Failed to save updated RAG cache to DB!")
+        except Exception as e_save: func_logger.error(f"[{caller_info}][{session_id}] Exception saving updated RAG cache: {e_save}", exc_info=True)
 
-        # Return the text generated by the LLM (the newly updated cache content)
         return updated_cache_text
     else:
-        # --- Handle Cache Update Failure ---
         error_details = str(response_or_error)
         if isinstance(response_or_error, dict): error_details = f"Type: {response_or_error.get('error_type')}, Msg: {response_or_error.get('message')}"
         func_logger.error(f"[{caller_info}][{session_id}] Cache update LLM call failed. Error: '{error_details}'.")
-        # Fallback: Return the previously retrieved cache content, if any.
         if retrieved_cache is not None:
             func_logger.warning(f"[{caller_info}][{session_id}] Returning previously retrieved cache content as fallback.")
             return retrieved_cache
@@ -210,7 +206,7 @@ async def update_rag_cache(
 
 
 # ==============================================================================
-# === Step 2 Orchestration: Select Final Context                             ===
+# === Step 2 Orchestration: Select Final Context (MODIFIED WITH DIRECT FILE LOGGING) ===
 # ==============================================================================
 async def select_final_context(
     updated_cache_text: str, # Result from Step 1
@@ -221,61 +217,138 @@ async def select_final_context(
     context_selection_llm_config: Dict[str, Any], # url, key, temp, prompt_template
     history_count: int,
     dialogue_only_roles: List[str] = DIALOGUE_ROLES,
-    caller_info: str = "ContextSelector"
+    caller_info: str = "ContextSelector",
+    # --- NEW ARGUMENT ---
+    debug_log_path_getter: Optional[Callable[[str], Optional[str]]] = None
 ) -> str:
     """
     Executes Step 2: Takes the updated cache and current OWI context,
     and selects the most relevant snippets for the current turn using LLM.
+    Adds detailed logging directly to a debug file if path getter is provided.
 
     Returns:
         str: The selected context snippets for the final prompt (or fallback).
     """
     func_logger = logging.getLogger(__name__ + '.select_final_context')
-    func_logger.debug(f"[{caller_info}][SessionID Hidden] Starting Step 2: Final Context Selection...") # Hide session ID here potentially
+    log_prefix = f"[{caller_info}]" # For standard logs
+
+    # --- Internal Helper for Direct File Logging ---
+    debug_log_file_path: Optional[str] = None
+    if debug_log_path_getter and callable(debug_log_path_getter):
+        try:
+            debug_log_file_path = debug_log_path_getter(DEBUG_LOG_SUFFIX)
+            if debug_log_file_path:
+                 func_logger.info(f"{log_prefix} Direct debug logging for CTX_SELECT enabled to: {debug_log_file_path}")
+            else:
+                 func_logger.warning(f"{log_prefix} Debug log path getter provided but returned None for suffix '{DEBUG_LOG_SUFFIX}'. Direct logging disabled.")
+        except Exception as e_get_path:
+            func_logger.error(f"{log_prefix} Error calling debug_log_path_getter: {e_get_path}. Direct logging disabled.", exc_info=True)
+            debug_log_file_path = None
+
+    async def _log_trace(message: str):
+        """Appends a timestamped message to the dedicated debug log file."""
+        if not debug_log_file_path:
+            # Fallback to standard logger if file path isn't set
+            func_logger.debug(f"{log_prefix}[CTX_SELECT_TRACE_FALLBACK] {message}")
+            return
+
+        ts = datetime.now(timezone.utc).isoformat()
+        log_line = f"[{ts}] {message}\n"
+        try:
+            # Use asyncio.to_thread for file I/O to avoid blocking
+            def sync_write():
+                try:
+                    # Ensure directory exists (important if base log path changes)
+                    log_dir = os.path.dirname(debug_log_file_path)
+                    if log_dir: # Check if dirname returned something (it might not for just a filename)
+                        os.makedirs(log_dir, exist_ok=True)
+                    with open(debug_log_file_path, "a", encoding="utf-8") as f:
+                        f.write(log_line)
+                except Exception as e_write_inner:
+                     # Log error to standard logger if file write fails
+                     func_logger.error(f"{log_prefix} Failed to write to debug log file '{debug_log_file_path}': {e_write_inner}", exc_info=True)
+
+            await asyncio.to_thread(sync_write)
+        except Exception as e_thread:
+             func_logger.error(f"{log_prefix} Error scheduling file write for debug log: {e_thread}", exc_info=True)
+
+    # --- Start of Function Logic ---
+    func_logger.debug(f"{log_prefix} Starting Step 2: Final Context Selection...")
+    await _log_trace("--- select_final_context START ---")
+
+    # --- Log Inputs ---
+    await _log_trace(f"INPUT updated_cache_text (len): {len(updated_cache_text)}")
+    await _log_trace(f"INPUT current_owi_context (len): {len(current_owi_context) if current_owi_context else 0}")
+    await _log_trace(f"INPUT history_messages (count): {len(history_messages)}")
+    await _log_trace(f"INPUT latest_user_query (len): {len(latest_user_query)}")
+    await _log_trace(f"INPUT history_count: {history_count}")
+    safe_config_log = {k: v for k, v in context_selection_llm_config.items() if k != 'key'}
+    await _log_trace(f"INPUT context_selection_llm_config (partial): {json.dumps(safe_config_log)}")
+
 
     # --- Input Checks ---
     if not llm_call_func or not PROMPTING_UTILS_AVAILABLE or not HISTORY_UTILS_AVAILABLE:
-        func_logger.error(f"[{caller_info}] Missing core function dependencies. Aborting selection.")
-        # Fallback: Return the updated cache text directly if selection fails early
+        func_logger.error(f"{log_prefix} Missing core function dependencies. Aborting selection.")
+        await _log_trace("EXIT: Missing core function dependencies. Returning fallback (updated_cache_text).")
         return updated_cache_text
     required_keys = ['url', 'key', 'temp', 'prompt_template']
     if not context_selection_llm_config or not all(k in context_selection_llm_config for k in required_keys):
         missing = [k for k in required_keys if k not in (context_selection_llm_config or {})]
-        func_logger.error(f"[{caller_info}] Missing context selection LLM config: {missing}. Aborting selection.")
+        func_logger.error(f"{log_prefix} Missing context selection LLM config: {missing}. Aborting selection.")
+        await _log_trace(f"EXIT: Missing context selection LLM config ({missing}). Returning fallback (updated_cache_text).")
         return updated_cache_text
     if not context_selection_llm_config.get('prompt_template'):
-         func_logger.error(f"[{caller_info}] Missing prompt template for context selection. Aborting selection.")
+         func_logger.error(f"{log_prefix} Missing prompt template for context selection. Aborting selection.")
+         await _log_trace("EXIT: Missing prompt template. Returning fallback (updated_cache_text).")
          return updated_cache_text
     if not latest_user_query or not latest_user_query.strip():
-         func_logger.warning(f"[{caller_info}] Latest user query is empty. Selection might be less effective.")
-         # Proceed, but selection might just return generic info or empty
+         func_logger.warning(f"{log_prefix} Latest user query is empty. Selection might be less effective.")
+         await _log_trace("WARN: Latest user query is empty.")
+
 
     # --- Prepare Inputs for LLM ---
     recent_history_str = EMPTY_HISTORY_PLACEHOLDER
     try:
         recent_history_list = get_recent_turns(history_messages, history_count, dialogue_only_roles, True)
         if recent_history_list: recent_history_str = format_history_for_llm(recent_history_list)
-    except Exception as e_hist: func_logger.error(f"[{caller_info}] Error processing history: {e_hist}"); recent_history_str = "[Error processing history]"
+        await _log_trace(f"PREP recent_history_str (len): {len(recent_history_str)}")
+    except Exception as e_hist:
+        func_logger.error(f"{log_prefix} Error processing history: {e_hist}"); recent_history_str = "[Error processing history]"
+        await _log_trace("PREP recent_history_str set to error placeholder due to exception.")
+
 
     current_owi_rag_text = current_owi_context if current_owi_context else EMPTY_OWI_CONTEXT_PLACEHOLDER
+    await _log_trace(f"PREP current_owi_rag_text set (len): {len(current_owi_rag_text)}")
 
     # --- Format Prompt for Step 2 ---
-    prompt_text = format_final_context_selection_prompt(
-        updated_cache=updated_cache_text or "[Cache is empty]", # Handle empty cache from step 1
-        current_owi_rag=current_owi_rag_text,
-        recent_history_str=recent_history_str,
-        query=latest_user_query or "[No query provided]",
-        template=context_selection_llm_config['prompt_template']
-    )
+    prompt_text = "[Error generating prompt]" # Default error value
+    try:
+        prompt_text = format_final_context_selection_prompt(
+            updated_cache=updated_cache_text or "[Cache is empty]", # Handle empty cache from step 1
+            current_owi_rag=current_owi_rag_text,
+            recent_history_str=recent_history_str,
+            query=latest_user_query or "[No query provided]",
+            template=context_selection_llm_config['prompt_template']
+        )
+        # Log the prompt being sent to the LLM
+        await _log_trace(f"LLM_PROMPT:\n------\n{prompt_text}\n------")
 
-    if not prompt_text or prompt_text.startswith("[Error:"):
-        func_logger.error(f"[{caller_info}] Failed to format final selection prompt: {prompt_text}. Aborting selection.")
-        # Fallback: Return the updated cache text directly
-        return updated_cache_text
+        if not prompt_text or prompt_text.startswith("[Error:"):
+            func_logger.error(f"{log_prefix} Failed to format final selection prompt: {prompt_text}. Aborting selection.")
+            await _log_trace(f"EXIT: Failed to format prompt ({prompt_text}). Returning fallback (updated_cache_text).")
+            return updated_cache_text
+
+    except Exception as e_format:
+         func_logger.error(f"{log_prefix} Exception during prompt formatting: {e_format}", exc_info=True)
+         await _log_trace(f"EXIT: Exception during prompt formatting ({e_format}). Returning fallback (updated_cache_text).")
+         return updated_cache_text
+
 
     # --- Call Context Selection LLM ---
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    func_logger.info(f"[{caller_info}] Calling LLM for final context selection...")
+    func_logger.info(f"{log_prefix} Calling LLM for final context selection...")
+    success = False
+    response_or_error = "Initialization Error"
     try:
         success, response_or_error = await llm_call_func(
             api_url=context_selection_llm_config['url'], api_key=context_selection_llm_config['key'],
@@ -283,25 +356,47 @@ async def select_final_context(
             timeout=90, # Selection should be relatively fast
             caller_info=f"{caller_info}_LLM"
         )
-    except Exception as e_call: func_logger.error(f"[{caller_info}] Exception during LLM call: {e_call}", exc_info=True); success = False; response_or_error = "LLM Call Exception"
+        # Log the RAW response received from the LLM
+        await _log_trace(f"LLM_RAW_RESPONSE Success: {success}")
+        await _log_trace(f"LLM_RAW_RESPONSE Content:\n------\n{json.dumps(response_or_error, indent=2)}\n------")
+
+    except Exception as e_call:
+        func_logger.error(f"{log_prefix} Exception during LLM call: {e_call}", exc_info=True)
+        success = False
+        response_or_error = f"LLM Call Exception: {e_call}"
+        await _log_trace(f"LLM_RAW_RESPONSE Success: {success}")
+        await _log_trace(f"LLM_RAW_RESPONSE Content (Exception):\n------\n{response_or_error}\n------")
+
 
     # --- Process Result ---
+    final_selected_context = updated_cache_text # Default to fallback
     if success and isinstance(response_or_error, str):
-        final_selected_context = response_or_error.strip()
-        # Handle case where LLM indicates nothing was relevant
-        if final_selected_context == "[No relevant background context found for the current query]":
+        processed_response = response_or_error.strip()
+        await _log_trace(f"LLM response processing: Stripped response (len {len(processed_response)}).")
+
+        # Handle case where LLM indicates nothing was relevant (use constant)
+        if processed_response == NO_RELEVANT_CONTEXT_FLAG:
              final_selected_context = "" # Use empty string if nothing selected
-             func_logger.info(f"[{caller_info}] Context selection LLM indicated no relevant context found.")
+             func_logger.info(f"{log_prefix} Context selection LLM indicated no relevant context found ('{NO_RELEVANT_CONTEXT_FLAG}'). Setting result to empty string.")
+             await _log_trace(f"DECISION: LLM returned '{NO_RELEVANT_CONTEXT_FLAG}'. Setting final_selected_context to empty string.")
         else:
-             func_logger.info(f"[{caller_info}] Context selection LLM call successful (Output len: {len(final_selected_context)}).")
-        # Return the selected context snippets
+             final_selected_context = processed_response
+             func_logger.info(f"{log_prefix} Context selection LLM call successful (Output len: {len(final_selected_context)}).")
+             await _log_trace(f"DECISION: LLM success. Setting final_selected_context to processed response (len {len(final_selected_context)}).")
+
+        # Log the final decision before returning
+        await _log_trace(f"FINAL RETURN value (len): {len(final_selected_context)}")
+        func_logger.debug(f"{log_prefix} select_final_context returning (len: {len(final_selected_context)})")
         return final_selected_context
     else:
         # --- Handle Selection Failure ---
         error_details = str(response_or_error)
         if isinstance(response_or_error, dict): error_details = f"Type: {response_or_error.get('error_type')}, Msg: {response_or_error.get('message')}"
-        func_logger.error(f"[{caller_info}] Context selection LLM call failed. Error: '{error_details}'.")
+        func_logger.error(f"{log_prefix} Context selection LLM call failed. Error: '{error_details}'.")
         # Fallback Strategy: Return the full updated cache text (output of Step 1)
-        # This is better than returning nothing, providing broader context if selection fails.
-        func_logger.warning(f"[{caller_info}] Returning full updated cache content as fallback due to selection failure.")
+        func_logger.warning(f"{log_prefix} Returning full updated cache content (len: {len(updated_cache_text)}) as fallback due to selection failure.")
+        await _log_trace(f"DECISION: LLM call failed or invalid response. Using fallback (updated_cache_text, len {len(updated_cache_text)}).")
+        # Log the final decision before returning
+        await _log_trace(f"FINAL RETURN value (len): {len(updated_cache_text)} (Fallback)")
+        func_logger.debug(f"{log_prefix} select_final_context returning fallback (len: {len(updated_cache_text)})")
         return updated_cache_text

@@ -603,7 +603,7 @@ class SessionPipeOrchestrator:
         except Exception as e_rag_outer: self.logger.error(f"[{session_id}] Unexpected error during outer T2 RAG processing: {e_rag_outer}", exc_info=True); retrieved_rag_summaries = []; t2_retrieved_count = 0
         return retrieved_rag_summaries, t2_retrieved_count
 
-    # === _prepare_and_refine_background (Unchanged) ===
+    # === _prepare_and_refine_background (MODIFIED - Added debug_log_path_getter pass-through) ===
     async def _prepare_and_refine_background(
         self, session_id: str, body: Dict, user_valves: Any,
         retrieved_t1_summaries: List[str], # Pass T1 summaries here
@@ -616,6 +616,7 @@ class SessionPipeOrchestrator:
         debug_inventory_trace_enabled = getattr(self.config, 'debug_log_final_payload', False)
 
         def _log_inventory_trace(message: str):
+            # This internal helper remains using the standard logger for its specific trace
             if not debug_inventory_trace_enabled: return
             func_logger.debug(f"[{session_id}] BG_PREP_TRACE: {message}")
 
@@ -707,7 +708,20 @@ class SessionPipeOrchestrator:
                       except Exception as e_cache_update: func_logger.error(f"[{session_id}] EXCEPTION during RAG Cache Step 1 (Update): {e_cache_update}", exc_info=True); updated_cache_text_intermediate = previous_cache_text; _log_inventory_trace(f"EXCEPTION during RAG Cache Step 1: {e_cache_update}")
 
                  await self._emit_status(event_emitter, session_id, "Status: Selecting relevant context..."); base_owi_context_for_selection = extracted_owi_context or ""; _log_inventory_trace("Executing RAG Cache Step 2 (Select)..."); _log_inventory_trace(f"Step 2 Input Cache Length: {len(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else '')}"); _log_inventory_trace(f"Step 2 Input OWI Length: {len(base_owi_context_for_selection)}")
-                 final_selected_context = await self._cache_select_func( updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""), current_owi_context=base_owi_context_for_selection, history_messages=current_active_history, latest_user_query=latest_user_query_str, llm_call_func=self._async_llm_call_wrapper, context_selection_llm_config=final_select_llm_config, history_count=getattr(self.config, 'refiner_history_count', 6), dialogue_only_roles=self._dialogue_roles, caller_info=f"Orch_CtxSelect_{session_id}",)
+                 # --- MODIFIED CALL: Pass the debug log path getter ---
+                 final_selected_context = await self._cache_select_func(
+                     updated_cache_text=(updated_cache_text_intermediate if isinstance(updated_cache_text_intermediate, str) else ""),
+                     current_owi_context=base_owi_context_for_selection,
+                     history_messages=current_active_history,
+                     latest_user_query=latest_user_query_str,
+                     llm_call_func=self._async_llm_call_wrapper,
+                     context_selection_llm_config=final_select_llm_config,
+                     history_count=getattr(self.config, 'refiner_history_count', 6),
+                     dialogue_only_roles=self._dialogue_roles,
+                     caller_info=f"Orch_CtxSelect_{session_id}",
+                     debug_log_path_getter=self._orchestrator_get_debug_log_path # <-- NEW ARGUMENT
+                 )
+                 # --- END MODIFIED CALL ---
                  final_context_selection_performed = True; refined_context_str = final_selected_context; log_step1_status = "Performed" if cache_update_performed else ("Skipped" if cache_update_skipped else "Not Run"); _log_inventory_trace(f"RAG Cache Step 2 complete. Selected context length: {len(refined_context_str)}. Step 1: {log_step1_status}")
                  await self._emit_status(event_emitter, session_id, "Status: Context selection complete.", done=False)
 
@@ -746,7 +760,7 @@ class SessionPipeOrchestrator:
             cache_update_skipped,
             final_context_selection_performed,
             stateless_refinement_performed,
-            formatted_inventory_string
+            formatted_inventory_string # Use the actual formatted string here
         )
 
     # === _select_t0_history_slice (Unchanged) ===

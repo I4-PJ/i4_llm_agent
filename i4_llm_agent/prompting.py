@@ -176,39 +176,47 @@ CACHE_UPDATE_QUERY_PLACEHOLDER = "{query}"
 CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+# Default prompt template for Step 1: Cache Update
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Cache Maintainer
-**Task:** Efficiently update the SESSION CACHE using new information. Prioritize preserving existing core character profiles and integrating ONLY relevant NEW factual details.
-**Objective:** Maintain an accurate and structured cache for long-term context, focusing on speed and essential updates.
+**Task:** Intelligently update the SESSION CACHE using relevant information from the CURRENT OWI RETRIEVAL. Prioritize maintaining accurate core character profiles and lore while integrating **new facts, significant details, clarifications, or elaborations**.
+**Objective:** Maintain an accurate and structured cache for long-term context, balancing stability with incorporating meaningful updates from OWI.
 
 **Inputs:**
 - LATEST USER QUERY (for context)
-- CURRENT OWI RETRIEVAL (potential new info & profiles)
+- CURRENT OWI RETRIEVAL (source of potential new info, details, profiles)
 - PREVIOUSLY REFINED CACHE (base for update)
 - RECENT CHAT HISTORY (for context only)
 
 **Core Instructions:**
 
-1.  **Identify & Preserve Character Profiles:**
-    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents.
-    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (likely under `# Character: Name` headings).
-    *   **Action:** If a character profile exists in PREVIOUS CACHE, **KEEP IT** unless a NEW profile in CURRENT OWI *explicitly contradicts or supersedes* it. Do NOT significantly alter core traits based only on RECENT CHAT HISTORY. Minor clarifications from OWI can be merged.
+1.  **Identify & Update/Preserve Character Profiles:**
+    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents or significant descriptive passages about characters.
+    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (e.g., under `# Character: Name` headings).
+    *   **Action:** If a character profile exists in PREVIOUS CACHE:
+        *   **KEEP** the core identity and established traits.
+        *   **MERGE/ADD** concise, relevant new details, clarifications, or significant trait elaborations found in CURRENT OWI RETRIEVAL into the existing profile summary. Do not drastically alter core traits based only on RECENT CHAT HISTORY.
+        *   Only *replace* major parts of a profile if CURRENT OWI provides clearly contradictory or superseding *factual* information (not just nuanced descriptions).
     *   **Action:** If a NEW profile is found in CURRENT OWI for a character NOT in PREVIOUS CACHE, summarize its essential details (Identity, Traits, Role) and ADD it to the output under a new heading.
 
-2.  **Integrate NEW Factual Lore:**
-    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for NEW background facts (lore, world details, established events, locations) relevant to the session.
-    *   **Action:** Compare these NEW facts against the PREVIOUSLY REFINED CACHE. If a fact is genuinely NEW and relevant OR provides a clear CORRECTION/UPDATE to existing lore, ADD/MODIFY it in the output. Do NOT add redundant facts.
+2.  **Integrate NEW or Elaborated Factual Lore:**
+    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for background facts (lore, world details, established events, locations).
+    *   **Action:** Compare these facts against the PREVIOUSLY REFINED CACHE.
+        *   If a fact is genuinely **NEW** and relevant, ADD it.
+        *   If a fact **ELABORATES significantly** on, **CLARIFIES**, or provides important **new DETAILS** for an existing topic in the cache, integrate these details concisely into the relevant section.
+        *   If a fact provides a clear **CORRECTION/UPDATE** to existing lore, MODIFY the cache accordingly.
+        *   Do NOT add minor rephrasing or clearly redundant facts.
 
 3.  **Minimal Pruning:**
     *   **Action:** Only remove sections from the PREVIOUS CACHE if they are *explicitly contradicted* by newer info in CURRENT OWI or are clearly no longer relevant (e.g., a character definitively removed from the story). **Default to keeping existing information unless strong evidence dictates removal.**
 
-4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what new information* to add/update. **DO NOT summarize the history itself in the cache.**
+4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what information* from OWI to add/update/elaborate on. **DO NOT summarize the history itself in the cache.**
 
 5.  **Output Format:**
     *   Produce the complete, updated SESSION CACHE text.
     *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
-    *   **No Change:** If analysis shows no significant additions/updates/removals are needed, output ONLY the exact text: `[NO_CACHE_UPDATE]`
+    *   **No Change:** If analysis shows no significant additions/updates/removals/elaborations are needed based on the OWI input, output ONLY the exact text: `[NO_CACHE_UPDATE]`
     *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
 
 **INPUTS:**
@@ -238,24 +246,29 @@ FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
+# [[START MODIFIED PROMPT]]
+# Default prompt template for Step 2: Final Context Selection
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Query-Focused Context Selector
-**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and extract details relevant to the LATEST USER QUERY and RECENT HISTORY.
-**Objective:** Provide relevant background context from Cache and OWI, ensuring the final response generator has the necessary situational information.
+**Role:** Context Selector for Roleplay Response
+**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and select details **relevant and helpful** for generating the *next* narrative response based on the LATEST USER QUERY and RECENT HISTORY.
+**Objective:** Provide **sufficient background context** from the Cache and OWI Retrieval to enable a coherent, nuanced, and contextually grounded response, without overwhelming the final LLM with irrelevant data.
 
 **Sources:**
 1.  **UPDATED SESSION CACHE:** Long-term facts, character profiles, established lore. (Primary Source)
 2.  **CURRENT OWI RETRIEVAL:** General contextual information provided for the current turn. (Secondary Source)
-3.  **RECENT CHAT HISTORY:** Immediate conversational context (dialogue, actions).
+3.  **RECENT CHAT HISTORY:** Immediate conversational context (dialogue, actions, involved characters).
 4.  **LATEST USER QUERY:** The user's specific input for this turn.
 
 **Instructions:**
 
-1.  **Analyze Query & History:** Determine the core subject, actions, and characters involved in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY. Use this understanding to gauge relevance.
-2.  **Select Relevant Cache/OWI Context:** Examine the CACHE and the OWI RETRIEVAL. Extract sentences/passages that **directly explain or provide essential context** for the query, situation, or involved characters' motivations/relationships relevant *now*.
-3.  **Prioritize Cache:** Give higher priority to relevant information found in the UPDATED SESSION CACHE. Use the CURRENT OWI RETRIEVAL primarily for immediate situational context not present in the cache.
-4.  **Exclude Non-relevant:** Filter out information from both Cache and OWI that is *not* directly relevant to understanding or responding to the current query and recent history. Avoid including general character descriptions or lore unless directly pertinent.
+1.  **Analyze Query & History:** Determine the core subject, actions, and **characters actively involved** in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY. Use this understanding to gauge relevance.
+2.  **Select Helpful Cache/OWI Context:** Examine the CACHE and the OWI RETRIEVAL. Extract sentences/passages that:
+    *   Help explain the **current situation** or **immediate environment**.
+    *   Provide insight into the **motivations, relationships, or relevant core traits** of the **characters actively involved** in the current interaction.
+    *   Offer **relevant lore or background** about the current location, mentioned objects, or pertinent past events from the cache that inform the *current* interaction.
+3.  **Prioritize Cache:** Give higher priority to relevant information found in the UPDATED SESSION CACHE, as it represents established continuity. Use the CURRENT OWI RETRIEVAL primarily for immediate situational context or details not present in the cache.
+4.  **Filter Irrelevant Information:** Exclude information from both Cache and OWI that is *clearly* unrelated to the ongoing interaction or the characters involved. Avoid including lengthy profiles or lore sections if only a small part is relevant *now*. **Focus on helpfulness for the next response.**
 5.  **Combine Snippets:** Assemble the selected Cache/OWI context snippets into a single, coherent text block. Use headings or clear separation if combining distinct topics (e.g., `=== Relevant Character Note ===`, `=== Location Details ===`).
 6.  **Output Content:** The output **must** contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant Cache/OWI context is found, state clearly: "[No relevant background context found for the current query]".
 
@@ -281,6 +294,7 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Selected Relevant Cache/OWI Snippets):**
 """
+# [[END MODIFIED PROMPT]]
 
 # Placeholders for Inventory Update LLM (Existing)
 INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
