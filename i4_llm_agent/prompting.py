@@ -95,25 +95,25 @@ Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produ
 
 [[OUTPUT STRUCTURE]]
 
-**Scene Location and Context (from Chunk):**
+**Scene Location and Context:**
 (description based *only* on dialogue chunk)
 
-**Emotional State Changes (per character, from Chunk):**
+**Emotional State Changes (per character):**
 - (Character Name): emotional shifts *expressed in chunk*.
 
-**Relationship Developments (from Chunk):**
+**Relationship Developments:**
 - (short descriptions *from chunk*)
 
-**Practical Developments (from Chunk):**
+**Practical Developments:**
 - (details about survival, fatigue, injuries, supplies *mentioned in chunk*)
 
-**World-State Changes (from Chunk):**
+**World-State Changes:**
 - (plot changes, movement of threats, discoveries *stated in chunk*)
 
-**Critical Dialogue Fragments (from Chunk):**
+**Critical Dialogue Fragments:**
 - (List 1–3 key quotes *from this chunk* that define emotional turning points)
 
-**Important Continuity Anchors (from Chunk):**
+**Important Continuity Anchors:**
 - (Facts, feelings, or decisions *from this chunk* that must persist.)
 
 ---
@@ -123,7 +123,6 @@ Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produ
 - Base the summary *only* on the text within the chunk.
 - Prioritize emotional realism and narrative continuity over brevity based on the chunk's content.
 
-**Memory Summary Output (Based SOLELY on the Dialogue Chunk):**
 """
 # === END NEW Summarizer Constants ===
 

@@ -1,4 +1,4 @@
-# [[START MODIFIED memory.py]]
+# [[START MODIFIED memory.py - ADD DEBUG LOGS]]
 # i4_llm_agent/memory.py
 
 import logging
@@ -82,7 +82,7 @@ def _select_history_slice_by_tokens(
     return selected_history
 
 
-# --- Main Memory Management Function (MODIFIED: Uses library prompt constant) ---
+# --- Main Memory Management Function (MODIFIED: Uses library prompt constant, ADDED DEBUG LOGS) ---
 async def manage_tier1_summarization(
     # --- MODIFIED SIGNATURE ---
     current_last_summary_index: int,
@@ -132,6 +132,12 @@ async def manage_tier1_summarization(
     """
     func_logger = logging.getLogger(__name__ + '.manage_tier1_summarization')
     func_logger.debug(f"Entering manage_tier1_summarization (Regen={is_regeneration})...")
+    # === START ADDED DEBUG LOGS ===
+    func_logger.debug(f"  Input: current_last_summary_index = {current_last_summary_index}")
+    func_logger.debug(f"  Input: active_history length = {len(active_history)}")
+    func_logger.debug(f"  Input: t0_token_limit = {t0_token_limit}")
+    func_logger.debug(f"  Input: t1_chunk_size_target = {t1_chunk_size_target}")
+    # === END ADDED DEBUG LOGS ===
 
     original_last_summary_index = current_last_summary_index
     summarization_performed = False
@@ -156,9 +162,10 @@ async def manage_tier1_summarization(
 
     # --- Identify Unsummarized Dialogue ---
     unsummarized_full_slice = []
-    if original_last_summary_index < len(active_history) - 1:
-        unsummarized_full_slice = active_history[original_last_summary_index + 1 :]
-        func_logger.debug(f"Full unsummarized slice contains {len(unsummarized_full_slice)} messages (from index {original_last_summary_index + 1}).")
+    unsummarized_start_index_absolute = original_last_summary_index + 1
+    if unsummarized_start_index_absolute < len(active_history):
+        unsummarized_full_slice = active_history[unsummarized_start_index_absolute :]
+        func_logger.debug(f"Full unsummarized slice contains {len(unsummarized_full_slice)} messages (Abs Indices: {unsummarized_start_index_absolute} to {len(active_history) - 1}).")
     else:
          func_logger.debug("No new messages in active_history since last summary index.")
          return False, None, new_last_summary_index, -1, -1
@@ -171,6 +178,18 @@ async def manage_tier1_summarization(
         func_logger.debug(f"Unsummarized slice contains no dialogue messages. No trigger check needed.")
         return False, None, new_last_summary_index, -1, -1
     func_logger.debug(f"Filtered unsummarized slice to {len(unsummarized_dialogue_messages)} dialogue messages.")
+    # === START ADDED DEBUG LOGS ===
+    if unsummarized_dialogue_messages:
+        first_unsum_msg = unsummarized_dialogue_messages[0]
+        last_unsum_msg = unsummarized_dialogue_messages[-1]
+        try:
+            first_unsum_idx_abs = active_history.index(first_unsum_msg)
+            last_unsum_idx_abs = active_history.index(last_unsum_msg)
+            func_logger.debug(f"  Unsummarized Dialogue: First message (Abs Index {first_unsum_idx_abs}): '{str(first_unsum_msg.get('content', ''))[:50]}...'")
+            func_logger.debug(f"  Unsummarized Dialogue: Last message (Abs Index {last_unsum_idx_abs}): '{str(last_unsum_msg.get('content', ''))[:50]}...'")
+        except ValueError:
+            func_logger.error("  Could not find unsummarized dialogue msg in active_history for debug logging.")
+    # === END ADDED DEBUG LOGS ===
 
     total_unsummarized_dialogue_tokens = 0
     try:
@@ -193,6 +212,9 @@ async def manage_tier1_summarization(
 
     func_logger.info(f"Summarization triggered.")
     t0_end_index_at_summary = len(active_history) - 1
+    # === START ADDED DEBUG LOGS ===
+    func_logger.debug(f"  T0 End Index determined at summary trigger: {t0_end_index_at_summary}")
+    # === END ADDED DEBUG LOGS ===
 
 
     # --- Identify T0 and T1 Chunks (From Dialogue Messages) ---
@@ -202,6 +224,18 @@ async def manage_tier1_summarization(
         tokenizer=tokenizer, include_last=True, dialogue_only_roles=dialogue_only_roles
     )
     func_logger.debug(f"Identified {len(t0_dialogue_slice)} dialogue messages for T0 slice.")
+    # === START ADDED DEBUG LOGS ===
+    if t0_dialogue_slice:
+        first_t0_msg = t0_dialogue_slice[0]
+        last_t0_msg = t0_dialogue_slice[-1]
+        try:
+            first_t0_idx_abs = active_history.index(first_t0_msg)
+            last_t0_idx_abs = active_history.index(last_t0_msg)
+            func_logger.debug(f"  T0 Dialogue Slice: First message (Abs Index {first_t0_idx_abs}): '{str(first_t0_msg.get('content', ''))[:50]}...'")
+            func_logger.debug(f"  T0 Dialogue Slice: Last message (Abs Index {last_t0_idx_abs}): '{str(last_t0_msg.get('content', ''))[:50]}...'")
+        except ValueError:
+             func_logger.error("  Could not find T0 dialogue msg in active_history for debug logging.")
+    # === END ADDED DEBUG LOGS ===
 
     t1_chunk_dialogue_messages = []
     if not t0_dialogue_slice:
@@ -210,9 +244,11 @@ async def manage_tier1_summarization(
     else:
         first_t0_message = t0_dialogue_slice[0]
         try:
+            # Find the index of the first T0 message WITHIN the unsummarized dialogue block
             t1_chunk_end_index_relative_dialogue = unsummarized_dialogue_messages.index(first_t0_message)
             func_logger.debug(f"First T0 msg found at relative index {t1_chunk_end_index_relative_dialogue} within unsummarized dialogue.")
             if t1_chunk_end_index_relative_dialogue > 0:
+                 # The T1 chunk consists of messages BEFORE the first T0 message in the unsummarized block
                  t1_chunk_dialogue_messages = unsummarized_dialogue_messages[:t1_chunk_end_index_relative_dialogue]
                  func_logger.info(f"Identified T1 chunk: {len(t1_chunk_dialogue_messages)} dialogue messages.")
             else:
@@ -229,6 +265,19 @@ async def manage_tier1_summarization(
         func_logger.error("Identified T1 dialogue chunk is empty. Aborting summarization.")
         return False, None, new_last_summary_index, -1, t0_end_index_at_summary
 
+    # === START ADDED DEBUG LOGS ===
+    first_t1_chunk_msg = t1_chunk_dialogue_messages[0]
+    last_t1_chunk_msg = t1_chunk_dialogue_messages[-1]
+    try:
+        first_t1_chunk_idx_abs = active_history.index(first_t1_chunk_msg)
+        last_t1_chunk_idx_abs = active_history.index(last_t1_chunk_msg)
+        func_logger.debug(f"  Final T1 Chunk for Summarization: First message (Abs Index {first_t1_chunk_idx_abs}): '{str(first_t1_chunk_msg.get('content', ''))[:50]}...'")
+        func_logger.debug(f"  Final T1 Chunk for Summarization: Last message (Abs Index {last_t1_chunk_idx_abs}): '{str(last_t1_chunk_msg.get('content', ''))[:50]}...'")
+        func_logger.debug(f"  Final T1 Chunk for Summarization: Total messages = {len(t1_chunk_dialogue_messages)}")
+    except ValueError:
+         func_logger.error("  Could not find T1 chunk dialogue msg in active_history for debug logging.")
+    # === END ADDED DEBUG LOGS ===
+
 
     # --- Perform Summarization (on T1 Dialogue Chunk) ---
     try:
@@ -237,8 +286,11 @@ async def manage_tier1_summarization(
         t1_chunk_end_index_absolute = -1
         try:
             t1_chunk_end_index_absolute = active_history.index(last_msg_in_t1_chunk)
-            t1_chunk_start_index_absolute = original_last_summary_index + 1
+            t1_chunk_start_index_absolute = unsummarized_start_index_absolute # Should be correct now
             func_logger.info(f"Summarizing T1 dialogue chunk (Abs Indices: {t1_chunk_start_index_absolute} to {t1_chunk_end_index_absolute}).")
+            # === START ADDED DEBUG LOGS ===
+            func_logger.debug(f"  Calculated Absolute Indices for Metadata/DB: Start={t1_chunk_start_index_absolute}, End={t1_chunk_end_index_absolute}")
+            # === END ADDED DEBUG LOGS ===
         except ValueError:
              func_logger.error("CRITICAL: Could not map end of T1 chunk back to original history index. Aborting summary.", exc_info=True)
              return False, None, new_last_summary_index, -1, t0_end_index_at_summary
@@ -323,6 +375,9 @@ async def manage_tier1_summarization(
                 summarization_performed = True
                 # CRITICAL: Set the new index to be returned
                 new_last_summary_index = t1_chunk_end_index_absolute
+                # === START ADDED DEBUG LOGS ===
+                func_logger.debug(f"  Set new_last_summary_index to T1 chunk end absolute index: {new_last_summary_index}")
+                # === END ADDED DEBUG LOGS ===
             else:
                 func_logger.error(f"Failed to save T1 summary {summary_id} via callback.")
                 # Do NOT update new_last_summary_index
@@ -342,4 +397,4 @@ async def manage_tier1_summarization(
     # --- Return Results ---
     func_logger.debug( f"Exiting manage_tier1_summarization. Success: {summarization_performed}, New T1 Idx: {new_last_summary_index}, Prompt Tok: {summarizer_prompt_tokens}, T0 End Idx: {t0_end_index_at_summary}" )
     return summarization_performed, generated_summary, new_last_summary_index, summarizer_prompt_tokens, t0_end_index_at_summary
-# [[END MODIFIED memory.py]]
+# [[END MODIFIED memory.py - ADD DEBUG LOGS]]

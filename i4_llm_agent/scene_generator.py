@@ -19,18 +19,19 @@ CURRENT_QUERY_PLACEHOLDER = "{user_query_N}"
 PREVIOUS_KEYWORDS_PLACEHOLDER = "{previous_keywords_json}"
 PREVIOUS_DESCRIPTION_PLACEHOLDER = "{previous_description}"
 
+# [[START MODIFIED PROMPT]]
 # Default prompt template for Scene Assessment/Generation LLM
 DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
-[[SYSTEM ROLE: Scene Assessor & Generator]]
+[[SYSTEM ROLE: Background Scene Descriptor]]
 
-**Objective:** Analyze the current interaction context (last response, user query) against the previously established scene. Determine if the scene has significantly changed. If it has, generate a new description and keywords. If not, return the previous scene data unchanged.
+**Objective:** Analyze the last interaction context to determine if the primary scene (location, atmosphere, core elements) has fundamentally changed compared to the previous static description. If it has, generate a **concise, static description** of the *new* scene's environment and atmosphere suitable for background context in the *next* turn. If not, return the previous scene data. **Do NOT narrate character actions, dialogue, or transitions within the description.**
 
 **Inputs:**
-1.  **Last LLM Response:** The narrative text generated at the end of the previous turn.
+1.  **Last LLM Response:** Narrative text from the previous turn (used *only* to assess if a scene shift occurred).
     ```text
     {PREVIOUS_RESPONSE_PLACEHOLDER}
     ```
-2.  **Current User Query:** The user's input for the current turn.
+2.  **Current User Query:** User input for the current turn (used *only* to assess if a scene shift occurred).
     ```text
     {CURRENT_QUERY_PLACEHOLDER}
     ```
@@ -38,19 +39,36 @@ DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
     ```json
     {PREVIOUS_KEYWORDS_PLACEHOLDER}
     ```
-4.  **Previous Scene Description:** The full text description of the established scene from the last turn.
+4.  **Previous Scene Description:** Static description of the established scene from the last turn.
     ```text
     {PREVIOUS_DESCRIPTION_PLACEHOLDER}
     ```
 
 **Instructions:**
 
-1.  **Analyze Context:** Read the 'Last LLM Response' and 'Current User Query'. Understand the action or focus of the current turn.
-2.  **Assess Scene Change:** Compare the action/focus of the current turn against the 'Previous Scene Keywords' and 'Previous Scene Description'. Has the effective location, ambiance, or core setting fundamentally changed?
-    *   Examples of **Change:** Explicitly moving to a new named location (inn -> stables, forest -> cave), environment drastically altering (calm -> battlefield), time shifting significantly causing ambiance change (day -> night).
-    *   Examples of **No Change:** Interacting within the same location (ordering a drink in the tavern), minor shifts in focus within the same scene, continuation of dialogue.
-3.  **Determine Output:**
-    *   **If NO significant scene change is detected:** Your output **MUST** be the *exact* JSON object provided below, containing the *unchanged* previous keywords and description.
+1.  **Assess Scene Change:** Compare the 'Last LLM Response' and 'Current User Query' against the 'Previous Scene Keywords' and 'Previous Scene Description'. Has the effective location, core environmental features, or fundamental atmosphere described in the *narrative* significantly changed compared to the *previous static description*?
+    *   Examples of **Change:** Explicitly moving to a new distinct location (inn -> stables, forest -> cave), environment drastically altering (calm -> battlefield), time shifting significantly causing major atmospheric change (bright day -> stormy night).
+    *   Examples of **No Change:** Interaction within the same described location, dialogue continuation, minor actions that don't alter the core setting (e.g., drawing a weapon in the described tavern).
+
+2.  **Generate Output (If Scene Changed):**
+    *   Generate a list of 3-5 new keywords capturing the essence of the **new** scene (e.g., ["stable", "dim", "hay", "lantern light", "quiet"]). Format as a JSON array of strings.
+    *   Generate a **new**, brief (1-3 sentences) **static description** of the new scene's environment. Focus **only** on:
+        *   Location type (e.g., "A dimly lit stable interior.")
+        *   Key features/objects (e.g., "Wooden stalls line the walls, filled with straw. A single lantern hangs from a beam.")
+        *   Static sensory details (e.g., "The air smells of hay and horses.")
+        *   Atmosphere/Mood (e.g., "It is quiet and relatively warm.")
+        *   Impact of time/weather (e.g., "Rain drums softly on the roof outside.")
+    *   **Crucially, DO NOT describe character actions, dialogue, intentions, or how they arrived in the description.** It should be a snapshot of the setting itself.
+    *   Your output **MUST** be a *new* JSON object containing the *new* keywords and *new* static description.
+        ```json
+        {{
+          "keywords": ["new_keyword_1", "new_keyword_2", ...],
+          "description": "Your newly generated 1-3 sentence static description of the new scene's environment."
+        }}
+        ```
+
+3.  **Generate Output (If No Scene Change):**
+    *   If no significant scene change is detected based on the narrative interaction, your output **MUST** be the *exact* JSON object structure containing the *unchanged* previous keywords and description.
         ```json
         {{
           "keywords": {PREVIOUS_KEYWORDS_PLACEHOLDER},
@@ -58,21 +76,12 @@ DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
         }}
         ```
         *(Ensure the description string within the JSON is properly escaped if it contains quotes)*
-    *   **If a significant scene change IS detected:**
-        *   Generate a concise list of 3-5 new keywords describing the **new** scene (location, mood, key elements). Format as a JSON array of strings.
-        *   Generate a brief (2-3 sentences) atmospheric description of the **new** scene, focusing on sensory details (sight, sound, smell).
-        *   Your output **MUST** be a *new* JSON object containing the *new* keywords and *new* description.
-            ```json
-            {{
-              "keywords": ["new_keyword_1", "new_keyword_2", ...],
-              "description": "Your newly generated 2-3 sentence description of the new scene."
-            }}
-            ```
 
 4.  **Output Format:** Respond ONLY with a single, valid JSON object matching one of the two structures described above. Do not include any other text, markdown formatting, or explanations outside the JSON object.
 
 **JSON Output:**
 """
+# [[END MODIFIED PROMPT]]
 
 # --- Helper Functions ---
 # === START MODIFIED _format_scene_assessment_prompt ===
@@ -221,6 +230,11 @@ async def assess_and_generate_scene(
 
     # --- Call LLM ---
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+
+    # === ADDED DEBUG LOG ===
+    func_logger.debug(f"[{caller_info}] Using Scene Prompt Text (first 500 chars):\n-------\n{prompt_text[:500]}\n-------")
+    # === END ADDED DEBUG LOG ===
+
     func_logger.info(f"[{caller_info}] Calling Scene Assessment/Generation LLM...")
 
     success = False; response_or_error = "Init Error"
@@ -279,3 +293,5 @@ async def assess_and_generate_scene(
         func_logger.warning(f"[{caller_info}] Scene LLM call failed or returned invalid type. Error: '{error_details}'. Returning previous state.")
         return previous_scene_data or default_empty_scene
 # === END MODIFIED assess_and_generate_scene ===
+
+# === END OF FILE i4_llm_agent/scene_generator.py ===
