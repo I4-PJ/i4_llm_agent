@@ -46,92 +46,32 @@ STATELESS_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
 # Default Template for Stateless Refinement
 DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
 [[SYSTEM DIRECTIVE]]
-
-**Role:** Roleplay Context Refiner and Memory Extractor (Structured + Critical Dialogue)
-
-**Objective:**  
-Analyze the provided CONTEXT DOCUMENTS (character profiles, relationship timelines, lore) and RECENT CHAT HISTORY (dialogue, actions, emotional expressions), then produce a **high-fidelity memory summary** to preserve emotional, practical, relationship, and world realism for future roleplay continuation.
-
-**Primary Goals:**
-1. **Scene Context:**  
-   - Capture the basic physical situation: location, time of day, environmental effects.
-2. **Emotional State Changes (per character):**  
-   - Track emotional shifts: fear, hope, anger, guilt, trust, resentment, affection.
-3. **Relationship Developments:**  
-   - Describe how trust, distance, dependence, or emotional connections evolved during the scene.
-4. **Practical Developments:**  
-   - Capture important practical events: travel hardships, fatigue, injury, hunger, gear changes, environmental obstacles.
-5. **World-State Changes:**  
-   - Record important plot/world events: route changes, enemy movements, political developments, survival risks.
-6. **Critical Dialogue Fragments:**  
-   - Identify and preserve 1–3 **critical quotes** or **key emotional exchanges** from the dialogue.
-   - These must reflect major emotional turning points, confessions, confrontations, or promises.
-   - Use near-verbatim phrasing when possible.
-7. **Continuity Anchors:**  
-   - Identify important facts, feelings, or decisions that must be remembered for emotional and logical continuity in future roleplay.
-
-**Compression and Length Policy:**
-- **Do NOT prioritize token-saving compression over realism.**
-- Length is **flexible** depending on emotional and narrative density.
-- Allow **longer outputs naturally** for scenes rich in dialogue, emotional conflict, or tactical discussion.
-- Aggressively compress only if the scene is mostly trivial small-talk.
-
-**Accuracy Policy:**
-- Only extract facts, emotions, or quotes that are explicitly present or strongly implied.
-- Never invent or assume information beyond the provided context.
-
-**Tone Handling:**
-- Preserve emotional nuance and character complexity — avoid flattening characters into simple good/bad binaries.
-
----
-
-[[INPUTS]]
+**Role:** Roleplay Context Extractor
+**Task:** Analyze the provided CONTEXT DOCUMENTS (character backstories, relationship histories, past events, lore) and the RECENT CHAT HISTORY (dialogue, actions, emotional expressions).
+**Objective:** Based ONLY on this information, extract and describe the specific details, memories, relationship dynamics, stated feelings, significant past events, or relevant character traits that are **essential for understanding the full context** of and accurately answering the LATEST USER QUERY from a roleplaying perspective.
+**Instructions:**
+1.  Identify the core subject of the LATEST USER QUERY and any immediately related contextual elements.
+2.  Extract Key Information: Prioritize extracting verbatim sentences or short passages that **directly address** the core subject and related elements.
+3.  Describe Key Dynamics: ...extract specific details or events... that illustrate *why* it's complex...
+4.  Include Foundational Context: Extract specific details... that **directly led to or fundamentally define** the current situation...
+5.  Incorporate Recent Developments: Include details from the RECENT CHAT HISTORY...
+6.  Be Descriptive but Focused: Capture the nuance... Avoid overly generic summaries...
+7.  Prioritize Relevance over Extreme Brevity: ...ensure that key descriptive details... are included...
+8.  Ensure Accuracy: Do not infer, assume, or add information not explicitly present...
+9.  Output: Present the extracted points clearly. If no relevant information is found, state clearly: \"No specific details relevant to the query were found in the provided context.\"
 
 **LATEST USER QUERY:** {STATELESS_REFINER_QUERY_PLACEHOLDER}
-
 **CONTEXT DOCUMENTS:**
 ---
 {STATELESS_REFINER_CONTEXT_PLACEHOLDER}
 ---
-
 **RECENT CHAT HISTORY:**
 ---
 {STATELESS_REFINER_HISTORY_PLACEHOLDER}
 ---
 
----
-
-[[OUTPUT STRUCTURE]]
-
-**Scene Location and Context:**  
-(description)
-
-**Emotional State Changes (per character):**  
-- (Character Name): emotional shifts.
-
-**Relationship Developments:**  
-- (short descriptions)
-
-**Practical Developments:**  
-- (details about survival, fatigue, injuries, supplies)
-
-**World-State Changes:**  
-- (plot changes, movement of threats, discoveries)
-
-**Critical Dialogue Fragments:**  
-- (List 1–3 key quotes that define emotional turning points)
-
-**Important Continuity Anchors:**  
-- (Facts, feelings, or decisions that must persist.)
-
----
-
-[[NOTES]]
-- Prioritize **emotional realism** and **narrative continuity** over brevity.
-- Critical Dialogue Fragments should be highly selective, capturing *turning points*, *trust shifts*, *confessions*, or *major promises* whenever present.
-
+Concise Relevant Information (for final answer generation):
 """
-
 # --- NEW: Constants for Two-Step RAG Cache Refinement ---
 
 # Placeholders for Step 1 (Cache Update)

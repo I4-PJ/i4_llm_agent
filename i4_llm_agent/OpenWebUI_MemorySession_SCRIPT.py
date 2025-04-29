@@ -1,12 +1,12 @@
-# === START OF FILE script.txt ===
+# === START OF MODIFIED script.txt ===
 
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.19.0)
+title: SESSION_MEMORY PIPE (v0.19.2)
 author: Petr Jilek & Assistant Gemini
-version: 0.19.0
-description: Removes prompt template valves, relying on library/script defaults. Consolidates Inventory LLM debug logs into the Final Payload debug log file. Moves final payload logging into the orchestrator. Fixes status emission logic, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.6+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
+version: 0.19.2
+description: Updates T1 Summarizer prompt to use an adapted, detailed Roleplay Memory Extractor prompt focused solely on the dialogue chunk being summarized. Uses correct placeholder `{dialogue_chunk}`. Relies on library defaults for other prompts. Consolidates Inventory LLM debug logs. Moves final payload logging into orchestrator. Fixes status emission, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.6+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
 requirements: pydantic, chromadb, i4_llm_agent>=0.1.6, tiktoken, httpx, open_webui (internal utils)
 """
 # --- END HEADER ---
@@ -152,12 +152,13 @@ try:
         DIALOGUE_ROLES as I4_AGENT_DIALOGUE_ROLES,
         # --- START IMPORT: Import specific default templates ---
         # NOTE: These are now the *only* source for these prompts
+        #       UNLESS explicitly overridden by a constant below (like Summarizer)
         DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
         DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
         DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
-        DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
+        # DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE, # <<< REMOVED IMPORT
         DEFAULT_EVENT_HINT_TEMPLATE_TEXT,
-        DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT,  # Added
+        DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT,
         # --- END IMPORT ---
     )
 
@@ -194,7 +195,7 @@ except ImportError as e:
         "[Default Select Prompt Load Failed]"
     )
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = "[Default Inventory Prompt Load Failed]"
-    DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = "[Default Stateless Prompt Load Failed]"
+    # DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = "[Default Stateless Prompt Load Failed]" # Not needed if import fails
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Prompt Load Failed]"
     DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = (
         "[Default World State Parse Prompt Load Failed]"
@@ -218,37 +219,111 @@ except ImportError:
 
 # === SECTION 3: CONSTANTS & DEFAULTS ===
 DEFAULT_LOG_DIR = r"C:\\Utils\\OpenWebUI"
-DEFAULT_LOG_FILE_NAME = "session_memory_v18_12_pipe_log.log"  # Version updated
+DEFAULT_LOG_FILE_NAME = "session_memory_v19_2_pipe_log.log"  # Version updated
 DEFAULT_LOG_LEVEL = "DEBUG"
 ENV_VAR_LOG_FILE_PATH = "SM_LOG_FILE_PATH"
 ENV_VAR_LOG_LEVEL = "SM_LOG_LEVEL"
+
+# --- Placeholders for Prompt Formatting ---
+# <<< NEW PLACEHOLDER for T1 Summarizer >>>
+SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER = "{dialogue_chunk}"
 
 # --- Summarizer Config (Prompt defaults to constant below) ---
 ENV_VAR_SUMMARIZER_API_URL = "SM_SUMMARIZER_API_URL"
 ENV_VAR_SUMMARIZER_API_KEY = "SM_SUMMARIZER_API_KEY"
 ENV_VAR_SUMMARIZER_TEMPERATURE = "SM_SUMMARIZER_TEMPERATURE"
-ENV_VAR_SUMMARIZER_SYSTEM_PROMPT = "SM_SUMMARIZER_SYSTEM_PROMPT"  # Kept for valve
+ENV_VAR_SUMMARIZER_SYSTEM_PROMPT = (
+    "SM_SUMMARIZER_SYSTEM_PROMPT"  # Kept for valve override
+)
 DEFAULT_SUMMARIZER_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
 DEFAULT_SUMMARIZER_API_KEY = ""
 DEFAULT_SUMMARIZER_TEMPERATURE = 0.5
-DEFAULT_SUMMARIZER_SYSTEM_PROMPT = """**Role:** Conversation Summarizer
 
-**Task:** Read the provided dialogue transcript. Create a concise, neutral summary focusing on:
-*   **Key Information:** Extract names, locations, important objects mentioned.
-*   **Decisions & Plans:** Note any significant choices made or plans discussed.
-*   **Emotional Shifts:** Briefly mention major changes in mood or relationship dynamics if clearly stated.
-*   **Factual Events:** Record objective actions or events that occurred.
+# --- <<< MODIFIED: ADAPTED DETAILED ROLEPLAY PROMPT FOR T1 SUMMARIZER >>> ---
+DEFAULT_SUMMARIZER_SYSTEM_PROMPT = f"""
+[[SYSTEM DIRECTIVE]]
 
-**Style:**
-*   Third-person, past tense.
-*   Neutral and objective tone.
-*   Avoid direct quotes unless essential.
-*   Focus on facts and explicit statements, not interpretation.
-*   Be concise.
+**Role:** Roleplay Dialogue Chunk Summarizer & Memory Extractor
 
-**Output:** Provide only the summary text.
+**Objective:**
+Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produce a **high-fidelity memory summary** to preserve emotional, practical, relationship, and world realism *expressed within this specific chunk* for future roleplay continuation.
 
-**Concise Summary (including key names/places/items):**"""  # Script default
+**Primary Goals:**
+
+1.  **Scene Context (from Chunk):**
+    *   Capture the basic physical situation: location, time of day, environmental effects *as described EXPLICITLY in the DIALOGUE CHUNK*.
+2.  **Emotional State Changes (from Chunk):**
+    *   Track emotional shifts expressed *in the DIALOGUE CHUNK*: fear, hope, anger, guilt, trust, resentment, affection. Mention which character expressed them.
+3.  **Relationship Developments (from Chunk):**
+    *   Describe how trust, distance, dependence, or emotional connections evolved *during this DIALOGUE CHUNK*.
+4.  **Practical Developments (from Chunk):**
+    *   Capture important practical events *mentioned in the DIALOGUE CHUNK*: travel hardships, fatigue, injury, hunger, gear changes, environmental obstacles.
+5.  **World-State Changes (from Chunk):**
+    *   Record important plot/world events *stated in the DIALOGUE CHUNK*: route changes, enemy movements, political developments, survival risks.
+6.  **Critical Dialogue Fragments (from Chunk):**
+    *   Identify and preserve 1–3 **critical quotes** or **key emotional exchanges** *from the DIALOGUE CHUNK*.
+    *   These must reflect major emotional turning points, confessions, confrontations, or promises *within this chunk*.
+    *   Use near-verbatim phrasing when possible.
+7.  **Continuity Anchors (from Chunk):**
+    *   Identify important facts, feelings, or decisions *from this DIALOGUE CHUNK* that must be remembered for emotional and logical continuity in future roleplay.
+
+**Compression and Length Policy:**
+*   **Do NOT prioritize token-saving compression over realism.** Length is flexible depending on the density of the DIALOGUE CHUNK.
+*   Allow **longer outputs naturally** for chunks rich in emotional conflict or tactical discussion.
+*   Aggressively compress only if the chunk is mostly trivial small-talk.
+
+**Accuracy Policy:**
+*   Only extract facts, emotions, or quotes that are explicitly present or strongly implied *within the provided DIALOGUE CHUNK*.
+*   **Do NOT invent or assume information.** Do not refer to context outside the chunk.
+
+**Tone Handling:**
+*   Preserve emotional nuance and character complexity expressed *in the DIALOGUE CHUNK*.
+
+---
+
+[[INPUT]]
+
+**DIALOGUE CHUNK TO SUMMARIZE:**
+---
+{SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER}
+---
+
+---
+
+[[OUTPUT STRUCTURE]]
+
+**Scene Location and Context (from Chunk):**
+(description based *only* on dialogue chunk)
+
+**Emotional State Changes (per character, from Chunk):**
+- (Character Name): emotional shifts *expressed in chunk*.
+
+**Relationship Developments (from Chunk):**
+- (short descriptions *from chunk*)
+
+**Practical Developments (from Chunk):**
+- (details about survival, fatigue, injuries, supplies *mentioned in chunk*)
+
+**World-State Changes (from Chunk):**
+- (plot changes, movement of threats, discoveries *stated in chunk*)
+
+**Critical Dialogue Fragments (from Chunk):**
+- (List 1–3 key quotes *from this chunk* that define emotional turning points)
+
+**Important Continuity Anchors (from Chunk):**
+- (Facts, feelings, or decisions *from this chunk* that must persist.)
+
+---
+
+[[NOTES]]
+- Focus **exclusively** on the provided DIALOGUE CHUNK.
+- Base the summary *only* on the text within the chunk.
+- Prioritize emotional realism and narrative continuity over brevity based on the chunk's content.
+
+**Memory Summary Output (Based SOLELY on the Dialogue Chunk):**
+"""
+# --- <<< END ADAPTED SUMMARIZER PROMPT >>> ---
+
 
 # --- Core Memory Config ---
 DEFAULT_TOKENIZER_ENCODING = "cl100k_base"
@@ -291,13 +366,12 @@ ENV_VAR_RAG_SUMMARY_RESULTS_COUNT = "SM_RAG_SUMMARY_RESULTS_COUNT"
 
 # --- Refinement / RAG Cache Features (Prompts use library defaults) ---
 ENV_VAR_ENABLE_RAG_CACHE = "SM_ENABLE_RAG_CACHE"
-ENV_VAR_ENABLE_STATELESS_REFINEMENT = "SM_ENABLE_REFINEMENT"
+ENV_VAR_ENABLE_STATELESS_REFINEMENT = (
+    "SM_ENABLE_REFINEMENT"  # Uses library default prompt now
+)
 ENV_VAR_REFINER_API_URL = "SM_REFINER_API_URL"
 ENV_VAR_REFINER_API_KEY = "SM_REFINER_API_KEY"
 ENV_VAR_REFINER_TEMPERATURE = "SM_REFINER_TEMPERATURE"
-# --- REMOVED: ENV_VAR_CACHE_UPDATE_PROMPT_TEMPLATE ---
-# --- REMOVED: ENV_VAR_FINAL_SELECT_PROMPT_TEMPLATE ---
-# --- REMOVED: ENV_VAR_STATELESS_REFINER_PROMPT_TEMPLATE ---
 ENV_VAR_REFINER_HISTORY_COUNT = "SM_REFINER_HISTORY_COUNT"
 ENV_VAR_STATELESS_REFINER_SKIP_THRESHOLD = "SM_REFINER_SKIP_THRESHOLD"
 ENV_VAR_CACHE_UPDATE_SKIP_OWI_THRESHOLD = "SM_CACHE_UPDATE_SKIP_OWI_THRESHOLD"
@@ -311,6 +385,7 @@ DEFAULT_REFINER_HISTORY_COUNT = 6
 DEFAULT_STATELESS_REFINER_SKIP_THRESHOLD = 500
 DEFAULT_CACHE_UPDATE_SKIP_OWI_THRESHOLD = 50
 DEFAULT_CACHE_UPDATE_SIMILARITY_THRESHOLD = 0.9
+# Stateless Refiner prompt now uses library default unless refiner_llm_config is manually passed a template
 
 # --- Final LLM Pass-Through Config ---
 ENV_VAR_FINAL_LLM_API_URL = "SM_FINAL_LLM_API_URL"
@@ -328,11 +403,10 @@ ENV_VAR_ENABLE_INVENTORY_MANAGEMENT = "SM_ENABLE_INVENTORY"
 ENV_VAR_INV_LLM_API_URL = "SM_INV_LLM_API_URL"
 ENV_VAR_INV_LLM_API_KEY = "SM_INV_LLM_API_KEY"
 ENV_VAR_INV_LLM_TEMPERATURE = "SM_INV_LLM_TEMPERATURE"
-# --- REMOVED: ENV_VAR_INV_LLM_PROMPT_TEMPLATE ---
 DEFAULT_INV_LLM_API_URL = DEFAULT_REFINER_API_URL
 DEFAULT_INV_LLM_API_KEY = ""
 DEFAULT_INV_LLM_TEMPERATURE = DEFAULT_REFINER_TEMPERATURE
-# Default template comes from library import
+# Inventory prompt uses library default
 
 # --- Event Hint Feature (Prompt uses library default) ---
 DEFAULT_ENABLE_EVENT_HINTS = False
@@ -340,16 +414,15 @@ ENV_VAR_ENABLE_EVENT_HINTS = "SM_ENABLE_EVENT_HINTS"
 ENV_VAR_EVENT_HINT_LLM_API_URL = "SM_EVENT_HINT_LLM_API_URL"
 ENV_VAR_EVENT_HINT_LLM_API_KEY = "SM_EVENT_HINT_LLM_API_KEY"
 ENV_VAR_EVENT_HINT_LLM_TEMPERATURE = "SM_EVENT_HINT_LLM_TEMPERATURE"
-# --- REMOVED: ENV_VAR_EVENT_HINT_LLM_PROMPT_TEMPLATE ---
 ENV_VAR_EVENT_HINT_HISTORY_COUNT = "SM_EVENT_HINT_HISTORY_COUNT"
 DEFAULT_EVENT_HINT_LLM_API_URL = DEFAULT_RAGQ_LLM_API_URL
 DEFAULT_EVENT_HINT_LLM_API_KEY = ""
 DEFAULT_EVENT_HINT_LLM_TEMPERATURE = 0.7
 DEFAULT_EVENT_HINT_HISTORY_COUNT = 6
-# Default template comes from library import
+# Event Hint prompt uses library default
 
 # --- World State Parser Feature (Prompt uses library default) ---
-# --- REMOVED: ENV_VAR_WORLD_STATE_PARSE_PROMPT_TEMPLATE --- # No valve needed
+# No valve needed
 
 # --- General & Debug ---
 DEFAULT_INCLUDE_ACK_TURNS = True
@@ -362,7 +435,7 @@ DEFAULT_DEBUG_LOG_RAW_INPUT = False
 ENV_VAR_DEBUG_LOG_RAW_INPUT = "SM_DEBUG_LOG_RAW_INPUT"
 
 # --- Logger Setup ---
-logger = logging.getLogger("SessionMemoryPipeV18_12Logger")  # Version updated
+logger = logging.getLogger("SessionMemoryPipeV19_2Logger")  # Version updated
 logging.basicConfig(level=logging.INFO)
 
 
@@ -411,11 +484,11 @@ class ChromaDBCompatibleEmbedder:
         return embeddings
 
 
-# === SECTION 5: PIPE CLASS DEFINITION (Prompt Valves Removed) ===
+# === SECTION 5: PIPE CLASS DEFINITION (Prompt Valves Adjusted) ===
 class Pipe:
-    version = "0.18.12"  # Version updated
+    version = "0.19.2"  # Version updated
 
-    # === SECTION 5.1: VALVES DEFINITION (Prompt Valves Removed) ===
+    # === SECTION 5.1: VALVES DEFINITION (Prompt Valves Adjusted) ===
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -458,7 +531,7 @@ class Pipe:
                 )
             )
         )
-        # --- Summarizer LLM (Prompt uses script default) ---
+        # --- Summarizer LLM (Prompt uses script default now) ---
         summarizer_api_url: str = Field(
             default=os.getenv(ENV_VAR_SUMMARIZER_API_URL, DEFAULT_SUMMARIZER_API_URL)
         )
@@ -472,10 +545,11 @@ class Pipe:
                 )
             )
         )
-        # --- KEPT: Summarizer System Prompt (Uses script default) ---
+        # --- KEPT: Summarizer System Prompt (Uses adapted script default) ---
         summarizer_system_prompt: str = Field(
             default=os.getenv(
-                ENV_VAR_SUMMARIZER_SYSTEM_PROMPT, DEFAULT_SUMMARIZER_SYSTEM_PROMPT
+                ENV_VAR_SUMMARIZER_SYSTEM_PROMPT,
+                DEFAULT_SUMMARIZER_SYSTEM_PROMPT,  # Uses the adapted detailed prompt
             )
         )
         # --- RAG Query LLM (Prompt uses script default) ---
@@ -554,9 +628,6 @@ class Pipe:
                 os.getenv(ENV_VAR_REFINER_HISTORY_COUNT, DEFAULT_REFINER_HISTORY_COUNT)
             )
         )
-        # --- REMOVED: cache_update_prompt_template ---
-        # --- REMOVED: final_context_selection_prompt_template ---
-        # --- REMOVED: stateless_refiner_prompt_template ---
         CACHE_UPDATE_SKIP_OWI_THRESHOLD: int = Field(
             default=int(
                 os.getenv(
@@ -603,7 +674,6 @@ class Pipe:
                 os.getenv(ENV_VAR_INV_LLM_TEMPERATURE, DEFAULT_INV_LLM_TEMPERATURE)
             )
         )
-        # --- REMOVED: inv_llm_prompt_template ---
 
         # --- Event Hint Feature (Prompt uses library default) ---
         enable_event_hints: bool = Field(
@@ -631,7 +701,6 @@ class Pipe:
                 )
             )
         )
-        # --- REMOVED: event_hint_llm_prompt_template ---
         event_hint_history_count: int = Field(
             default=int(
                 os.getenv(
@@ -639,7 +708,6 @@ class Pipe:
                 )
             )
         )
-        # --- REMOVED: world_state_parse_prompt_template ---
 
         # --- General & Debug ---
         include_ack_turns: bool = Field(
@@ -735,8 +803,12 @@ class Pipe:
             if not self.summarizer_system_prompt or not isinstance(
                 self.summarizer_system_prompt, str
             ):
-                self.summarizer_system_prompt = DEFAULT_SUMMARIZER_SYSTEM_PROMPT
-                logger.warning("Reset summarizer_system_prompt to script default.")
+                self.summarizer_system_prompt = (
+                    DEFAULT_SUMMARIZER_SYSTEM_PROMPT  # Use adapted default
+                )
+                logger.warning(
+                    "Reset summarizer_system_prompt to adapted script default."
+                )
             if not self.ragq_llm_prompt or not isinstance(self.ragq_llm_prompt, str):
                 self.ragq_llm_prompt = DEFAULT_RAGQ_LLM_PROMPT
                 logger.warning("Reset ragq_llm_prompt to script default.")
@@ -761,7 +833,7 @@ class Pipe:
     # === SECTION 5.2: INITIALIZATION METHOD ===
     def __init__(self):
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Simplify Prompts)"
+        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Adapted Summarizer)"  # Updated name
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
@@ -770,16 +842,25 @@ class Pipe:
             raise ImportError(error_msg)
         try:
             self.valves = self.Valves()
-            # Modified logging to exclude removed prompt valves
+            # Logging valves - prompt logging adjusted
             init_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
                 if "api_key" not in k
+                and "prompt" not in k  # Exclude all prompt keys from basic log
             }
-            # Remove prompt keys explicitly for logging if they weren't removed by the filter
-            init_log_valves.pop("summarizer_system_prompt", None)
-            init_log_valves.pop("ragq_llm_prompt", None)
-            # Add feature flags
+            # Log the *name* of the summarizer prompt source
+            init_log_valves["summarizer_system_prompt_source"] = (
+                "Script Default (Adapted Roleplay)"
+                if self.valves.summarizer_system_prompt
+                == DEFAULT_SUMMARIZER_SYSTEM_PROMPT
+                else "Environment Variable Override"
+            )
+            init_log_valves["ragq_llm_prompt_source"] = (
+                "Script Default"
+                if self.valves.ragq_llm_prompt == DEFAULT_RAGQ_LLM_PROMPT
+                else "Environment Variable Override"
+            )
             init_log_valves["INIT_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
@@ -789,9 +870,7 @@ class Pipe:
             init_log_valves["INIT_debug_log_final_payload"] = getattr(
                 self.valves, "debug_log_final_payload", "LOAD_FAILED"
             )
-            self.logger.info(
-                f"Pipe.__init__: self.valves loaded (Prompts use defaults): {init_log_valves}"
-            )
+            self.logger.info(f"Pipe.__init__: self.valves loaded: {init_log_valves}")
             # Warnings for missing keys remain the same
             if not self.valves.summarizer_api_key:
                 self.logger.warning("Global Summarizer API Key MISSING.")
@@ -873,7 +952,7 @@ class Pipe:
             )
             raise RuntimeError("Failed to initialize SessionManager") from e
         try:
-            # Pass self.valves which now lacks prompt template fields
+            # Pass self.valves which now uses the adapted summarizer prompt default
             self.orchestrator = SessionPipeOrchestrator(
                 config=self.valves,
                 session_manager=self.session_manager,
@@ -1061,7 +1140,7 @@ class Pipe:
         self.logger.info(f"'{self.name}' shutdown complete.")
 
     async def on_valves_updated(self):
-        # (Simplified logging due to removed prompt valves)
+        # (Adjusted logging)
         self.logger.info(
             f"on_valves_updated: Reloading global settings for '{self.name}'..."
         )
@@ -1071,15 +1150,24 @@ class Pipe:
         old_chromadb_path = getattr(self.valves, "chromadb_path", None)
         try:
             self.valves = self.Valves()
-            # Modified logging to exclude removed prompt valves
+            # Logging valves - prompt logging adjusted
             update_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
-                if "api_key" not in k
+                if "api_key" not in k and "prompt" not in k  # Exclude all prompt keys
             }
-            update_log_valves.pop("summarizer_system_prompt", None)
-            update_log_valves.pop("ragq_llm_prompt", None)
-            # Add feature flags
+            # Log the *name* of the summarizer prompt source
+            update_log_valves["summarizer_system_prompt_source"] = (
+                "Script Default (Adapted Roleplay)"
+                if self.valves.summarizer_system_prompt
+                == DEFAULT_SUMMARIZER_SYSTEM_PROMPT
+                else "Environment Variable Override"
+            )
+            update_log_valves["ragq_llm_prompt_source"] = (
+                "Script Default"
+                if self.valves.ragq_llm_prompt == DEFAULT_RAGQ_LLM_PROMPT
+                else "Environment Variable Override"
+            )
             update_log_valves["UPDATE_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
@@ -1090,10 +1178,10 @@ class Pipe:
                 self.valves, "debug_log_final_payload", "LOAD_FAILED"
             )
             self.logger.info(
-                f"Pipe.on_valves_updated: self.valves RE-loaded (Prompts use defaults): {update_log_valves}"
+                f"Pipe.on_valves_updated: self.valves RE-loaded: {update_log_valves}"
             )
             if hasattr(self, "orchestrator"):
-                # Pass the updated config (without prompt templates) to orchestrator
+                # Pass the updated config to orchestrator
                 self.orchestrator.config = self.valves
                 self.logger.info("Orchestrator config updated.")
             else:
@@ -1256,8 +1344,6 @@ class Pipe:
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
             )
 
-    # --- REMOVED: _log_debug_inventory_llm (Handled by orchestrator) ---
-
     # === SECTION 5.11: MAIN PIPE METHOD (Unchanged) ===
     async def pipe(
         self,
@@ -1352,7 +1438,7 @@ class Pipe:
 
             # --- Orchestrator Config Update ---
             if hasattr(self, "orchestrator") and hasattr(self, "valves"):
-                # Pass the potentially updated self.valves (without prompt templates)
+                # Pass the potentially updated self.valves
                 self.orchestrator.config = self.valves
                 self.orchestrator.pipe_logger = self.logger
                 self.orchestrator.pipe_debug_path_getter = self._get_debug_log_path
@@ -1542,3 +1628,4 @@ class Pipe:
 
 
 # === SECTION 6: END OF SCRIPT ===
+# === END OF MODIFIED script.txt ===
