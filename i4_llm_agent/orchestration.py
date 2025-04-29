@@ -776,6 +776,7 @@ class SessionPipeOrchestrator:
             return {"messages": final_llm_payload_contents} # Return the dict for OWI
 
 
+
     # === MAIN PROCESSING METHOD ===
     async def process_turn(
         self,
@@ -849,15 +850,14 @@ class SessionPipeOrchestrator:
                 except Exception as e_world_state: self.logger.error(f"[{session_id}] Error fetching/setting world state: {e_world_state}", exc_info=True); self.current_season, self.current_weather, self.current_day, self.current_time_of_day = "Err", "Err", 1, "Err"
             else: missing_world_funcs = [f for f, fn in {"cursor": self.sqlite_cursor, "getter": self._get_world_state_db_func, "setter": self._set_world_state_db_func}.items() if not fn]; self.logger.error(f"[{session_id}] Cannot fetch/set world state: Missing prerequisites: {missing_world_funcs}. Using defaults.")
 
-            # --- Generate Hint and Weather Proposal (Stage 1) ---
-            # Uses updated generate_event_hint which returns (hint_text, weather_proposal_dict)
+            # --- Generate Hint and Weather Proposal (Stage 1 - Uses event_hint_llm config) ---
             if event_hints_enabled and _event_hints_import_success:
                 self.logger.info(f"[{session_id}] Attempting event hint & weather proposal generation...")
                 await self._emit_status(event_emitter, session_id, "Status: Generating hint & weather proposal...")
                 hint_llm_url = getattr(self.config, 'event_hint_llm_api_url', None)
                 hint_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
                 if not hint_llm_url or not hint_llm_key:
-                     self.logger.warning(f"[{session_id}] Skipping hint/proposal: Config incomplete (URL/Key).")
+                     self.logger.warning(f"[{session_id}] Skipping hint/proposal: Config incomplete (event_hint_llm_...).")
                      generated_weather_proposal = {"previous_weather": self.current_weather, "new_weather": self.current_weather} # Use current state
                 else:
                     try:
@@ -900,7 +900,7 @@ class SessionPipeOrchestrator:
                 weather_proposal=generated_weather_proposal # <<< PASS PROPOSAL HERE
             )
 
-            payload_dict_or_error = self._construct_payload_func(
+            payload_dict_or_error = self._construct_payload_func( # Use alias
                  system_prompt=base_system_prompt_text, history=t0_raw_history_slice,
                  context=final_combined_context, # Use the context WITH the proposal text
                  query=latest_user_query_str,
@@ -923,20 +923,30 @@ class SessionPipeOrchestrator:
                 # 1. Get Day/Time changes based on narrative (using simplified parser)
                 day_time_changes = {}
                 if self._parse_daytime_func and _WORLD_STATE_PARSER_LLM_AVAILABLE:
-                    ws_parse_llm_url = getattr(self.config, 'event_hint_llm_api_url', None) # Use Hint/Parse LLM config
-                    ws_parse_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
+                    # <<< CHANGE: Use Inventory LLM Config for Day/Time Parsing >>>
+                    ws_parse_llm_url = getattr(self.config, 'inv_llm_api_url', None)
+                    ws_parse_llm_key = getattr(self.config, 'inv_llm_api_key', None)
+                    ws_parse_llm_temp = getattr(self.config, 'inv_llm_temperature', 0.3)
+                    # <<< END CHANGE >>>
                     ws_parse_llm_template = DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT # Simplified template
-                    if not ws_parse_llm_url or not ws_parse_llm_key: self.logger.warning(f"[{session_id}] Skipping Day/Time parse: Hint/Parse LLM Config incomplete.")
+                    if not ws_parse_llm_url or not ws_parse_llm_key: self.logger.warning(f"[{session_id}] Skipping Day/Time parse: Inventory LLM Config incomplete.")
                     else:
                         try:
-                            daytime_parse_config = { "url": ws_parse_llm_url, "key": ws_parse_llm_key, "temp": getattr(self.config, 'event_hint_llm_temperature', 0.3), "prompt_template": ws_parse_llm_template,}
+                            # <<< CHANGE: Populate config dict with inv_llm values >>>
+                            daytime_parse_config = {
+                                "url": ws_parse_llm_url,
+                                "key": ws_parse_llm_key,
+                                "temp": ws_parse_llm_temp,
+                                "prompt_template": ws_parse_llm_template,
+                            }
+                            # <<< END CHANGE >>>
                             day_time_changes = await self._parse_daytime_func(
                                 llm_response_text=narrative_response_text,
                                 history_messages=current_active_history,
                                 current_day=self.current_day,
                                 current_time_of_day=self.current_time_of_day,
                                 llm_call_func=self._async_llm_call_wrapper,
-                                ws_parse_llm_config=daytime_parse_config,
+                                ws_parse_llm_config=daytime_parse_config, # Pass the config dict
                                 logger_instance=self.logger, session_id=session_id,
                                 debug_path_getter=self._orchestrator_get_debug_log_path
                             )
@@ -946,7 +956,7 @@ class SessionPipeOrchestrator:
                 narrative_day_increment = day_time_changes.get("day_increment", 0)
                 narrative_time_of_day = day_time_changes.get("time_of_day") # Can be None
 
-                # 2. Confirm Weather Change (using proposal + narrative check)
+                # 2. Confirm Weather Change (using proposal + narrative check via Inventory LLM Config)
                 confirmed_weather = self.current_weather # Start with current weather
                 contradiction_found = False
                 proposed_new_weather = generated_weather_proposal.get("new_weather")
@@ -956,17 +966,23 @@ class SessionPipeOrchestrator:
                 if proposed_new_weather is not None and proposed_new_weather != proposed_prev_weather:
                     self.logger.info(f"[{session_id}] Weather change proposed: {proposed_prev_weather} -> {proposed_new_weather}. Checking narrative consistency...")
                     if self._confirm_weather_func and _WORLD_STATE_PARSER_LLM_AVAILABLE: # Check if func alias is valid
-                         weather_confirm_llm_url = getattr(self.config, 'inv_llm_api_url', None) # Use Inventory LLM config
+                         # Use Inventory LLM Config for Weather Confirm (as before)
+                         weather_confirm_llm_url = getattr(self.config, 'inv_llm_api_url', None)
                          weather_confirm_llm_key = getattr(self.config, 'inv_llm_api_key', None)
+                         weather_confirm_llm_temp = getattr(self.config, 'inv_llm_temperature', 0.3)
                          if not weather_confirm_llm_url or not weather_confirm_llm_key: self.logger.warning(f"[{session_id}] Skipping Weather Confirm check: Inventory LLM Config incomplete.")
                          else:
                              try:
-                                 weather_confirm_config = { "url": weather_confirm_llm_url, "key": weather_confirm_llm_key, "temp": getattr(self.config, 'inv_llm_temperature', 0.3),}
+                                 weather_confirm_config = {
+                                     "url": weather_confirm_llm_url,
+                                     "key": weather_confirm_llm_key,
+                                     "temp": weather_confirm_llm_temp,
+                                 }
                                  contradiction_found = await self._confirm_weather_func(
                                      proposed_weather_change=generated_weather_proposal,
                                      llm_response_text=narrative_response_text,
                                      llm_call_func=self._async_llm_call_wrapper,
-                                     weather_confirm_llm_config=weather_confirm_config,
+                                     weather_confirm_llm_config=weather_confirm_config, # Pass the config dict
                                      logger_instance=self.logger, session_id=session_id,
                                      debug_path_getter=self._orchestrator_get_debug_log_path
                                  )
@@ -1029,7 +1045,7 @@ class SessionPipeOrchestrator:
 
             elif not isinstance(final_result, str): self.logger.debug(f"[{session_id}] Skipping world state analysis: Final result was not a string (Type: {type(final_result).__name__}).")
 
-            # --- Post-Turn Inventory Update (Logic Unchanged) ---
+            # --- Post-Turn Inventory Update (Logic Unchanged, uses inv_llm config) ---
             if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._update_inventories_func:
                 inventory_update_completed = True
                 if isinstance(final_result, str):
