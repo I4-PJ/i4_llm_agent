@@ -4,6 +4,7 @@
 import logging
 import re
 import asyncio
+import json # Added for formatting scene keywords example
 from typing import Tuple, Union, Optional, Dict, List, Any, Callable, Coroutine
 
 # --- Existing Imports from i4_llm_agent ---
@@ -465,7 +466,7 @@ async def generate_rag_query(
         if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
         else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
-# --- Function: Construct Final LLM Payload (MODIFIED to include Weather Guideline) ---
+# --- Function: Construct Final LLM Payload (Existing - Unchanged structure) ---
 def construct_final_llm_payload(
     system_prompt: str,
     history: List[Dict],
@@ -480,20 +481,6 @@ def construct_final_llm_payload(
     Constructs the final payload for the LLM in Google's 'contents' format,
     injecting the long-term goal, event hint/guideline, and weather guideline
     into the payload.
-
-    Args:
-        system_prompt (str): The base system instructions (without OWI context tags).
-        history (List[Dict]): List of dialogue messages (e.g., T0 slice).
-        context (Optional[str]): Combined background information string (may include proposed weather change text).
-        query (str): The latest user query.
-        long_term_goal (Optional[str]): A session-specific goal instruction.
-        event_hint (Optional[str]): A dynamically generated event suggestion.
-        strategy (str): Payload construction strategy ('standard' or 'advanced').
-        include_ack_turns (bool): Whether to include "Understood" turns.
-
-    Returns:
-        Dict[str, Any]: The constructed payload dictionary for the LLM API,
-                        or a dict with an "error" key if issues occur.
     """
     func_logger = logging.getLogger(__name__ + '.construct_final_llm_payload')
     func_logger.debug(
@@ -532,11 +519,10 @@ def construct_final_llm_payload(
 
     # --- Append Event Handling Guideline (if hint provided) ---
     if event_hint and isinstance(event_hint, str) and event_hint.strip():
-        # Only append the guideline if a non-empty hint string is passed
         final_system_instructions += EVENT_HANDLING_GUIDELINE_TEXT
         func_logger.debug(f"Appended event handling guideline to system instructions text.")
 
-    # <<< NEW: Append Weather Suggestion Guideline >>>
+    # --- Append Weather Suggestion Guideline ---
     weather_suggestion_guideline = """
 
 --- [ Weather Suggestion Guideline ] ---
@@ -544,8 +530,6 @@ The background information may contain a "Proposed Weather Change: From X to Y".
 --- [ END Weather Suggestion Guideline ] ---"""
     final_system_instructions += weather_suggestion_guideline
     func_logger.debug(f"Appended weather suggestion guideline to system instructions text.")
-    # <<< END NEW SECTION >>>
-
 
     # 2. Add the combined System Instructions turn and optional ACK
     if final_system_instructions:
@@ -568,7 +552,6 @@ The background information may contain a "Proposed Weather Change: From X to Y".
 
     # 4. Prepare Context Turn (if context exists) and optional ACK
     context_turn = None; ack_turn = None
-    # Context now potentially includes world state, summaries, inventory, AND proposed weather change
     has_real_context = bool(context and context.strip() and context.strip() != EMPTY_CONTEXT_PLACEHOLDER)
     if has_real_context:
         safe_context = context.strip().replace("---", "===") # Basic separator replacement
@@ -610,28 +593,32 @@ The background information may contain a "Proposed Weather Change: From X to Y".
     return final_payload
 
 
-# --- Function: Combine Background Context (MODIFIED to include World State AND Proposed Weather) ---
+# --- Function: Combine Background Context (MODIFIED to include Scene Description) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
     t2_rag_results: Optional[List[str]],
+    scene_description: Optional[str] = None, # <<< NEW Parameter
     inventory_context: Optional[str] = None,
     current_day: Optional[int] = None,
     current_time_of_day: Optional[str] = None,
     current_season: Optional[str] = None,
     current_weather: Optional[str] = None,
-    weather_proposal: Optional[Dict[str, Optional[str]]] = None, # <<< NEW Parameter
+    weather_proposal: Optional[Dict[str, Optional[str]]] = None,
     labels: Dict[str, str] = TAG_LABELS
 ) -> str:
     """
     Combines various background context sources into a single formatted string
-    suitable for injection into the final LLM prompt. Now includes world state,
-    inventory, and the proposed weather change.
+    suitable for injection into the final LLM prompt. Now includes scene description,
+    world state, inventory, and the proposed weather change.
+
+    Order: World State, Proposed Weather, Scene, Inventory, Selected Context, T1, T2.
 
     Args:
         final_selected_context: Context from OWI/Cache/Stateless refinement.
         t1_summaries: List of recent Tier 1 summary strings.
         t2_rag_results: List of retrieved Tier 2 RAG result strings.
+        scene_description: The description text for the current scene. <<< NEW
         inventory_context: Formatted string of current character inventories.
         current_day: The current day number for the session.
         current_time_of_day: The current time of day string (e.g., "Morning").
@@ -664,11 +651,10 @@ def combine_background_context(
         context_parts.append(f"--- {world_state_label} ---\n{world_state_string}")
         func_logger.debug(f"Adding World State section: {world_state_string}")
 
-    # <<< NEW: Add Proposed Weather Change Section >>>
+    # 2. Add Proposed Weather Change Section
     if isinstance(weather_proposal, dict):
         prev_w = weather_proposal.get("previous_weather")
         new_w = weather_proposal.get("new_weather")
-        # Only add if both seem valid and potentially different (LLM handles interpretation)
         if isinstance(prev_w, str) and isinstance(new_w, str):
             proposal_label = "Proposed Weather Change"
             proposal_string = f"From '{prev_w}' to '{new_w}'"
@@ -676,16 +662,29 @@ def combine_background_context(
             func_logger.debug(f"Adding Weather Proposal section: {proposal_string}")
         else:
             func_logger.debug("Skipping weather proposal section: Invalid data types in proposal dict.")
-    # <<< END NEW SECTION >>>
 
-    # 3. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
-    selected_context_label = "Selected Background Context"
+    # 3. Add Scene Description Section <<< NEW >>>
+    scene_label = "Current Scene"
+    safe_scene_description = scene_description.strip() if isinstance(scene_description, str) else None
+    if safe_scene_description:
+        func_logger.debug(f"Adding scene description (len: {len(safe_scene_description)}).")
+        context_parts.append(f"--- {scene_label} ---\n{safe_scene_description}")
+
+    # 4. Add Inventory Context
+    inventory_label = "Current Inventories"
+    safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
+    if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
+        func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
+        context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
+
+    # 5. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
+    selected_context_label = "Selected Background Context" # e.g., Character details, Lore
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
     if safe_selected_context and "[No relevant background context found" not in safe_selected_context:
         func_logger.debug(f"Adding selected context (len: {len(safe_selected_context)}).")
         context_parts.append(f"--- {selected_context_label} ---\n{safe_selected_context}")
 
-    # 4. Add T1 Summaries
+    # 6. Add T1 Summaries
     t1_label = labels.get("t1", "Recent Summaries (T1)")
     if t1_summaries:
         combined_t1 = "\n---\n".join(s.strip() for s in t1_summaries if isinstance(s, str) and s.strip())
@@ -693,7 +692,7 @@ def combine_background_context(
             func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
             context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
 
-    # 5. Add T2 RAG Results
+    # 7. Add T2 RAG Results
     t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
     if t2_rag_results:
         combined_t2 = "\n---\n".join(s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip())
@@ -701,14 +700,7 @@ def combine_background_context(
             func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
             context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
 
-    # 6. Add Inventory Context
-    inventory_label = "Current Inventories"
-    safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
-    if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
-        func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
-        context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
-
-    # 7. Combine parts or return placeholder
+    # 8. Combine parts or return placeholder
     if context_parts:
         full_context_string = "\n\n".join(context_parts)
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
@@ -717,8 +709,6 @@ def combine_background_context(
         func_logger.info("No background context available from any source.")
         return EMPTY_CONTEXT_PLACEHOLDER
 
-
-# --- Remaining functions (Unchanged but included for completeness) ---
 
 # --- Function: Format Inventory Update Prompt (Existing - Unchanged) ---
 def format_inventory_update_prompt(
@@ -731,6 +721,7 @@ def format_inventory_update_prompt(
     func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
     if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
     try:
+        # Use replace for simpler substitution here
         formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
         formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
         formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))

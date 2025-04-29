@@ -1,8 +1,9 @@
 # === START OF FILE i4_llm_agent/__init__.py ===
 
-# [[START FINAL __init__.py - Reflects World State DB Exports & LLM Parser Constant]]
+# [[START MODIFIED __init__.py - Add asyncio import and Scene Generator Exports]]
 # i4_llm_agent/__init__.py
 import logging
+import asyncio # <<< ADDED IMPORT
 
 # --- Core Functionality ---
 from .api_client import call_google_llm_api # Existing API client
@@ -11,7 +12,7 @@ from .history import (
     format_history_for_llm, get_recent_turns, get_dialogue_history,
     select_turns_for_t0, DIALOGUE_ROLES,
 )
-# Prompting Utils (Modified: Added Inventory Template/Formatter)
+# Prompting Utils (Existing)
 from .prompting import (
     # Default Templates
     DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
@@ -40,10 +41,9 @@ from .cache import (
 )
 
 # --- Session Management (Existing) ---
-# NOTE: SessionManager itself wasn't modified in this round, so no direct code change here.
 from .session import SessionManager
 
-# --- Database Operations (Modified: Added World State Table/Functions) ---
+# --- Database Operations (Modified: Added Scene State Table/Functions) ---
 from .database import (
     # Initialization
     initialize_sqlite_tables,
@@ -54,15 +54,19 @@ from .database import (
     check_t1_summary_exists,
     # SQLite RAG Cache (Existing)
     add_or_update_rag_cache, get_rag_cache,
-    # SQLite Inventory (Added previously)
+    # SQLite Inventory (Existing)
     initialize_inventory_table,
     get_character_inventory_data,
     add_or_update_character_inventory,
     get_all_inventories_for_session,
-    # SQLite World State (Added previously)
+    # SQLite World State (Existing)
     initialize_world_state_table,
     get_world_state,
     set_world_state,
+    # SQLite Scene State (Added)
+    initialize_scene_state_table,
+    get_scene_state,
+    set_scene_state,
     # ChromaDB T2 (Existing)
     get_or_create_chroma_collection, add_to_chroma_collection,
     query_chroma_collection, get_chroma_collection_count,
@@ -70,7 +74,6 @@ from .database import (
 )
 
 # --- Orchestration (Existing) ---
-# NOTE: Orchestrator itself was modified internally, but the class name export is the same.
 from .orchestration import SessionPipeOrchestrator
 
 # --- Utilities (Existing) ---
@@ -87,24 +90,50 @@ except ImportError as e:
     logging.getLogger(__name__).error(f"Failed to import inventory module: {e}", exc_info=True)
     INVENTORY_MODULE_AVAILABLE = False
     def format_inventory_for_prompt(*args, **kwargs) -> str: return "[Inventory Module Error]"
-    async def update_inventories_from_llm(*args, **kwargs) -> bool: return False
+    async def update_inventories_from_llm(*args, **kwargs) -> bool: await asyncio.sleep(0); return False
 
-# --- Event Hints (Modified Module Import for Constant) ---
-# NOTE: Event hints module was modified internally, but the constant export is the same.
+# --- Event Hints (Existing Module Import) ---
 try:
-    from .event_hints import DEFAULT_EVENT_HINT_TEMPLATE_TEXT
+    # Now also import generate_event_hint function itself if needed elsewhere
+    from .event_hints import generate_event_hint, DEFAULT_EVENT_HINT_TEMPLATE_TEXT
+    EVENT_HINTS_AVAILABLE = True
 except ImportError as e:
     logging.getLogger(__name__).error(f"Failed to import event_hints module: {e}", exc_info=True)
+    EVENT_HINTS_AVAILABLE = False
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Template Load Error]"
+    async def generate_event_hint(*args, **kwargs): await asyncio.sleep(0); return None, {} # Return tuple expected by orchestrator
 
-# --- World State Parser (Importing new constant) ---
-# The orchestrator imports the function directly using `from .world_state_parser import ...`
-# But we need to export the default template constant for the pipe script.
+# --- World State Parser (Existing Import) ---
 try:
-    from .world_state_parser import DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT # <<< ADDED IMPORT
+    from .world_state_parser import (
+        parse_world_state_with_llm,
+        confirm_weather_change_with_llm,
+        DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
+    )
+    WORLD_STATE_PARSER_AVAILABLE = True
 except ImportError as e:
     logging.getLogger(__name__).error(f"Failed to import world_state_parser module: {e}", exc_info=True)
-    DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = "[Default World State Parse Template Load Error]" # <<< ADDED FALLBACK
+    WORLD_STATE_PARSER_AVAILABLE = False
+    DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = "[Default World State Parse Template Load Error]"
+    async def parse_world_state_with_llm(*args, **kwargs): await asyncio.sleep(0); return {}
+    async def confirm_weather_change_with_llm(*args, **kwargs): await asyncio.sleep(0); return False
+
+# --- Scene Generator (NEW Import) ---
+try:
+    from .scene_generator import (
+        assess_and_generate_scene,
+        DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT
+    )
+    SCENE_GENERATOR_AVAILABLE = True
+except ImportError as e:
+    logging.getLogger(__name__).error(f"Failed to import scene_generator module: {e}", exc_info=True)
+    SCENE_GENERATOR_AVAILABLE = False
+    DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = "[Default Scene Assessment Template Load Error]"
+    async def assess_and_generate_scene(*args, **kwargs):
+        # Fallback needs to return expected structure (dict), potentially previous state if passed
+        # For simplicity, return empty default if module fails load
+        await asyncio.sleep(0)
+        return {"keywords": [], "description": ""}
 
 # --- Configure basic logging for the library ---
 logger = logging.getLogger(__name__)
@@ -123,15 +152,15 @@ __all__ = [
     "DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT",
     "DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT",
     "DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT",
+    "DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT", # Export scene prompt
     "format_stateless_refiner_prompt",
     "format_cache_update_prompt",
     "format_final_context_selection_prompt",
     "format_inventory_update_prompt",
-    "refine_external_context",
+    "refine_external_context", # Stateless orchestrator
     "construct_final_llm_payload",
     "assemble_tagged_context", "extract_tagged_context",
-    "clean_context_tags", "generate_rag_query",
-    "combine_background_context",
+    "clean_context_tags", "generate_rag_query", "combine_background_context",
     "process_system_prompt",
     # memory
     "manage_tier1_summarization",
@@ -158,6 +187,10 @@ __all__ = [
     "initialize_world_state_table",
     "get_world_state",
     "set_world_state",
+    # -- Scene State (DB) --
+    "initialize_scene_state_table",
+    "get_scene_state",
+    "set_scene_state",
     # -- ChromaDB T2 --
     "get_or_create_chroma_collection", "add_to_chroma_collection",
     "query_chroma_collection", "get_chroma_collection_count",
@@ -171,11 +204,20 @@ __all__ = [
     "format_inventory_for_prompt",
     "update_inventories_from_llm",
     "INVENTORY_MODULE_AVAILABLE", # Flag
-    # event_hints (Constants Only)
+    # event_hints
+    "generate_event_hint", # Export function too
     "DEFAULT_EVENT_HINT_TEMPLATE_TEXT",
-    # world_state_parser (Constants Only) # <<< ADDED SECTION
+    "EVENT_HINTS_AVAILABLE", # Flag
+    # world_state_parser
+    "parse_world_state_with_llm", # Export functions too
+    "confirm_weather_change_with_llm",
     "DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT",
+    "WORLD_STATE_PARSER_AVAILABLE", # Flag
+    # scene_generator
+    "assess_and_generate_scene",
+    "DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT",
+    "SCENE_GENERATOR_AVAILABLE", # Flag
 ]
-# [[END FINAL __init__.py - Reflects World State DB Exports & LLM Parser Constant]]
+# [[END MODIFIED __init__.py - Add asyncio import and Scene Generator Exports]]
 
 # === END OF FILE i4_llm_agent/__init__.py ===

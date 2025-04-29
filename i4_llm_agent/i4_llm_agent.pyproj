@@ -32,6 +32,7 @@
     <Compile Include="database.py" />
     <Compile Include="orchestration.py" />
     <Compile Include="prompting.py" />
+    <Compile Include="scene_generator.py" />
     <Compile Include="session.py" />
     <Compile Include="utils.py" />
     <Compile Include="world_state_parser.py" />
