@@ -34,6 +34,7 @@
     <Compile Include="prompting.py" />
     <Compile Include="scene_generator.py" />
     <Compile Include="session.py" />
+    <Compile Include="state_assessment.py" />
     <Compile Include="utils.py" />
     <Compile Include="world_state_parser.py" />
     <Compile Include="__init__.py" />
