@@ -1,13 +1,13 @@
-# === START OF MODIFIED script.txt ===
+# === START OF FILE script.txt ===
 
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.19.2)
+title: SESSION_MEMORY PIPE (v0.19.1)
 author: Petr Jilek & Assistant Gemini
-version: 0.19.2
-description: Updates T1 Summarizer prompt to use an adapted, detailed Roleplay Memory Extractor prompt focused solely on the dialogue chunk being summarized. Uses correct placeholder `{dialogue_chunk}`. Relies on library defaults for other prompts. Consolidates Inventory LLM debug logs. Moves final payload logging into orchestrator. Fixes status emission, payload debug logging, adds inventory LLM debug logging. Uses i4_llm_agent library (v0.1.6+ recommended). Adds foundation for character inventory management. Delegates core logic to i4_llm_agent.SessionPipeOrchestrator.
-requirements: pydantic, chromadb, i4_llm_agent>=0.1.6, tiktoken, httpx, open_webui (internal utils)
+version: 0.19.1
+description: Adds Scene Generation feature (using Event Hint LLM endpoint). Implements enable_scene_generation valve.
+requirements: pydantic, chromadb, i4_llm_agent>=0.1.7, tiktoken, httpx, open_webui (internal utils)
 """
 # --- END HEADER ---
 
@@ -142,7 +142,7 @@ except ImportError as e:
 # /////////////////////////////////////////
 # /// 2.5: i4_llm_agent Library Import  ///
 # /////////////////////////////////////////
-# Requires i4_llm_agent version >= 0.1.6
+# Requires i4_llm_agent version >= 0.1.7
 try:
     from i4_llm_agent import (
         SessionManager,
@@ -152,13 +152,13 @@ try:
         DIALOGUE_ROLES as I4_AGENT_DIALOGUE_ROLES,
         # --- START IMPORT: Import specific default templates ---
         # NOTE: These are now the *only* source for these prompts
-        #       UNLESS explicitly overridden by a constant below (like Summarizer)
         DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
         DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
         DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
-        # DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE, # <<< REMOVED IMPORT
+        DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
         DEFAULT_EVENT_HINT_TEMPLATE_TEXT,
         DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT,
+        DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT,  # <<< ADDED
         # --- END IMPORT ---
     )
 
@@ -176,7 +176,7 @@ except ImportError as e:
     I4_LLM_AGENT_AVAILABLE = False
     IMPORT_ERROR_DETAILS = str(e)
     logging.getLogger("SessionMemoryPipe_startup").critical(
-        f"CRITICAL: Failed import 'i4_llm_agent' (v0.1.6+ required): {e}."
+        f"CRITICAL: Failed import 'i4_llm_agent' (v0.1.7+ required): {e}."
     )
 
     class SessionManager:
@@ -195,10 +195,13 @@ except ImportError as e:
         "[Default Select Prompt Load Failed]"
     )
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = "[Default Inventory Prompt Load Failed]"
-    # DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = "[Default Stateless Prompt Load Failed]" # Not needed if import fails
+    DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = "[Default Stateless Prompt Load Failed]"
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Prompt Load Failed]"
     DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = (
         "[Default World State Parse Prompt Load Failed]"
+    )
+    DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = (
+        "[Default Scene Assessment Prompt Load Failed]"  # <<< ADDED
     )
 
 
@@ -219,25 +222,21 @@ except ImportError:
 
 # === SECTION 3: CONSTANTS & DEFAULTS ===
 DEFAULT_LOG_DIR = r"C:\\Utils\\OpenWebUI"
-DEFAULT_LOG_FILE_NAME = "session_memory_v19_2_pipe_log.log"  # Version updated
+DEFAULT_LOG_FILE_NAME = "session_memory_v19_1_pipe_log.log"  # Version updated
 DEFAULT_LOG_LEVEL = "DEBUG"
 ENV_VAR_LOG_FILE_PATH = "SM_LOG_FILE_PATH"
 ENV_VAR_LOG_LEVEL = "SM_LOG_LEVEL"
-
-# --- Placeholders for Prompt Formatting ---
-# <<< NEW PLACEHOLDER for T1 Summarizer >>>
-SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER = "{dialogue_chunk}"
 
 # --- Summarizer Config (Prompt defaults to constant below) ---
 ENV_VAR_SUMMARIZER_API_URL = "SM_SUMMARIZER_API_URL"
 ENV_VAR_SUMMARIZER_API_KEY = "SM_SUMMARIZER_API_KEY"
 ENV_VAR_SUMMARIZER_TEMPERATURE = "SM_SUMMARIZER_TEMPERATURE"
-ENV_VAR_SUMMARIZER_SYSTEM_PROMPT = (
-    "SM_SUMMARIZER_SYSTEM_PROMPT"  # Kept for valve override
-)
+ENV_VAR_SUMMARIZER_SYSTEM_PROMPT = "SM_SUMMARIZER_SYSTEM_PROMPT"  # Kept for valve
 DEFAULT_SUMMARIZER_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
 DEFAULT_SUMMARIZER_API_KEY = ""
 DEFAULT_SUMMARIZER_TEMPERATURE = 0.5
+
+SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER = "{dialogue_chunk}"
 
 # --- <<< MODIFIED: ADAPTED DETAILED ROLEPLAY PROMPT FOR T1 SUMMARIZER >>> ---
 DEFAULT_SUMMARIZER_SYSTEM_PROMPT = f"""
@@ -324,7 +323,6 @@ Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produ
 """
 # --- <<< END ADAPTED SUMMARIZER PROMPT >>> ---
 
-
 # --- Core Memory Config ---
 DEFAULT_TOKENIZER_ENCODING = "cl100k_base"
 ENV_VAR_TOKENIZER_ENCODING = "SM_TOKENIZER_ENCODING"
@@ -366,9 +364,7 @@ ENV_VAR_RAG_SUMMARY_RESULTS_COUNT = "SM_RAG_SUMMARY_RESULTS_COUNT"
 
 # --- Refinement / RAG Cache Features (Prompts use library defaults) ---
 ENV_VAR_ENABLE_RAG_CACHE = "SM_ENABLE_RAG_CACHE"
-ENV_VAR_ENABLE_STATELESS_REFINEMENT = (
-    "SM_ENABLE_REFINEMENT"  # Uses library default prompt now
-)
+ENV_VAR_ENABLE_STATELESS_REFINEMENT = "SM_ENABLE_REFINEMENT"
 ENV_VAR_REFINER_API_URL = "SM_REFINER_API_URL"
 ENV_VAR_REFINER_API_KEY = "SM_REFINER_API_KEY"
 ENV_VAR_REFINER_TEMPERATURE = "SM_REFINER_TEMPERATURE"
@@ -385,7 +381,6 @@ DEFAULT_REFINER_HISTORY_COUNT = 6
 DEFAULT_STATELESS_REFINER_SKIP_THRESHOLD = 500
 DEFAULT_CACHE_UPDATE_SKIP_OWI_THRESHOLD = 50
 DEFAULT_CACHE_UPDATE_SIMILARITY_THRESHOLD = 0.9
-# Stateless Refiner prompt now uses library default unless refiner_llm_config is manually passed a template
 
 # --- Final LLM Pass-Through Config ---
 ENV_VAR_FINAL_LLM_API_URL = "SM_FINAL_LLM_API_URL"
@@ -406,7 +401,6 @@ ENV_VAR_INV_LLM_TEMPERATURE = "SM_INV_LLM_TEMPERATURE"
 DEFAULT_INV_LLM_API_URL = DEFAULT_REFINER_API_URL
 DEFAULT_INV_LLM_API_KEY = ""
 DEFAULT_INV_LLM_TEMPERATURE = DEFAULT_REFINER_TEMPERATURE
-# Inventory prompt uses library default
 
 # --- Event Hint Feature (Prompt uses library default) ---
 DEFAULT_ENABLE_EVENT_HINTS = False
@@ -419,10 +413,10 @@ DEFAULT_EVENT_HINT_LLM_API_URL = DEFAULT_RAGQ_LLM_API_URL
 DEFAULT_EVENT_HINT_LLM_API_KEY = ""
 DEFAULT_EVENT_HINT_LLM_TEMPERATURE = 0.7
 DEFAULT_EVENT_HINT_HISTORY_COUNT = 6
-# Event Hint prompt uses library default
 
-# --- World State Parser Feature (Prompt uses library default) ---
-# No valve needed
+# --- Scene Generation Feature (Uses Event Hint LLM endpoint) --- # <<< NEW SECTION
+DEFAULT_ENABLE_SCENE_GENERATION = False  # <<< NEW CONSTANT
+ENV_VAR_ENABLE_SCENE_GENERATION = "SM_ENABLE_SCENE_GENERATION"  # <<< NEW ENV VAR
 
 # --- General & Debug ---
 DEFAULT_INCLUDE_ACK_TURNS = True
@@ -435,7 +429,7 @@ DEFAULT_DEBUG_LOG_RAW_INPUT = False
 ENV_VAR_DEBUG_LOG_RAW_INPUT = "SM_DEBUG_LOG_RAW_INPUT"
 
 # --- Logger Setup ---
-logger = logging.getLogger("SessionMemoryPipeV19_2Logger")  # Version updated
+logger = logging.getLogger("SessionMemoryPipeV19_1Logger")  # Version updated
 logging.basicConfig(level=logging.INFO)
 
 
@@ -484,11 +478,11 @@ class ChromaDBCompatibleEmbedder:
         return embeddings
 
 
-# === SECTION 5: PIPE CLASS DEFINITION (Prompt Valves Adjusted) ===
+# === SECTION 5: PIPE CLASS DEFINITION (Includes Scene Generation Valve) ===
 class Pipe:
-    version = "0.19.2"  # Version updated
+    version = "0.19.1"  # Version updated
 
-    # === SECTION 5.1: VALVES DEFINITION (Prompt Valves Adjusted) ===
+    # === SECTION 5.1: VALVES DEFINITION (Includes Scene Generation Valve) ===
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -531,7 +525,7 @@ class Pipe:
                 )
             )
         )
-        # --- Summarizer LLM (Prompt uses script default now) ---
+        # --- Summarizer LLM (Prompt uses script default) ---
         summarizer_api_url: str = Field(
             default=os.getenv(ENV_VAR_SUMMARIZER_API_URL, DEFAULT_SUMMARIZER_API_URL)
         )
@@ -545,11 +539,9 @@ class Pipe:
                 )
             )
         )
-        # --- KEPT: Summarizer System Prompt (Uses adapted script default) ---
         summarizer_system_prompt: str = Field(
             default=os.getenv(
-                ENV_VAR_SUMMARIZER_SYSTEM_PROMPT,
-                DEFAULT_SUMMARIZER_SYSTEM_PROMPT,  # Uses the adapted detailed prompt
+                ENV_VAR_SUMMARIZER_SYSTEM_PROMPT, DEFAULT_SUMMARIZER_SYSTEM_PROMPT
             )
         )
         # --- RAG Query LLM (Prompt uses script default) ---
@@ -564,7 +556,6 @@ class Pipe:
                 os.getenv(ENV_VAR_RAGQ_LLM_TEMPERATURE, DEFAULT_RAGQ_LLM_TEMPERATURE)
             )
         )
-        # --- KEPT: RAG Query LLM Prompt (Uses script default) ---
         ragq_llm_prompt: str = Field(
             default=os.getenv(ENV_VAR_RAGQ_LLM_PROMPT, DEFAULT_RAGQ_LLM_PROMPT)
         )
@@ -674,7 +665,6 @@ class Pipe:
                 os.getenv(ENV_VAR_INV_LLM_TEMPERATURE, DEFAULT_INV_LLM_TEMPERATURE)
             )
         )
-
         # --- Event Hint Feature (Prompt uses library default) ---
         enable_event_hints: bool = Field(
             default=str(
@@ -708,7 +698,17 @@ class Pipe:
                 )
             )
         )
-
+        # --- Scene Generation Feature (Uses Event Hint LLM endpoint) --- # <<< NEW SECTION
+        enable_scene_generation: bool = Field(  # <<< NEW VALVE
+            default=str(
+                os.getenv(
+                    ENV_VAR_ENABLE_SCENE_GENERATION,
+                    str(DEFAULT_ENABLE_SCENE_GENERATION),
+                )
+            ).lower()
+            == "true",
+            description="Enable/disable dynamic background scene assessment and generation (Uses Event Hint LLM endpoint).",
+        )
         # --- General & Debug ---
         include_ack_turns: bool = Field(
             default=str(
@@ -799,20 +799,16 @@ class Pipe:
             if self.event_hint_history_count < 0:
                 self.event_hint_history_count = DEFAULT_EVENT_HINT_HISTORY_COUNT
                 logger.warning("Reset event_hint_history_count to default.")
+            # --- No validation needed for scene_llm_temperature anymore ---
             # --- Check kept prompt defaults ---
             if not self.summarizer_system_prompt or not isinstance(
                 self.summarizer_system_prompt, str
             ):
-                self.summarizer_system_prompt = (
-                    DEFAULT_SUMMARIZER_SYSTEM_PROMPT  # Use adapted default
-                )
-                logger.warning(
-                    "Reset summarizer_system_prompt to adapted script default."
-                )
+                self.summarizer_system_prompt = DEFAULT_SUMMARIZER_SYSTEM_PROMPT
+                logger.warning("Reset summarizer_system_prompt to script default.")
             if not self.ragq_llm_prompt or not isinstance(self.ragq_llm_prompt, str):
                 self.ragq_llm_prompt = DEFAULT_RAGQ_LLM_PROMPT
                 logger.warning("Reset ragq_llm_prompt to script default.")
-
             logger.info("Valves model_post_init validation complete.")
 
     # --- User Valves ---
@@ -833,44 +829,42 @@ class Pipe:
     # === SECTION 5.2: INITIALIZATION METHOD ===
     def __init__(self):
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Adapted Summarizer)"  # Updated name
+        self.name = (
+            f"SESSION_MEMORY PIPE (v{self.version} - Scene Gen)"  # Version updated
+        )
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         if not I4_LLM_AGENT_AVAILABLE:
-            error_msg = f"i4_llm_agent library (v0.1.6+ required) failed import: {IMPORT_ERROR_DETAILS}. Pipe cannot function."
+            error_msg = f"i4_llm_agent library (v0.1.7+ required) failed import: {IMPORT_ERROR_DETAILS}. Pipe cannot function."
             self.logger.critical(error_msg)
             raise ImportError(error_msg)
         try:
             self.valves = self.Valves()
-            # Logging valves - prompt logging adjusted
+            # Modified logging to exclude removed prompt valves
             init_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
                 if "api_key" not in k
-                and "prompt" not in k  # Exclude all prompt keys from basic log
             }
-            # Log the *name* of the summarizer prompt source
-            init_log_valves["summarizer_system_prompt_source"] = (
-                "Script Default (Adapted Roleplay)"
-                if self.valves.summarizer_system_prompt
-                == DEFAULT_SUMMARIZER_SYSTEM_PROMPT
-                else "Environment Variable Override"
-            )
-            init_log_valves["ragq_llm_prompt_source"] = (
-                "Script Default"
-                if self.valves.ragq_llm_prompt == DEFAULT_RAGQ_LLM_PROMPT
-                else "Environment Variable Override"
-            )
+            # Remove prompt keys explicitly for logging if they weren't removed by the filter
+            init_log_valves.pop("summarizer_system_prompt", None)
+            init_log_valves.pop("ragq_llm_prompt", None)
+            # Add feature flags
             init_log_valves["INIT_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
             init_log_valves["INIT_enable_event_hints"] = getattr(
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
+            init_log_valves["INIT_enable_scene_generation"] = getattr(
+                self.valves, "enable_scene_generation", "LOAD_FAILED"
+            )  # <<< ADDED
             init_log_valves["INIT_debug_log_final_payload"] = getattr(
                 self.valves, "debug_log_final_payload", "LOAD_FAILED"
             )
-            self.logger.info(f"Pipe.__init__: self.valves loaded: {init_log_valves}")
+            self.logger.info(
+                f"Pipe.__init__: self.valves loaded (Prompts use defaults): {init_log_valves}"
+            )
             # Warnings for missing keys remain the same
             if not self.valves.summarizer_api_key:
                 self.logger.warning("Global Summarizer API Key MISSING.")
@@ -896,6 +890,7 @@ class Pipe:
                 self.logger.warning(
                     "Event Hints ENABLED but Event Hint LLM API Key MISSING!"
                 )
+            # --- No warning needed for scene_llm_api_key ---
         except Exception as e:
             self.logger.error(f"CRITICAL Global Valve init error: {e}", exc_info=True)
             raise RuntimeError("Failed to initialize pipe Global Valves") from e
@@ -952,7 +947,7 @@ class Pipe:
             )
             raise RuntimeError("Failed to initialize SessionManager") from e
         try:
-            # Pass self.valves which now uses the adapted summarizer prompt default
+            # Pass self.valves which now lacks prompt template fields
             self.orchestrator = SessionPipeOrchestrator(
                 config=self.valves,
                 session_manager=self.session_manager,
@@ -1024,8 +1019,8 @@ class Pipe:
         if self._sqlite_cursor:
             try:
                 self.logger.info(
-                    "Attempting main SQLite table initialization (T1, Cache, Inv, WorldState)..."
-                )
+                    "Attempting main SQLite table initialization (T1, Cache, Inv, WorldState, SceneState)..."
+                )  # <<< Updated log message
                 init_success_main = await asyncio.to_thread(
                     initialize_sqlite_tables, self._sqlite_cursor
                 )
@@ -1069,7 +1064,6 @@ class Pipe:
                     f"Error during explicit Inventory table initialization: {e_inv}",
                     exc_info=True,
                 )
-
             self.logger.info(
                 "Explicitly attempting World State table initialization..."
             )
@@ -1097,6 +1091,35 @@ class Pipe:
                     f"Error during explicit World State table initialization: {e_ws}",
                     exc_info=True,
                 )
+            self.logger.info(
+                "Explicitly attempting Scene State table initialization..."
+            )  # <<< ADDED CHECK
+            try:  # <<< ADDED CHECK
+                from i4_llm_agent.database import (
+                    _sync_initialize_scene_state_table,
+                )  # <<< ADDED CHECK
+
+                init_success_scene = await asyncio.to_thread(
+                    _sync_initialize_scene_state_table, self._sqlite_cursor
+                )  # <<< ADDED CHECK
+                (
+                    self.logger.info(
+                        "Explicit Scene State table initialization reported success."
+                    )
+                    if init_success_scene
+                    else self.logger.warning(
+                        "Explicit Scene State table initialization reported failure (may already exist or error occurred)."
+                    )
+                )  # <<< ADDED CHECK
+            except ImportError:
+                self.logger.error(
+                    "Failed to import _sync_initialize_scene_state_table for explicit check."
+                )  # <<< ADDED CHECK
+            except Exception as e_scene:
+                self.logger.error(
+                    f"Error during explicit Scene State table initialization: {e_scene}",
+                    exc_info=True,
+                )  # <<< ADDED CHECK
 
         else:
             self.logger.warning(
@@ -1140,7 +1163,7 @@ class Pipe:
         self.logger.info(f"'{self.name}' shutdown complete.")
 
     async def on_valves_updated(self):
-        # (Adjusted logging)
+        # (Simplified logging due to removed prompt valves)
         self.logger.info(
             f"on_valves_updated: Reloading global settings for '{self.name}'..."
         )
@@ -1150,38 +1173,32 @@ class Pipe:
         old_chromadb_path = getattr(self.valves, "chromadb_path", None)
         try:
             self.valves = self.Valves()
-            # Logging valves - prompt logging adjusted
+            # Modified logging to exclude removed prompt valves
             update_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
-                if "api_key" not in k and "prompt" not in k  # Exclude all prompt keys
+                if "api_key" not in k
             }
-            # Log the *name* of the summarizer prompt source
-            update_log_valves["summarizer_system_prompt_source"] = (
-                "Script Default (Adapted Roleplay)"
-                if self.valves.summarizer_system_prompt
-                == DEFAULT_SUMMARIZER_SYSTEM_PROMPT
-                else "Environment Variable Override"
-            )
-            update_log_valves["ragq_llm_prompt_source"] = (
-                "Script Default"
-                if self.valves.ragq_llm_prompt == DEFAULT_RAGQ_LLM_PROMPT
-                else "Environment Variable Override"
-            )
+            update_log_valves.pop("summarizer_system_prompt", None)
+            update_log_valves.pop("ragq_llm_prompt", None)
+            # Add feature flags
             update_log_valves["UPDATE_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
             update_log_valves["UPDATE_enable_event_hints"] = getattr(
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
+            update_log_valves["UPDATE_enable_scene_generation"] = getattr(
+                self.valves, "enable_scene_generation", "LOAD_FAILED"
+            )  # <<< ADDED
             update_log_valves["UPDATE_debug_log_final_payload"] = getattr(
                 self.valves, "debug_log_final_payload", "LOAD_FAILED"
             )
             self.logger.info(
-                f"Pipe.on_valves_updated: self.valves RE-loaded: {update_log_valves}"
+                f"Pipe.on_valves_updated: self.valves RE-loaded (Prompts use defaults): {update_log_valves}"
             )
             if hasattr(self, "orchestrator"):
-                # Pass the updated config to orchestrator
+                # Pass the updated config (without prompt templates) to orchestrator
                 self.orchestrator.config = self.valves
                 self.logger.info("Orchestrator config updated.")
             else:
@@ -1304,7 +1321,6 @@ class Pipe:
                     exc_info=True,
                 )
                 return None
-
             base_name, _ = os.path.splitext(os.path.basename(base_log_path))
             debug_filename = f"{base_name}{suffix}.log"
             final_path = os.path.join(log_dir, debug_filename)
@@ -1438,7 +1454,7 @@ class Pipe:
 
             # --- Orchestrator Config Update ---
             if hasattr(self, "orchestrator") and hasattr(self, "valves"):
-                # Pass the potentially updated self.valves
+                # Pass the potentially updated self.valves (without prompt templates)
                 self.orchestrator.config = self.valves
                 self.orchestrator.pipe_logger = self.logger
                 self.orchestrator.pipe_debug_path_getter = self._get_debug_log_path
@@ -1618,7 +1634,7 @@ class Pipe:
             raise
         except Exception as e_pipe_global:
             self.logger.critical(
-                f"Pipe.pipe [{session_id}]: UNHANDLED PIPE SETUP/WRAPPER EXCEPTION: {e_pipe_global}",
+                f"Pipe.pipe [{session_id if 'session_id' in locals() else 'unknown'}]: UNHANDLED PIPE SETUP/WRAPPER EXCEPTION: {e_pipe_global}",
                 exc_info=True,
             )
             await emit_status(
@@ -1628,4 +1644,3 @@ class Pipe:
 
 
 # === SECTION 6: END OF SCRIPT ===
-# === END OF MODIFIED script.txt ===
