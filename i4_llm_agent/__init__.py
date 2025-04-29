@@ -1,9 +1,9 @@
 # === START OF FILE i4_llm_agent/__init__.py ===
 
-# [[START MODIFIED __init__.py - Add asyncio import and Scene Generator Exports]]
+# [[START MODIFIED __init__.py - Add Summarizer/RAGQ Prompt Exports]]
 # i4_llm_agent/__init__.py
 import logging
-import asyncio # <<< ADDED IMPORT
+import asyncio
 
 # --- Core Functionality ---
 from .api_client import call_google_llm_api # Existing API client
@@ -19,6 +19,10 @@ from .prompting import (
     DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
     DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
+    # === NEW EXPORTS ===
+    DEFAULT_SUMMARIZER_SYSTEM_PROMPT,
+    DEFAULT_RAGQ_LLM_PROMPT,
+    # === END NEW ===
     # Formatting Functions
     format_stateless_refiner_prompt,
     format_cache_update_prompt,
@@ -153,6 +157,10 @@ __all__ = [
     "DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT",
     "DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT",
     "DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT", # Export scene prompt
+    # === NEW EXPORTS ===
+    "DEFAULT_SUMMARIZER_SYSTEM_PROMPT",
+    "DEFAULT_RAGQ_LLM_PROMPT",
+    # === END NEW ===
     "format_stateless_refiner_prompt",
     "format_cache_update_prompt",
     "format_final_context_selection_prompt",
@@ -218,6 +226,6 @@ __all__ = [
     "DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT",
     "SCENE_GENERATOR_AVAILABLE", # Flag
 ]
-# [[END MODIFIED __init__.py - Add asyncio import and Scene Generator Exports]]
+# [[END MODIFIED __init__.py - Add Summarizer/RAGQ Prompt Exports]]
 
 # === END OF FILE i4_llm_agent/__init__.py ===

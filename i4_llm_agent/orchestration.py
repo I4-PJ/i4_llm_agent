@@ -54,6 +54,9 @@ from .prompting import (
     DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
     DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
+    # === NEW: Import RAGQ default prompt ===
+    DEFAULT_RAGQ_LLM_PROMPT,
+    # === END NEW ===
     # Combine context function needed directly now
     combine_background_context as _combine_context_func_direct,
 )
@@ -175,7 +178,7 @@ class SessionPipeOrchestrator:
         self.pipe_logger = logger_instance or logger
         self.pipe_debug_path_getter = None
 
-        # --- Log received config (excluding sensitive keys) ---
+        # --- Log received config (excluding sensitive keys and prompts) --- # MODIFIED LOGGING
         self.logger.debug("Orchestrator __init__: Received config object.")
         try:
             config_dump = {}
@@ -185,7 +188,7 @@ class SessionPipeOrchestrator:
             safe_config_log = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in config_dump.items()
-                if "api_key" not in k.lower() and "prompt" not in k.lower()
+                if "api_key" not in k.lower() and "prompt" not in k.lower() # Filter prompts
             }
             self.logger.debug(f"Orchestrator __init__: Received config values (filtered): {safe_config_log}")
         except Exception as e_dump:
@@ -418,7 +421,7 @@ class SessionPipeOrchestrator:
         self.logger.debug(f"[{session_id}] Effective query set (len: {len(latest_user_query_str)}). History slice len: {len(history_for_processing)}. Last assistant msg len: {len(last_assistant_message_str or '')}.")
         return latest_user_query_str, history_for_processing, last_assistant_message_str
 
-    # === _handle_tier1_summarization (Unchanged) ===
+    # === _handle_tier1_summarization (MODIFIED) ===
     async def _handle_tier1_summarization(
         self, session_id: str, user_id: str, current_active_history: List[Dict], is_regeneration_heuristic: bool, event_emitter: Optional[Callable]
     ) -> Tuple[bool, Optional[str], int, int]:
@@ -426,15 +429,22 @@ class SessionPipeOrchestrator:
         summarization_performed_successfully = False; generated_summary = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1
         summarizer_url = getattr(self.config, 'summarizer_api_url', None)
         summarizer_key = getattr(self.config, 'summarizer_api_key', None)
-        summarizer_prompt = getattr(self.config, 'summarizer_system_prompt', "[Error: Default Summarizer Prompt Missing]")
+        # MODIFIED: Prompt is handled by memory.py using library default
 
-        can_summarize = all([ self._manage_memory_func, self._tokenizer, self._count_tokens_func, self.sqlite_cursor, self._async_llm_call_wrapper, summarizer_url, summarizer_key, current_active_history, summarizer_prompt != "[Error: Default Summarizer Prompt Missing]" ])
+        # MODIFIED: Removed check for summarizer_prompt
+        can_summarize = all([ self._manage_memory_func, self._tokenizer, self._count_tokens_func, self.sqlite_cursor, self._async_llm_call_wrapper, summarizer_url, summarizer_key, current_active_history ])
         if not can_summarize:
-             missing_prereqs = [p for p, v in {"manage_func": self._manage_memory_func, "tokenizer": self._tokenizer, "count_func": self._count_tokens_func, "db_cursor": self.sqlite_cursor, "llm_wrapper": self._async_llm_call_wrapper, "summ_url": summarizer_url, "summ_key": summarizer_key, "summ_prompt": summarizer_prompt != "[Error: Default Summarizer Prompt Missing]", "history": bool(current_active_history)}.items() if not v]
+             # MODIFIED: Updated missing prereqs list
+             missing_prereqs = [p for p, v in {"manage_func": self._manage_memory_func, "tokenizer": self._tokenizer, "count_func": self._count_tokens_func, "db_cursor": self.sqlite_cursor, "llm_wrapper": self._async_llm_call_wrapper, "summ_url": summarizer_url, "summ_key": summarizer_key, "history": bool(current_active_history)}.items() if not v]
              self.logger.warning(f"[{session_id}] Skipping T1 check: Missing prerequisites: {', '.join(missing_prereqs)}."); return False, None, -1, -1
 
-        summarizer_llm_config = { "url": summarizer_url, "key": summarizer_key, "temp": getattr(self.config, 'summarizer_temperature', 0.5), "sys_prompt": summarizer_prompt, }
-        self.logger.debug(f"[{session_id}] Orchestrator: Using summarizer_system_prompt from config (default): '{summarizer_prompt[:100]}...'")
+        # MODIFIED: Removed 'sys_prompt' from config dict
+        summarizer_llm_config = {
+            "url": summarizer_url,
+            "key": summarizer_key,
+            "temp": getattr(self.config, 'summarizer_temperature', 0.5),
+        }
+        self.logger.debug(f"[{session_id}] Orchestrator: Passing summarizer config (URL/Key/Temp) to memory manager.") # MODIFIED LOG
 
         new_last_summary_idx = -1; prompt_tokens = -1; t0_end_idx = -1; db_max_index = None; current_last_summary_index_for_memory = -1
         try:
@@ -520,7 +530,7 @@ class SessionPipeOrchestrator:
         if t1_retrieved_count > 0: self.logger.info(f"[{session_id}] Retrieved {t1_retrieved_count} T1 summaries for context.")
         return recent_t1_summaries, t1_retrieved_count
 
-    # === _get_t2_rag_results (Unchanged) ===
+    # === _get_t2_rag_results (MODIFIED) ===
     async def _get_t2_rag_results(
         self, session_id: str, history_for_processing: List[Dict], latest_user_query_str: str,
         embedding_func: Optional[Callable], chroma_embed_wrapper: Optional[Any], event_emitter: Optional[Callable]
@@ -529,11 +539,14 @@ class SessionPipeOrchestrator:
         retrieved_rag_summaries = []; t2_retrieved_count = 0; tier2_collection = None; n_results_t2 = getattr(self.config, 'rag_summary_results_count', 0)
         ragq_url = getattr(self.config, 'ragq_llm_api_url', None)
         ragq_key = getattr(self.config, 'ragq_llm_api_key', None)
-        ragq_prompt = getattr(self.config, 'ragq_llm_prompt', "[Error: Default RAGQ Prompt Missing]")
+        ragq_temp = getattr(self.config, 'ragq_llm_temperature', 0.3) # Get temp
+        # MODIFIED: Prompt comes from library default
 
-        can_rag = all([ self.chroma_client is not None, chroma_embed_wrapper is not None, latest_user_query_str, embedding_func is not None, self._generate_rag_query_func is not None, self._async_llm_call_wrapper is not None, ragq_url, ragq_key, ragq_prompt != "[Error: Default RAGQ Prompt Missing]", n_results_t2 > 0 ])
+        # MODIFIED: Removed check for ragq_prompt
+        can_rag = all([ self.chroma_client is not None, chroma_embed_wrapper is not None, latest_user_query_str, embedding_func is not None, self._generate_rag_query_func is not None, self._async_llm_call_wrapper is not None, ragq_url, ragq_key, n_results_t2 > 0 ])
         if not can_rag:
-             missing_prereqs = [p for p, v in {"chroma": self.chroma_client is not None, "chroma_wrapper": chroma_embed_wrapper is not None, "query": latest_user_query_str, "embed_func": embedding_func is not None, "gen_ragq_func": self._generate_rag_query_func is not None, "llm_wrapper": self._async_llm_call_wrapper, "ragq_url": ragq_url, "ragq_key": ragq_key, "ragq_prompt": ragq_prompt != "[Error: Default RAGQ Prompt Missing]", "n_results": n_results_t2 > 0}.items() if not v]
+             # MODIFIED: Updated missing prereqs list
+             missing_prereqs = [p for p, v in {"chroma": self.chroma_client is not None, "chroma_wrapper": chroma_embed_wrapper is not None, "query": latest_user_query_str, "embed_func": embedding_func is not None, "gen_ragq_func": self._generate_rag_query_func is not None, "llm_wrapper": self._async_llm_call_wrapper, "ragq_url": ragq_url, "ragq_key": ragq_key, "n_results": n_results_t2 > 0}.items() if not v]
              self.logger.info(f"[{session_id}] Skipping T2 RAG check: Prerequisites not met: {', '.join(missing_prereqs)} (RAG Results Count: {n_results_t2})."); return [], 0
 
         try: base_prefix = getattr(self.config, 'summary_collection_prefix', 'sm_t2_'); safe_session_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", session_id)[:50]; tier2_collection_name = f"{base_prefix}{safe_session_part}"[:63]
@@ -549,9 +562,20 @@ class SessionPipeOrchestrator:
             await self._emit_status(event_emitter, session_id, "Status: Generating search query...")
             context_messages_for_ragq = self._get_recent_turns_func( history_for_processing, count=getattr(self.config, 'refiner_history_count', 6), exclude_last=False, roles=self._dialogue_roles)
             dialogue_context_str = self._format_history_func(context_messages_for_ragq) if context_messages_for_ragq else "[No recent history]"
-            ragq_llm_config = { "url": ragq_url, "key": ragq_key, "temp": getattr(self.config, 'ragq_llm_temperature', 0.3), "prompt": ragq_prompt, }
-            self.logger.debug(f"[{session_id}] Orchestrator: Using ragq_llm_prompt from config (default): '{ragq_prompt[:100]}...'")
-            rag_query = await self._generate_rag_query_func( latest_message_str=latest_user_query_str, dialogue_context_str=dialogue_context_str, llm_call_func=self._async_llm_call_wrapper, llm_config=ragq_llm_config, caller_info=f"Orch_RAGQ_{session_id}",)
+
+            # MODIFIED: Call generate_rag_query with individual params
+            self.logger.debug(f"[{session_id}] Orchestrator: Calling generate_rag_query (uses library default prompt)...")
+            rag_query = await self._generate_rag_query_func(
+                 latest_message_str=latest_user_query_str,
+                 dialogue_context_str=dialogue_context_str,
+                 llm_call_func=self._async_llm_call_wrapper,
+                 api_url=ragq_url, # Pass URL
+                 api_key=ragq_key, # Pass Key
+                 temperature=ragq_temp, # Pass Temp
+                 caller_info=f"Orch_RAGQ_{session_id}",
+            )
+            # --- END MODIFIED CALL ---
+
             if not (rag_query and isinstance(rag_query, str) and not rag_query.startswith("[Error:") and rag_query.strip()): self.logger.error(f"[{session_id}] RAG Query Generation failed: '{rag_query}'. Skipping RAG."); return [], 0
             self.logger.info(f"[{session_id}] Generated RAG Query: '{rag_query[:100]}...'")
 
@@ -836,6 +860,7 @@ class SessionPipeOrchestrator:
         Processes a single turn including scene assessment, world state, hints,
         inventory, and memory management.
         Loads Scene LLM config dynamically.
+        Uses library default prompts for Summarizer and RAG Query.
         """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")

@@ -40,6 +40,105 @@ TAG_LABELS = {
 }
 EMPTY_CONTEXT_PLACEHOLDER = "[No Background Information Available]"
 
+
+# === NEW: Summarizer Prompt Constants (Moved from script.txt) ===
+SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER = "{dialogue_chunk}"
+DEFAULT_SUMMARIZER_SYSTEM_PROMPT = f"""
+[[SYSTEM DIRECTIVE]]
+
+**Role:** Roleplay Dialogue Chunk Summarizer & Memory Extractor
+
+**Objective:**
+Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produce a **high-fidelity memory summary** to preserve emotional, practical, relationship, and world realism *expressed within this specific chunk* for future roleplay continuation.
+
+**Primary Goals:**
+
+1.  **Scene Context (from Chunk):**
+    *   Capture the basic physical situation: location, time of day, environmental effects *as described EXPLICITLY in the DIALOGUE CHUNK*.
+2.  **Emotional State Changes (from Chunk):**
+    *   Track emotional shifts expressed *in the DIALOGUE CHUNK*: fear, hope, anger, guilt, trust, resentment, affection. Mention which character expressed them.
+3.  **Relationship Developments (from Chunk):**
+    *   Describe how trust, distance, dependence, or emotional connections evolved *during this DIALOGUE CHUNK*.
+4.  **Practical Developments (from Chunk):**
+    *   Capture important practical events *mentioned in the DIALOGUE CHUNK*: travel hardships, fatigue, injury, hunger, gear changes, environmental obstacles.
+5.  **World-State Changes (from Chunk):**
+    *   Record important plot/world events *stated in the DIALOGUE CHUNK*: route changes, enemy movements, political developments, survival risks.
+6.  **Critical Dialogue Fragments (from Chunk):**
+    *   Identify and preserve 1–3 **critical quotes** or **key emotional exchanges** *from the DIALOGUE CHUNK*.
+    *   These must reflect major emotional turning points, confessions, confrontations, or promises *within this chunk*.
+    *   Use near-verbatim phrasing when possible.
+7.  **Continuity Anchors (from Chunk):**
+    *   Identify important facts, feelings, or decisions *from this DIALOGUE CHUNK* that must be remembered for emotional and logical continuity in future roleplay.
+
+**Compression and Length Policy:**
+*   **Do NOT prioritize token-saving compression over realism.** Length is flexible depending on the density of the DIALOGUE CHUNK.
+*   Allow **longer outputs naturally** for chunks rich in emotional conflict or tactical discussion.
+*   Aggressively compress only if the chunk is mostly trivial small-talk.
+
+**Accuracy Policy:**
+*   Only extract facts, emotions, or quotes that are explicitly present or strongly implied *within the provided DIALOGUE CHUNK*.
+*   **Do NOT invent or assume information.** Do not refer to context outside the chunk.
+
+**Tone Handling:**
+*   Preserve emotional nuance and character complexity expressed *in the DIALOGUE CHUNK*.
+
+---
+
+[[INPUT]]
+
+**DIALOGUE CHUNK TO SUMMARIZE:**
+---
+{SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER}
+---
+
+---
+
+[[OUTPUT STRUCTURE]]
+
+**Scene Location and Context (from Chunk):**
+(description based *only* on dialogue chunk)
+
+**Emotional State Changes (per character, from Chunk):**
+- (Character Name): emotional shifts *expressed in chunk*.
+
+**Relationship Developments (from Chunk):**
+- (short descriptions *from chunk*)
+
+**Practical Developments (from Chunk):**
+- (details about survival, fatigue, injuries, supplies *mentioned in chunk*)
+
+**World-State Changes (from Chunk):**
+- (plot changes, movement of threats, discoveries *stated in chunk*)
+
+**Critical Dialogue Fragments (from Chunk):**
+- (List 1–3 key quotes *from this chunk* that define emotional turning points)
+
+**Important Continuity Anchors (from Chunk):**
+- (Facts, feelings, or decisions *from this chunk* that must persist.)
+
+---
+
+[[NOTES]]
+- Focus **exclusively** on the provided DIALOGUE CHUNK.
+- Base the summary *only* on the text within the chunk.
+- Prioritize emotional realism and narrative continuity over brevity based on the chunk's content.
+
+**Memory Summary Output (Based SOLELY on the Dialogue Chunk):**
+"""
+# === END NEW Summarizer Constants ===
+
+# === NEW: RAG Query Prompt Constant (Moved from script.txt) ===
+DEFAULT_RAGQ_LLM_PROMPT = """Based on the latest user message and recent dialogue context, generate a concise search query focusing on the key entities, topics, or questions raised.
+
+Latest Message: {latest_message}
+
+Dialogue Context:
+{dialogue_context}
+
+Search Query:"""
+# === END NEW RAG Query Constant ===
+
+
 # --- Constants for Stateless Refiner (Existing) ---
 STATELESS_REFINER_QUERY_PLACEHOLDER = "{query}"
 STATELESS_REFINER_CONTEXT_PLACEHOLDER = "{external_context}"
@@ -429,42 +528,110 @@ def format_final_context_selection_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in final selection prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting final selection prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# --- Function: Generate RAG Query (Existing - Unchanged) ---
+
+# === Function: Generate RAG Query (MODIFIED) ===
 async def generate_rag_query(
     latest_message_str: str,
     dialogue_context_str: str,
     llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]],
-    llm_config: Dict[str, Any],
+    # MODIFIED: No longer needs full llm_config, just URL, key, temp
+    api_url: str,
+    api_key: str,
+    temperature: float,
     caller_info: str = "i4_llm_agent_RAGQueryGen",
 ) -> Optional[str]:
-    logger.debug(f"[{caller_info}] Generating RAG query...")
-    if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func): logger.error(f"[{caller_info}] Invalid llm_call_func."); return "[Error: Invalid LLM func]"
-    required_keys = ['url', 'key', 'temp', 'prompt']; template = llm_config.get('prompt')
-    if not llm_config or not all(k in llm_config for k in required_keys) or not template or not isinstance(template, str):
-        missing = [k for k in required_keys if k not in llm_config] if isinstance(llm_config, dict) else required_keys
-        if not template or not isinstance(template, str): missing.append('prompt (invalid/missing)')
-        logger.error(f"[{caller_info}] Missing/Invalid RAGQ config/prompt. Missing: {missing}"); return f"[Error: Invalid RAGQ config]"
-    if not llm_config.get('url') or not llm_config.get('key'): logger.error(f"[{caller_info}] Missing RAGQ URL/Key."); return "[Error: Missing RAGQ URL/Key]"
-    ragq_prompt_text = None; formatting_error = None
+    """
+    Generates a RAG query using the default library prompt.
+
+    Args:
+        latest_message_str: The latest user message content.
+        dialogue_context_str: Formatted string of recent dialogue history.
+        llm_call_func: Async function to call the LLM.
+        api_url: URL for the RAG query generation LLM.
+        api_key: API Key for the RAG query generation LLM.
+        temperature: Temperature setting for the LLM call.
+        caller_info: Identifier string for logging.
+
+    Returns:
+        The generated query string, or an error string/None if failed.
+    """
+    logger.debug(f"[{caller_info}] Generating RAG query using library default prompt...")
+
+    # --- MODIFIED: Prerequisites check ---
+    if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func):
+        logger.error(f"[{caller_info}] Invalid llm_call_func.")
+        return "[Error: Invalid LLM func]"
+    if not api_url or not api_key:
+        logger.error(f"[{caller_info}] Missing RAGQ URL/Key.")
+        return "[Error: Missing RAGQ URL/Key]"
+    if DEFAULT_RAGQ_LLM_PROMPT == "[Default RAGQ Prompt Load Failed]": # Check if constant loaded correctly
+        logger.error(f"[{caller_info}] Library default RAGQ prompt constant failed to load.")
+        return "[Error: Default RAGQ prompt missing]"
+    # --- END MODIFIED Prerequisites check ---
+
+    ragq_prompt_text = None
+    formatting_error = None
     safe_latest_message = latest_message_str.replace("{", "{{").replace("}", "}}") if isinstance(latest_message_str, str) else "[No message]"
     safe_dialogue_context = dialogue_context_str.replace("{", "{{").replace("}", "}}") if isinstance(dialogue_context_str, str) else "[No history]"
+
     try:
-        ragq_prompt_text = template.format(latest_message=safe_latest_message, dialogue_context=safe_dialogue_context)
-        if not ragq_prompt_text or not ragq_prompt_text.strip(): formatting_error = "[Error: Formatted prompt is empty]"; logger.error(f"[{caller_info}] RAGQ prompt formatting resulted in empty string.")
-    except KeyError as e: formatting_error = f"[Error: RAGQ key error: {e}]"; logger.error(f"[{caller_info}] RAGQ prompt key error: {e}.")
-    except Exception as e_fmt: formatting_error = f"[Error: RAGQ format failed ({type(e_fmt).__name__})]"; logger.error(f"[{caller_info}] Failed format RAGQ prompt: {e_fmt}", exc_info=True)
-    if formatting_error: return formatting_error
-    ragq_payload = {"contents": [{"parts": [{"text": ragq_prompt_text}]}]}; logger.info(f"[{caller_info}] Calling LLM for RAG query generation...")
-    try: success, response_or_error = await llm_call_func(api_url=llm_config['url'], api_key=llm_config['key'], payload=ragq_payload, temperature=llm_config['temp'], timeout=45, caller_info=caller_info,)
-    except Exception as e_call: logger.error(f"[{caller_info}] Exception calling LLM wrapper for RAGQ: {e_call}", exc_info=True); success = False; response_or_error = f"[Error: LLM Call Exception {type(e_call).__name__}]"
+        # --- MODIFIED: Use library default template directly ---
+        ragq_prompt_text = DEFAULT_RAGQ_LLM_PROMPT.format(
+            latest_message=safe_latest_message,
+            dialogue_context=safe_dialogue_context
+        )
+        # --- END MODIFIED ---
+        if not ragq_prompt_text or not ragq_prompt_text.strip():
+            formatting_error = "[Error: Formatted prompt is empty]"
+            logger.error(f"[{caller_info}] RAGQ prompt formatting resulted in empty string.")
+    except KeyError as e:
+        formatting_error = f"[Error: RAGQ key error: {e}]"
+        logger.error(f"[{caller_info}] RAGQ prompt key error: {e}.")
+    except Exception as e_fmt:
+        formatting_error = f"[Error: RAGQ format failed ({type(e_fmt).__name__})]"
+        logger.error(f"[{caller_info}] Failed format RAGQ prompt: {e_fmt}", exc_info=True)
+
+    if formatting_error:
+        return formatting_error
+
+    ragq_payload = {"contents": [{"parts": [{"text": ragq_prompt_text}]}]}
+    logger.info(f"[{caller_info}] Calling LLM for RAG query generation...")
+
+    try:
+        # --- MODIFIED: Pass individual parameters ---
+        success, response_or_error = await llm_call_func(
+            api_url=api_url,
+            api_key=api_key,
+            payload=ragq_payload,
+            temperature=temperature,
+            timeout=45,
+            caller_info=caller_info,
+        )
+        # --- END MODIFIED ---
+    except Exception as e_call:
+        logger.error(f"[{caller_info}] Exception calling LLM wrapper for RAGQ: {e_call}", exc_info=True)
+        success = False
+        response_or_error = f"[Error: LLM Call Exception {type(e_call).__name__}]"
+
     if success and isinstance(response_or_error, str):
         final_query = response_or_error.strip()
-        if final_query: logger.info(f"[{caller_info}] Generated RAG query: '{final_query}'"); return final_query
-        else: logger.warning(f"[{caller_info}] RAGQ LLM returned empty string."); return "[Error: RAGQ empty]"
+        if final_query:
+            logger.info(f"[{caller_info}] Generated RAG query: '{final_query}'")
+            return final_query
+        else:
+            logger.warning(f"[{caller_info}] RAGQ LLM returned empty string.")
+            return "[Error: RAGQ empty]"
     else:
-        error_msg = str(response_or_error); logger.error(f"[{caller_info}] RAGQ failed: {error_msg}")
-        if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
-        else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
+        error_msg = str(response_or_error)
+        logger.error(f"[{caller_info}] RAGQ failed: {error_msg}")
+        if isinstance(response_or_error, dict):
+            err_type = response_or_error.get('error_type', 'RAGQ Err')
+            err_msg_detail = response_or_error.get('message', 'Unknown')
+            return f"[Error: {err_type} - {err_msg_detail}]"
+        else:
+            return f"[Error: RAGQ Failed - {error_msg[:50]}]"
+# === END MODIFIED Function: Generate RAG Query ===
+
 
 # --- Function: Construct Final LLM Payload (Existing - Unchanged structure) ---
 def construct_final_llm_payload(
