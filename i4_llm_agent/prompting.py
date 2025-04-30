@@ -4,6 +4,7 @@
 import logging
 import re
 import asyncio
+import json # Added for formatting scene keywords example
 from typing import Tuple, Union, Optional, Dict, List, Any, Callable, Coroutine
 
 # --- Existing Imports from i4_llm_agent ---
@@ -17,6 +18,7 @@ except ImportError:
 
 
 try:
+    # Import the guideline text constant and the formatter for event hints
     from .event_hints import EVENT_HANDLING_GUIDELINE_TEXT, format_hint_for_query
 except ImportError:
     EVENT_HANDLING_GUIDELINE_TEXT = "[EVENT GUIDELINE LOAD FAILED]"
@@ -38,143 +40,183 @@ TAG_LABELS = {
 }
 EMPTY_CONTEXT_PLACEHOLDER = "[No Background Information Available]"
 
-# --- Constants for Stateless Refiner ---
-STATELESS_REFINER_QUERY_PLACEHOLDER = "{query}"
-STATELESS_REFINER_CONTEXT_PLACEHOLDER = "{external_context}"
-STATELESS_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# Default Template for Stateless Refinement
-DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
+# === NEW: Summarizer Prompt Constants (Moved from script.txt) ===
+SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER = "{dialogue_chunk}"
+DEFAULT_SUMMARIZER_SYSTEM_PROMPT = f"""
 [[SYSTEM DIRECTIVE]]
 
-**Role:** Roleplay Context Refiner and Memory Extractor (Structured + Critical Dialogue)
+**Role:** Roleplay Dialogue Chunk Summarizer & Memory Extractor
 
-**Objective:**  
-Analyze the provided CONTEXT DOCUMENTS (character profiles, relationship timelines, lore) and RECENT CHAT HISTORY (dialogue, actions, emotional expressions), then produce a **high-fidelity memory summary** to preserve emotional, practical, relationship, and world realism for future roleplay continuation.
+**Objective:**
+Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produce a **high-fidelity memory summary** to preserve emotional, practical, relationship, and world realism *expressed within this specific chunk* for future roleplay continuation.
 
 **Primary Goals:**
-1. **Scene Context:**  
-   - Capture the basic physical situation: location, time of day, environmental effects.
-2. **Emotional State Changes (per character):**  
-   - Track emotional shifts: fear, hope, anger, guilt, trust, resentment, affection.
-3. **Relationship Developments:**  
-   - Describe how trust, distance, dependence, or emotional connections evolved during the scene.
-4. **Practical Developments:**  
-   - Capture important practical events: travel hardships, fatigue, injury, hunger, gear changes, environmental obstacles.
-5. **World-State Changes:**  
-   - Record important plot/world events: route changes, enemy movements, political developments, survival risks.
-6. **Critical Dialogue Fragments:**  
-   - Identify and preserve 1–3 **critical quotes** or **key emotional exchanges** from the dialogue.
-   - These must reflect major emotional turning points, confessions, confrontations, or promises.
-   - Use near-verbatim phrasing when possible.
-7. **Continuity Anchors:**  
-   - Identify important facts, feelings, or decisions that must be remembered for emotional and logical continuity in future roleplay.
+
+1.  **Scene Context (from Chunk):**
+    *   Capture the basic physical situation: location, time of day, environmental effects *as described EXPLICITLY in the DIALOGUE CHUNK*.
+2.  **Emotional State Changes (from Chunk):**
+    *   Track emotional shifts expressed *in the DIALOGUE CHUNK*: fear, hope, anger, guilt, trust, resentment, affection. Mention which character expressed them.
+3.  **Relationship Developments (from Chunk):**
+    *   Describe how trust, distance, dependence, or emotional connections evolved *during this DIALOGUE CHUNK*.
+4.  **Practical Developments (from Chunk):**
+    *   Capture important practical events *mentioned in the DIALOGUE CHUNK*: travel hardships, fatigue, injury, hunger, gear changes, environmental obstacles.
+5.  **World-State Changes (from Chunk):**
+    *   Record important plot/world events *stated in the DIALOGUE CHUNK*: route changes, enemy movements, political developments, survival risks.
+6.  **Critical Dialogue Fragments (from Chunk):**
+    *   Identify and preserve 1–3 **critical quotes** or **key emotional exchanges** *from the DIALOGUE CHUNK*.
+    *   These must reflect major emotional turning points, confessions, confrontations, or promises *within this chunk*.
+    *   Use near-verbatim phrasing when possible.
+7.  **Continuity Anchors (from Chunk):**
+    *   Identify important facts, feelings, or decisions *from this DIALOGUE CHUNK* that must be remembered for emotional and logical continuity in future roleplay.
 
 **Compression and Length Policy:**
-- **Do NOT prioritize token-saving compression over realism.**
-- Length is **flexible** depending on emotional and narrative density.
-- Allow **longer outputs naturally** for scenes rich in dialogue, emotional conflict, or tactical discussion.
-- Aggressively compress only if the scene is mostly trivial small-talk.
+*   **Do NOT prioritize token-saving compression over realism.** Length is flexible depending on the density of the DIALOGUE CHUNK.
+*   Allow **longer outputs naturally** for chunks rich in emotional conflict or tactical discussion.
+*   Aggressively compress only if the chunk is mostly trivial small-talk.
 
 **Accuracy Policy:**
-- Only extract facts, emotions, or quotes that are explicitly present or strongly implied.
-- Never invent or assume information beyond the provided context.
+*   Only extract facts, emotions, or quotes that are explicitly present or strongly implied *within the provided DIALOGUE CHUNK*.
+*   **Do NOT invent or assume information.** Do not refer to context outside the chunk.
 
 **Tone Handling:**
-- Preserve emotional nuance and character complexity — avoid flattening characters into simple good/bad binaries.
+*   Preserve emotional nuance and character complexity expressed *in the DIALOGUE CHUNK*.
 
 ---
 
-[[INPUTS]]
+[[INPUT]]
 
-**LATEST USER QUERY:** {STATELESS_REFINER_QUERY_PLACEHOLDER}
-
-**CONTEXT DOCUMENTS:**
+**DIALOGUE CHUNK TO SUMMARIZE:**
 ---
-{STATELESS_REFINER_CONTEXT_PLACEHOLDER}
----
-
-**RECENT CHAT HISTORY:**
----
-{STATELESS_REFINER_HISTORY_PLACEHOLDER}
+{SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER}
 ---
 
 ---
 
 [[OUTPUT STRUCTURE]]
 
-**Scene Location and Context:**  
-(description)
+**Scene Location and Context:**
+(description based *only* on dialogue chunk)
 
-**Emotional State Changes (per character):**  
-- (Character Name): emotional shifts.
+**Emotional State Changes (per character):**
+- (Character Name): emotional shifts *expressed in chunk*.
 
-**Relationship Developments:**  
-- (short descriptions)
+**Relationship Developments:**
+- (short descriptions *from chunk*)
 
-**Practical Developments:**  
-- (details about survival, fatigue, injuries, supplies)
+**Practical Developments:**
+- (details about survival, fatigue, injuries, supplies *mentioned in chunk*)
 
-**World-State Changes:**  
-- (plot changes, movement of threats, discoveries)
+**World-State Changes:**
+- (plot changes, movement of threats, discoveries *stated in chunk*)
 
-**Critical Dialogue Fragments:**  
-- (List 1–3 key quotes that define emotional turning points)
+**Critical Dialogue Fragments:**
+- (List 1–3 key quotes *from this chunk* that define emotional turning points)
 
-**Important Continuity Anchors:**  
-- (Facts, feelings, or decisions that must persist.)
+**Important Continuity Anchors:**
+- (Facts, feelings, or decisions *from this chunk* that must persist.)
 
 ---
 
 [[NOTES]]
-- Prioritize **emotional realism** and **narrative continuity** over brevity.
-- Critical Dialogue Fragments should be highly selective, capturing *turning points*, *trust shifts*, *confessions*, or *major promises* whenever present.
+- Focus **exclusively** on the provided DIALOGUE CHUNK.
+- Base the summary *only* on the text within the chunk.
+- Prioritize emotional realism and narrative continuity over brevity based on the chunk's content.
 
 """
+# === END NEW Summarizer Constants ===
 
-# --- NEW: Constants for Two-Step RAG Cache Refinement ---
+# === NEW: RAG Query Prompt Constant (Moved from script.txt) ===
+DEFAULT_RAGQ_LLM_PROMPT = """Based on the latest user message and recent dialogue context, generate a concise search query focusing on the key entities, topics, or questions raised.
 
-# Placeholders for Step 1 (Cache Update)
+Latest Message: {latest_message}
+
+Dialogue Context:
+{dialogue_context}
+
+Search Query:"""
+# === END NEW RAG Query Constant ===
+
+
+# --- Constants for Stateless Refiner (Existing) ---
+STATELESS_REFINER_QUERY_PLACEHOLDER = "{query}"
+STATELESS_REFINER_CONTEXT_PLACEHOLDER = "{external_context}"
+STATELESS_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
+DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Roleplay Context Extractor
+**Task:** Analyze the provided CONTEXT DOCUMENTS (character backstories, relationship histories, past events, lore) and the RECENT CHAT HISTORY (dialogue, actions, emotional expressions).
+**Objective:** Based ONLY on this information, extract and describe the specific details, memories, relationship dynamics, stated feelings, significant past events, or relevant character traits that are **essential for understanding the full context** of and accurately answering the LATEST USER QUERY from a roleplaying perspective.
+**Instructions:**
+1.  Identify the core subject of the LATEST USER QUERY and any immediately related contextual elements.
+2.  Extract Key Information: Prioritize extracting verbatim sentences or short passages that **directly address** the core subject and related elements.
+3.  Describe Key Dynamics: ...extract specific details or events... that illustrate *why* it's complex...
+4.  Include Foundational Context: Extract specific details... that **directly led to or fundamentally define** the current situation...
+5.  Incorporate Recent Developments: Include details from the RECENT CHAT HISTORY...
+6.  Be Descriptive but Focused: Capture the nuance... Avoid overly generic summaries...
+7.  Prioritize Relevance over Extreme Brevity: ...ensure that key descriptive details... are included...
+8.  Ensure Accuracy: Do not infer, assume, or add information not explicitly present...
+9.  Output: Present the extracted points clearly. If no relevant information is found, state clearly: \"No specific details relevant to the query were found in the provided context.\"
+
+**LATEST USER QUERY:** {STATELESS_REFINER_QUERY_PLACEHOLDER}
+**CONTEXT DOCUMENTS:**
+---
+{STATELESS_REFINER_CONTEXT_PLACEHOLDER}
+---
+**RECENT CHAT HISTORY:**
+---
+{STATELESS_REFINER_HISTORY_PLACEHOLDER}
+---
+
+Concise Relevant Information (for final answer generation):
+"""
+
+# --- Constants for Two-Step RAG Cache Refinement (Existing) ---
 CACHE_UPDATE_QUERY_PLACEHOLDER = "{query}"
 CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
-
-# [[[ START MODIFIED PROMPT TEMPLATE - v2.2 No Change Marker ]]]
-# Default Template Text for Step 1 (Cache Update) - v2.2 (Adds NO_CACHE_UPDATE marker)
+# Default prompt template for Step 1: Cache Update
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Cache Maintainer
-**Task:** Efficiently update the SESSION CACHE using new information. Prioritize preserving existing core character profiles and integrating ONLY relevant NEW factual details.
-**Objective:** Maintain an accurate and structured cache for long-term context, focusing on speed and essential updates.
+**Task:** Intelligently update the SESSION CACHE using relevant information from the CURRENT OWI RETRIEVAL. Prioritize maintaining accurate core character profiles and lore while integrating **new facts, significant details, clarifications, or elaborations**.
+**Objective:** Maintain an accurate and structured cache for long-term context, balancing stability with incorporating meaningful updates from OWI.
 
 **Inputs:**
 - LATEST USER QUERY (for context)
-- CURRENT OWI RETRIEVAL (potential new info & profiles)
+- CURRENT OWI RETRIEVAL (source of potential new info, details, profiles)
 - PREVIOUSLY REFINED CACHE (base for update)
 - RECENT CHAT HISTORY (for context only)
 
 **Core Instructions:**
 
-1.  **Identify & Preserve Character Profiles:**
-    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents.
-    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (likely under `# Character: Name` headings).
-    *   **Action:** If a character profile exists in PREVIOUS CACHE, **KEEP IT** unless a NEW profile in CURRENT OWI *explicitly contradicts or supersedes* it. Do NOT significantly alter core traits based only on RECENT CHAT HISTORY. Minor clarifications from OWI can be merged.
+1.  **Identify & Update/Preserve Character Profiles:**
+    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents or significant descriptive passages about characters.
+    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (e.g., under `# Character: Name` headings).
+    *   **Action:** If a character profile exists in PREVIOUS CACHE:
+        *   **KEEP** the core identity and established traits.
+        *   **MERGE/ADD** concise, relevant new details, clarifications, or significant trait elaborations found in CURRENT OWI RETRIEVAL into the existing profile summary. Do not drastically alter core traits based only on RECENT CHAT HISTORY.
+        *   Only *replace* major parts of a profile if CURRENT OWI provides clearly contradictory or superseding *factual* information (not just nuanced descriptions).
     *   **Action:** If a NEW profile is found in CURRENT OWI for a character NOT in PREVIOUS CACHE, summarize its essential details (Identity, Traits, Role) and ADD it to the output under a new heading.
 
-2.  **Integrate NEW Factual Lore:**
-    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for NEW background facts (lore, world details, established events, locations) relevant to the session.
-    *   **Action:** Compare these NEW facts against the PREVIOUSLY REFINED CACHE. If a fact is genuinely NEW and relevant OR provides a clear CORRECTION/UPDATE to existing lore, ADD/MODIFY it in the output. Do NOT add redundant facts.
+2.  **Integrate NEW or Elaborated Factual Lore:**
+    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for background facts (lore, world details, established events, locations).
+    *   **Action:** Compare these facts against the PREVIOUSLY REFINED CACHE.
+        *   If a fact is genuinely **NEW** and relevant, ADD it.
+        *   If a fact **ELABORATES significantly** on, **CLARIFIES**, or provides important **new DETAILS** for an existing topic in the cache, integrate these details concisely into the relevant section.
+        *   If a fact provides a clear **CORRECTION/UPDATE** to existing lore, MODIFY the cache accordingly.
+        *   Do NOT add minor rephrasing or clearly redundant facts.
 
 3.  **Minimal Pruning:**
     *   **Action:** Only remove sections from the PREVIOUS CACHE if they are *explicitly contradicted* by newer info in CURRENT OWI or are clearly no longer relevant (e.g., a character definitively removed from the story). **Default to keeping existing information unless strong evidence dictates removal.**
 
-4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what new information* to add/update. **DO NOT summarize the history itself in the cache.**
+4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what information* from OWI to add/update/elaborate on. **DO NOT summarize the history itself in the cache.**
 
 5.  **Output Format:**
     *   Produce the complete, updated SESSION CACHE text.
     *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
-    *   **<<< MODIFIED >>> No Change:** If analysis shows no significant additions/updates/removals are needed, output ONLY the exact text: `[NO_CACHE_UPDATE]`
+    *   **No Change:** If analysis shows no significant additions/updates/removals/elaborations are needed based on the OWI input, output ONLY the exact text: `[NO_CACHE_UPDATE]`
     *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
 
 **INPUTS:**
@@ -199,36 +241,34 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Updated Session Cache Text - Structured, or [NO_CACHE_UPDATE], or [No relevant background context found]):**
 """
-# [[[ END MODIFIED PROMPT TEMPLATE - v2.2 No Change Marker ]]]
-
 
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
-FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}" # Include OWI as secondary source
+FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
-
-
-# --- prompting.py ---
-
-# Default Template Text for Step 2 (Final Context Selection) - MODIFIED v5 (Inventory Handling Removed - Bypass Logic)
+# [[START MODIFIED PROMPT]]
+# Default prompt template for Step 2: Final Context Selection
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Query-Focused Context Selector
-**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and extract details relevant to the LATEST USER QUERY and RECENT HISTORY.
-**Objective:** Provide relevant background context from Cache and OWI, ensuring the final response generator has the necessary situational information.
+**Role:** Context Selector for Roleplay Response
+**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and select details **relevant and helpful** for generating the *next* narrative response based on the LATEST USER QUERY and RECENT HISTORY.
+**Objective:** Provide **sufficient background context** from the Cache and OWI Retrieval to enable a coherent, nuanced, and contextually grounded response, without overwhelming the final LLM with irrelevant data.
 
 **Sources:**
 1.  **UPDATED SESSION CACHE:** Long-term facts, character profiles, established lore. (Primary Source)
 2.  **CURRENT OWI RETRIEVAL:** General contextual information provided for the current turn. (Secondary Source)
-3.  **RECENT CHAT HISTORY:** Immediate conversational context (dialogue, actions).
+3.  **RECENT CHAT HISTORY:** Immediate conversational context (dialogue, actions, involved characters).
 4.  **LATEST USER QUERY:** The user's specific input for this turn.
 
 **Instructions:**
 
-1.  **Analyze Query & History:** Determine the core subject, actions, and characters involved in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY. Use this understanding to gauge relevance.
-2.  **Select Relevant Cache/OWI Context:** Examine the CACHE and the OWI RETRIEVAL. Extract sentences/passages that **directly explain or provide essential context** for the query, situation, or involved characters' motivations/relationships relevant *now*.
-3.  **Prioritize Cache:** Give higher priority to relevant information found in the UPDATED SESSION CACHE. Use the CURRENT OWI RETRIEVAL primarily for immediate situational context not present in the cache.
-4.  **Be Aggressive in Exclusion:** Filter out information from both Cache and OWI that is *not* directly relevant to understanding or responding to the current query and recent history. Avoid including general character descriptions or lore unless directly pertinent.
+1.  **Analyze Query & History:** Determine the core subject, actions, and **characters actively involved** in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY. Use this understanding to gauge relevance.
+2.  **Select Helpful Cache/OWI Context:** Examine the CACHE and the OWI RETRIEVAL. Extract sentences/passages that:
+    *   Help explain the **current situation** or **immediate environment**.
+    *   Provide insight into the **motivations, relationships, or relevant core traits** of the **characters actively involved** in the current interaction.
+    *   Offer **relevant lore or background** about the current location, mentioned objects, or pertinent past events from the cache that inform the *current* interaction.
+3.  **Prioritize Cache:** Give higher priority to relevant information found in the UPDATED SESSION CACHE, as it represents established continuity. Use the CURRENT OWI RETRIEVAL primarily for immediate situational context or details not present in the cache.
+4.  **Filter Irrelevant Information:** Exclude information from both Cache and OWI that is *clearly* unrelated to the ongoing interaction or the characters involved. Avoid including lengthy profiles or lore sections if only a small part is relevant *now*. **Focus on helpfulness for the next response.**
 5.  **Combine Snippets:** Assemble the selected Cache/OWI context snippets into a single, coherent text block. Use headings or clear separation if combining distinct topics (e.g., `=== Relevant Character Note ===`, `=== Location Details ===`).
 6.  **Output Content:** The output **must** contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant Cache/OWI context is found, state clearly: "[No relevant background context found for the current query]".
 
@@ -254,6 +294,79 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Selected Relevant Cache/OWI Snippets):**
 """
+# [[END MODIFIED PROMPT]]
+
+# Placeholders for Inventory Update LLM (Existing)
+INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
+INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
+INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Inventory Log Keeper
+**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
+**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
+
+**Supported Direct Command Formats (Priority 1):**
+*   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: CLEAR CharacterName`
+*(Note: Use `__USER__` for the player character if their specific name isn't provided)*
+
+**Instructions (Follow in Order):**
+
+1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 2.
+
+2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 3.
+
+3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
+    *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
+    *   Generate JSON `updates` based *only* on these dialogue events.
+
+4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+    ```json
+    {{
+      "updates": [
+        // One entry for each detected change (from command OR dialogue)
+        {{
+          "character_name": "Name or __USER__",
+          "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
+          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
+          "quantity": <integer>,
+          "description": "<optional string>" // Typically only for 'add' from dialogue
+        }}
+        // ... more updates if needed
+      ]
+    }}
+    ```
+    *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
+
+5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
+6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
+
+**INPUTS:**
+
+**USER QUERY (Check for commands first):**
+{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
+
+**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
+---
+{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
+---
+{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (JSON object with detected inventory updates):**
+"""
+
+# --- Function Implementations (Existing ones remain largely unchanged) ---
 
 # --- Function: Clean Context Tags (Existing - Unchanged) ---
 def clean_context_tags(system_content: str) -> str:
@@ -372,7 +485,7 @@ async def refine_external_context(external_context: str, history_messages: List[
         func_logger.warning(f"[{caller_info}] Stateless refinement failed. Error: '{error_details}'. Returning original context.")
         return external_context
 
-# --- NEW: Format Cache Update Prompt (Unchanged from previous step) ---
+# --- Function: Format Cache Update Prompt (Existing - Unchanged) ---
 def format_cache_update_prompt(
     previous_cache: str,
     current_owi_rag: str,
@@ -400,7 +513,7 @@ def format_cache_update_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in cache update prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting cache update prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# --- NEW: Format Final Context Selection Prompt (Unchanged from previous step) ---
+# --- Function: Format Final Context Selection Prompt (Existing - Unchanged) ---
 def format_final_context_selection_prompt(
     updated_cache: str,
     current_owi_rag: str, # Include current OWI for secondary check
@@ -428,81 +541,139 @@ def format_final_context_selection_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in final selection prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting final selection prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# --- Function: Generate RAG Query (Existing - Unchanged) ---
+
+# === Function: Generate RAG Query (MODIFIED) ===
 async def generate_rag_query(
     latest_message_str: str,
     dialogue_context_str: str,
     llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]],
-    llm_config: Dict[str, Any],
+    # MODIFIED: No longer needs full llm_config, just URL, key, temp
+    api_url: str,
+    api_key: str,
+    temperature: float,
     caller_info: str = "i4_llm_agent_RAGQueryGen",
 ) -> Optional[str]:
-    logger.debug(f"[{caller_info}] Generating RAG query...")
-    if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func): logger.error(f"[{caller_info}] Invalid llm_call_func."); return "[Error: Invalid LLM func]"
-    required_keys = ['url', 'key', 'temp', 'prompt']; template = llm_config.get('prompt')
-    if not llm_config or not all(k in llm_config for k in required_keys) or not template or not isinstance(template, str):
-        missing = [k for k in required_keys if k not in llm_config] if isinstance(llm_config, dict) else required_keys
-        if not template or not isinstance(template, str): missing.append('prompt (invalid/missing)')
-        logger.error(f"[{caller_info}] Missing/Invalid RAGQ config/prompt. Missing: {missing}"); return f"[Error: Invalid RAGQ config]"
-    if not llm_config.get('url') or not llm_config.get('key'): logger.error(f"[{caller_info}] Missing RAGQ URL/Key."); return "[Error: Missing RAGQ URL/Key]"
-    ragq_prompt_text = None; formatting_error = None
+    """
+    Generates a RAG query using the default library prompt.
+
+    Args:
+        latest_message_str: The latest user message content.
+        dialogue_context_str: Formatted string of recent dialogue history.
+        llm_call_func: Async function to call the LLM.
+        api_url: URL for the RAG query generation LLM.
+        api_key: API Key for the RAG query generation LLM.
+        temperature: Temperature setting for the LLM call.
+        caller_info: Identifier string for logging.
+
+    Returns:
+        The generated query string, or an error string/None if failed.
+    """
+    logger.debug(f"[{caller_info}] Generating RAG query using library default prompt...")
+
+    # --- MODIFIED: Prerequisites check ---
+    if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func):
+        logger.error(f"[{caller_info}] Invalid llm_call_func.")
+        return "[Error: Invalid LLM func]"
+    if not api_url or not api_key:
+        logger.error(f"[{caller_info}] Missing RAGQ URL/Key.")
+        return "[Error: Missing RAGQ URL/Key]"
+    if DEFAULT_RAGQ_LLM_PROMPT == "[Default RAGQ Prompt Load Failed]": # Check if constant loaded correctly
+        logger.error(f"[{caller_info}] Library default RAGQ prompt constant failed to load.")
+        return "[Error: Default RAGQ prompt missing]"
+    # --- END MODIFIED Prerequisites check ---
+
+    ragq_prompt_text = None
+    formatting_error = None
     safe_latest_message = latest_message_str.replace("{", "{{").replace("}", "}}") if isinstance(latest_message_str, str) else "[No message]"
     safe_dialogue_context = dialogue_context_str.replace("{", "{{").replace("}", "}}") if isinstance(dialogue_context_str, str) else "[No history]"
+
     try:
-        ragq_prompt_text = template.format(latest_message=safe_latest_message, dialogue_context=safe_dialogue_context)
-        if not ragq_prompt_text or not ragq_prompt_text.strip(): formatting_error = "[Error: Formatted prompt is empty]"; logger.error(f"[{caller_info}] RAGQ prompt formatting resulted in empty string.")
-    except KeyError as e: formatting_error = f"[Error: RAGQ key error: {e}]"; logger.error(f"[{caller_info}] RAGQ prompt key error: {e}.")
-    except Exception as e_fmt: formatting_error = f"[Error: RAGQ format failed ({type(e_fmt).__name__})]"; logger.error(f"[{caller_info}] Failed format RAGQ prompt: {e_fmt}", exc_info=True)
-    if formatting_error: return formatting_error
-    ragq_payload = {"contents": [{"parts": [{"text": ragq_prompt_text}]}]}; logger.info(f"[{caller_info}] Calling LLM for RAG query generation...")
-    try: success, response_or_error = await llm_call_func(api_url=llm_config['url'], api_key=llm_config['key'], payload=ragq_payload, temperature=llm_config['temp'], timeout=45, caller_info=caller_info,)
-    except Exception as e_call: logger.error(f"[{caller_info}] Exception calling LLM wrapper for RAGQ: {e_call}", exc_info=True); success = False; response_or_error = f"[Error: LLM Call Exception {type(e_call).__name__}]"
+        # --- MODIFIED: Use library default template directly ---
+        ragq_prompt_text = DEFAULT_RAGQ_LLM_PROMPT.format(
+            latest_message=safe_latest_message,
+            dialogue_context=safe_dialogue_context
+        )
+        # --- END MODIFIED ---
+        if not ragq_prompt_text or not ragq_prompt_text.strip():
+            formatting_error = "[Error: Formatted prompt is empty]"
+            logger.error(f"[{caller_info}] RAGQ prompt formatting resulted in empty string.")
+    except KeyError as e:
+        formatting_error = f"[Error: RAGQ key error: {e}]"
+        logger.error(f"[{caller_info}] RAGQ prompt key error: {e}.")
+    except Exception as e_fmt:
+        formatting_error = f"[Error: RAGQ format failed ({type(e_fmt).__name__})]"
+        logger.error(f"[{caller_info}] Failed format RAGQ prompt: {e_fmt}", exc_info=True)
+
+    if formatting_error:
+        return formatting_error
+
+    ragq_payload = {"contents": [{"parts": [{"text": ragq_prompt_text}]}]}
+    logger.info(f"[{caller_info}] Calling LLM for RAG query generation...")
+
+    try:
+        # --- MODIFIED: Pass individual parameters ---
+        success, response_or_error = await llm_call_func(
+            api_url=api_url,
+            api_key=api_key,
+            payload=ragq_payload,
+            temperature=temperature,
+            timeout=45,
+            caller_info=caller_info,
+        )
+        # --- END MODIFIED ---
+    except Exception as e_call:
+        logger.error(f"[{caller_info}] Exception calling LLM wrapper for RAGQ: {e_call}", exc_info=True)
+        success = False
+        response_or_error = f"[Error: LLM Call Exception {type(e_call).__name__}]"
+
     if success and isinstance(response_or_error, str):
         final_query = response_or_error.strip()
-        if final_query: logger.info(f"[{caller_info}] Generated RAG query: '{final_query}'"); return final_query
-        else: logger.warning(f"[{caller_info}] RAGQ LLM returned empty string."); return "[Error: RAGQ empty]"
+        if final_query:
+            logger.info(f"[{caller_info}] Generated RAG query: '{final_query}'")
+            return final_query
+        else:
+            logger.warning(f"[{caller_info}] RAGQ LLM returned empty string.")
+            return "[Error: RAGQ empty]"
     else:
-        error_msg = str(response_or_error); logger.error(f"[{caller_info}] RAGQ failed: {error_msg}")
-        if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
-        else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
+        error_msg = str(response_or_error)
+        logger.error(f"[{caller_info}] RAGQ failed: {error_msg}")
+        if isinstance(response_or_error, dict):
+            err_type = response_or_error.get('error_type', 'RAGQ Err')
+            err_msg_detail = response_or_error.get('message', 'Unknown')
+            return f"[Error: {err_type} - {err_msg_detail}]"
+        else:
+            return f"[Error: RAGQ Failed - {error_msg[:50]}]"
+# === END MODIFIED Function: Generate RAG Query ===
 
-# --- Function: Construct Final LLM Payload (Existing - Unchanged) ---
+
+# --- Function: Construct Final LLM Payload (Existing - Unchanged structure) ---
+# === START MODIFIED construct_final_llm_payload ===
 def construct_final_llm_payload(
     system_prompt: str,
     history: List[Dict],
     context: Optional[str],
     query: str,
     long_term_goal: Optional[str] = None,
-    event_hint: Optional[str] = None, # <<< New parameter
+    event_hint: Optional[str] = None,
+    period_setting: Optional[str] = None, # <<< NEW PARAMETER
     strategy: str = 'standard',
     include_ack_turns: bool = True
 ) -> Dict[str, Any]:
     """
     Constructs the final payload for the LLM in Google's 'contents' format,
-    injecting the long-term goal and event hint/guideline into the payload.
-
-    Args:
-        system_prompt (str): The base system instructions (without OWI context tags).
-        history (List[Dict]): List of dialogue messages (e.g., T0 slice).
-        context (Optional[str]): Combined background information string.
-        query (str): The latest user query.
-        long_term_goal (Optional[str]): A session-specific goal instruction.
-        event_hint (Optional[str]): A dynamically generated event suggestion. <<< ADDED
-        strategy (str): Payload construction strategy ('standard' or 'advanced').
-        include_ack_turns (bool): Whether to include "Understood" turns.
-
-    Returns:
-        Dict[str, Any]: The constructed payload dictionary for the LLM API,
-                        or a dict with an "error" key if issues occur.
+    injecting the long-term goal, event hint/guideline, weather guideline,
+    and period setting into the payload.
     """
     func_logger = logging.getLogger(__name__ + '.construct_final_llm_payload')
     func_logger.debug(
         f"Constructing final LLM payload. Strategy: {strategy}, ACKs: {include_ack_turns}, "
-        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}" # <<< Log hint status
+        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}, "
+        f"Period Setting Provided: '{period_setting or 'None'}'" # MODIFIED LOG
     )
 
     gemini_contents = []
 
-    # 1. Prepare the combined system instructions including goal and event guideline
+    # 1. Prepare the combined system instructions including goal and guidelines
     base_system_prompt_text = system_prompt.strip() if system_prompt else "You are a helpful assistant."
     final_system_instructions = base_system_prompt_text
 
@@ -531,9 +702,29 @@ def construct_final_llm_payload(
 
     # --- Append Event Handling Guideline (if hint provided) ---
     if event_hint and isinstance(event_hint, str) and event_hint.strip():
-        # Only append the guideline if a non-empty hint string is passed
         final_system_instructions += EVENT_HANDLING_GUIDELINE_TEXT
         func_logger.debug(f"Appended event handling guideline to system instructions text.")
+
+    # --- Append Weather Suggestion Guideline ---
+    weather_suggestion_guideline = """
+
+--- [ Weather Suggestion Guideline ] ---
+The background information may contain a "Proposed Weather Change: From X to Y". This indicates a potential shift in the environment suggested by the system. Treat this as context or inspiration. You are NOT required to follow this suggestion if your narrative or character actions dictate different weather. Feel free to describe the weather naturally as the scene unfolds.
+--- [ END Weather Suggestion Guideline ] ---"""
+    final_system_instructions += weather_suggestion_guideline
+    func_logger.debug(f"Appended weather suggestion guideline to system instructions text.")
+
+    # --- NEW: Append Period Setting (if provided) ---
+    safe_period_setting = period_setting.strip() if isinstance(period_setting, str) else None
+    if safe_period_setting:
+        period_block = f"""
+
+--- [ Period Setting ] ---
+[[Setting Instruction: Generate content appropriate for a '{safe_period_setting}' setting.]]
+--- [ END Period Setting ] ---"""
+        final_system_instructions += period_block
+        func_logger.debug(f"Appended period setting instruction ('{safe_period_setting}') to system instructions text.")
+    # --- END NEW ---
 
     # 2. Add the combined System Instructions turn and optional ACK
     if final_system_instructions:
@@ -542,6 +733,8 @@ def construct_final_llm_payload(
             ack_text = "Understood. I will follow these instructions."
             if safe_long_term_goal:
                  ack_text += " I will also keep the long-term goal in mind."
+            if safe_period_setting: # Add to ACK if setting provided
+                ack_text += f" I will also maintain a '{safe_period_setting}' setting."
             gemini_contents.append({"role": "model", "parts": [{"text": ack_text}]})
 
     # 3. Prepare History Turns (Filter for valid roles/content)
@@ -558,7 +751,7 @@ def construct_final_llm_payload(
     context_turn = None; ack_turn = None
     has_real_context = bool(context and context.strip() and context.strip() != EMPTY_CONTEXT_PLACEHOLDER)
     if has_real_context:
-        safe_context = context.strip().replace("---", "===")
+        safe_context = context.strip().replace("---", "===") # Basic separator replacement
         context_injection_text = f"Background Information (Use this to inform your response):\n{safe_context}"
         context_turn = {"role": "user", "parts": [{"text": context_injection_text}]}
         if include_ack_turns: ack_turn = {"role": "model", "parts": [{"text": "Understood. I have reviewed the background information."}]}
@@ -578,12 +771,12 @@ def construct_final_llm_payload(
     final_query_turn = {"role": "user", "parts": [{"text": final_query_text}]} # Use the potentially modified text
 
     # 6. Assemble Payload based on Strategy
-    if strategy == 'standard': # [Sys+Goal] -> Hist -> [Ctx] -> Query
+    if strategy == 'standard': # [Sys+Goal+Guidelines+Period] -> Hist -> [Ctx] -> Query
         gemini_contents.extend(history_turns)
         if context_turn: gemini_contents.append(context_turn)
         if ack_turn: gemini_contents.append(ack_turn)
         gemini_contents.append(final_query_turn)
-    elif strategy == 'advanced': # [Sys+Goal] -> [Ctx] -> Hist -> Query
+    elif strategy == 'advanced': # [Sys+Goal+Guidelines+Period] -> [Ctx] -> Hist -> Query
         if context_turn: gemini_contents.append(context_turn)
         if ack_turn: gemini_contents.append(ack_turn)
         gemini_contents.extend(history_turns)
@@ -595,25 +788,41 @@ def construct_final_llm_payload(
     final_payload = {"contents": gemini_contents}
     func_logger.debug(f"Final payload constructed with {len(gemini_contents)} turns using strategy '{strategy}'.")
     return final_payload
+# === END MODIFIED construct_final_llm_payload ===
 
 
-# --- Function: Combine Background Context (Existing - Unchanged) ---
+# --- Function: Combine Background Context (MODIFIED to include Scene Description) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[str]],
     t2_rag_results: Optional[List[str]],
-    inventory_context: Optional[str] = None, # <<< ADDED parameter
+    scene_description: Optional[str] = None, # <<< NEW Parameter
+    inventory_context: Optional[str] = None,
+    current_day: Optional[int] = None,
+    current_time_of_day: Optional[str] = None,
+    current_season: Optional[str] = None,
+    current_weather: Optional[str] = None,
+    weather_proposal: Optional[Dict[str, Optional[str]]] = None,
     labels: Dict[str, str] = TAG_LABELS
 ) -> str:
     """
     Combines various background context sources into a single formatted string
-    suitable for injection into the final LLM prompt. Now includes inventory.
+    suitable for injection into the final LLM prompt. Now includes scene description,
+    world state, inventory, and the proposed weather change.
+
+    Order: World State, Proposed Weather, Scene, Inventory, Selected Context, T1, T2.
 
     Args:
         final_selected_context: Context from OWI/Cache/Stateless refinement.
         t1_summaries: List of recent Tier 1 summary strings.
         t2_rag_results: List of retrieved Tier 2 RAG result strings.
-        inventory_context: Formatted string of current character inventories. <<< ADDED
+        scene_description: The description text for the current scene. <<< NEW
+        inventory_context: Formatted string of current character inventories.
+        current_day: The current day number for the session.
+        current_time_of_day: The current time of day string (e.g., "Morning").
+        current_season: The current season string (e.g., "Summer").
+        current_weather: The current weather string (e.g., "Clear").
+        weather_proposal: Dict from Hint LLM, e.g., {"previous_weather": "X", "new_weather": "Y"}.
         labels: Dictionary mapping context types to labels for formatting.
 
     Returns:
@@ -623,53 +832,103 @@ def combine_background_context(
     func_logger = logging.getLogger(__name__ + '.combine_background_context')
     context_parts = []
 
-    # 1. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
-    selected_context_label = "Selected Background Context" # Label for this dynamic part
+    # 1. Add World State Section
+    world_state_parts = []
+    if isinstance(current_day, int) and current_day > 0:
+        world_state_parts.append(f"Day: {current_day}")
+    if isinstance(current_time_of_day, str) and current_time_of_day.strip() and "Unknown" not in current_time_of_day:
+        world_state_parts.append(f"Time: {current_time_of_day.strip()}")
+    if isinstance(current_season, str) and current_season.strip() and "Unknown" not in current_season:
+        world_state_parts.append(f"Season: {current_season.strip()}")
+    if isinstance(current_weather, str) and current_weather.strip() and "Unknown" not in current_weather:
+        world_state_parts.append(f"Current Weather: {current_weather.strip()}") # Label explicitly as current
+
+    if world_state_parts:
+        world_state_label = "Current World State"
+        world_state_string = ", ".join(world_state_parts)
+        context_parts.append(f"--- {world_state_label} ---\n{world_state_string}")
+        func_logger.debug(f"Adding World State section: {world_state_string}")
+
+    # 2. Add Proposed Weather Change Section
+    if isinstance(weather_proposal, dict):
+        prev_w = weather_proposal.get("previous_weather")
+        new_w = weather_proposal.get("new_weather")
+        if isinstance(prev_w, str) and isinstance(new_w, str):
+            proposal_label = "Proposed Weather Change"
+            proposal_string = f"From '{prev_w}' to '{new_w}'"
+            context_parts.append(f"--- {proposal_label} ---\n{proposal_string}")
+            func_logger.debug(f"Adding Weather Proposal section: {proposal_string}")
+        else:
+            func_logger.debug("Skipping weather proposal section: Invalid data types in proposal dict.")
+
+    # 3. Add Scene Description Section <<< NEW >>>
+    scene_label = "Current Scene"
+    safe_scene_description = scene_description.strip() if isinstance(scene_description, str) else None
+    if safe_scene_description:
+        func_logger.debug(f"Adding scene description (len: {len(safe_scene_description)}).")
+        context_parts.append(f"--- {scene_label} ---\n{safe_scene_description}")
+
+    # 4. Add Inventory Context
+    inventory_label = "Current Inventories"
+    safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
+    if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
+        func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
+        context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
+
+    # 5. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
+    selected_context_label = "Selected Background Context" # e.g., Character details, Lore
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
-    # Check if it's empty or just the placeholder indicating nothing was relevant
     if safe_selected_context and "[No relevant background context found" not in safe_selected_context:
         func_logger.debug(f"Adding selected context (len: {len(safe_selected_context)}).")
         context_parts.append(f"--- {selected_context_label} ---\n{safe_selected_context}")
 
-    # 2. Add T1 Summaries
+    # 6. Add T1 Summaries
     t1_label = labels.get("t1", "Recent Summaries (T1)")
     if t1_summaries:
-        # Filter out empty strings and join valid ones
         combined_t1 = "\n---\n".join(s.strip() for s in t1_summaries if isinstance(s, str) and s.strip())
         if combined_t1:
             func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
             context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
 
-    # 3. Add T2 RAG Results
+    # 7. Add T2 RAG Results
     t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
     if t2_rag_results:
-        # Filter out empty strings and join valid ones
         combined_t2 = "\n---\n".join(s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip())
         if combined_t2:
             func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
             context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
 
-    # 4. Add Inventory Context <<< NEW SECTION >>>
-    inventory_label = "Current Inventories" # Define a label
-    safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
-    # Check if inventory context is valid and not just a placeholder/error message
-    if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
-        func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
-        context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
-    # <<< END NEW SECTION >>>
-
-    # 5. Combine parts or return placeholder
+    # 8. Combine parts or return placeholder
     if context_parts:
-        # Join sections with double newlines for readability
         full_context_string = "\n\n".join(context_parts)
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
         return full_context_string
     else:
         func_logger.info("No background context available from any source.")
-        # Return the standard placeholder if all sources were empty/invalid
         return EMPTY_CONTEXT_PLACEHOLDER
 
-# --- Less Relevant Functions (Keep for potential internal use/completeness) ---
+
+# --- Function: Format Inventory Update Prompt (Existing - Unchanged) ---
+def format_inventory_update_prompt(
+    main_llm_response: str,
+    user_query: str,
+    recent_history_str: str,
+    template: str # Expecting the specific template for this step
+) -> str:
+    """Formats the prompt for the Post-Turn Inventory Update LLM."""
+    func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
+    if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
+    try:
+        # Use replace for simpler substitution here
+        formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
+        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
+        return formatted_prompt
+    except Exception as e:
+        func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
+        return f"[Error formatting inventory update prompt: {type(e).__name__}]"
+
+# --- Less Relevant Functions (Stubs - Unchanged) ---
 def assemble_tagged_context(base_prompt: str, contexts: Dict[str, Union[str, List[str]]]) -> str:
     """Assembles tagged context into the base prompt (Simplified stub)."""
     logger.warning("assemble_tagged_context is a simplified stub and may not function as originally intended.")
@@ -685,101 +944,5 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         match = re.search(pattern, system_content, re.DOTALL | re.IGNORECASE)
         if match: extracted[key] = match.group(1).strip()
     return extracted
-
-
-# Placeholders for Inventory Update LLM
-INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
-INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
-INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
-
-# --- START REVISED TEMPLATE (Hybrid Approach - Unchanged) ---
-DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
-[[SYSTEM DIRECTIVE]]
-**Role:** Inventory Log Keeper
-**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
-**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
-
-**Supported Direct Command Formats (Priority 1):**
-*   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: CLEAR CharacterName`
-*(Note: Use `__USER__` for the player character if their specific name isn't provided)*
-
-**Instructions (Follow in Order):**
-
-1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-    *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
-    *   If NO: Proceed to Instruction 2.
-
-2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-    *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
-    *   If NO: Proceed to Instruction 3.
-
-3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
-    *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
-    *   Generate JSON `updates` based *only* on these dialogue events.
-
-4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
-    ```json
-    {{
-      "updates": [
-        // One entry for each detected change (from command OR dialogue)
-        {{
-          "character_name": "Name or __USER__",
-          "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
-          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
-          "quantity": <integer>,
-          "description": "<optional string>" // Typically only for 'add' from dialogue
-        }}
-        // ... more updates if needed
-      ]
-    }}
-    ```
-    *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
-
-5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
-6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
-
-**INPUTS:**
-
-**USER QUERY (Check for commands first):**
-{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
-
-**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
----
-{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
----
-
-**RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
----
-{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
----
-
-**OUTPUT (JSON object with detected inventory updates):**
-"""
-# --- END REVISED TEMPLATE (Hybrid Approach) ---
-
-# --- Function: Format Inventory Update Prompt (Existing - Unchanged) ---
-def format_inventory_update_prompt(
-    main_llm_response: str,
-    user_query: str,
-    recent_history_str: str,
-    template: str # Expecting the specific template for this step
-) -> str:
-    """Formats the prompt for the Post-Turn Inventory Update LLM."""
-    func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
-    if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
-    # Use basic replace for safety, assuming placeholders are unique enough
-    try:
-        formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
-        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
-        formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
-        return formatted_prompt
-    except Exception as e:
-        func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
-        return f"[Error formatting inventory update prompt: {type(e).__name__}]"
-
-
 
 # === END OF FILE i4_llm_agent/prompting.py ===

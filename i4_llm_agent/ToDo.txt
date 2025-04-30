@@ -1,4 +1,9 @@
 
 - Database file path to be reflected as set in valve
 - Message refresh should prevent inventory items duplicates
-- Debug logs now containing sometomes all the content in message which is not needed => too much information
+- Inventory definitely needs reworking
+- Debug logs now containing sometimes all the content in message which is not needed => too much information
+- Debug / Info level valve should really reflect the level of logging in the file for all outputs
+- Rename Inv Llm Api Url to Inventory and World related APIs
+- Remove Tokenizer Encoding Name from Valves
+- Implement T1 memory decaying and compression (even still within T1 memory)
