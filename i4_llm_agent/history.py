@@ -270,7 +270,9 @@ def select_turns_for_t0(
                     preceding_tokens = -1 # Indicate error
 
             if preceding_tokens >= 0:
-                overflow_limit = target_tokens * max_overflow_ratio
+                # === START MODIFICATION ===
+                # Explicitly recalculate overflow limit here for clarity and certainty
+                calculated_overflow_limit = target_tokens * max_overflow_ratio
                 projected_tokens = current_tokens + preceding_tokens
 
                 if is_debug_enabled:
@@ -278,18 +280,24 @@ def select_turns_for_t0(
                         f"[T0 Turn Check] Preceding user tokens: {preceding_tokens}. "
                         f"Current slice tokens: {current_tokens}. "
                         f"Projected total: {projected_tokens}. "
-                        f"Overflow limit ({max_overflow_ratio:.2f}x): {overflow_limit:.0f}"
+                        f"Target: {target_tokens}. Ratio: {max_overflow_ratio:.2f}. "
+                        f"Calculated Overflow limit: {calculated_overflow_limit:.0f}" # Use calculated limit in log
                     )
 
-                # Check if adding the preceding user turn fits within the overflow budget
-                if projected_tokens <= overflow_limit:
-                    func_logger.info(
-                        f"[T0 Turn Check] Including preceding 'user' turn (dialogue index {preceding_dialogue_index}) as it fits within overflow limit."
+                # Check if adding the preceding user turn fits within the explicitly calculated overflow budget
+                if projected_tokens <= calculated_overflow_limit:
+                # === END MODIFICATION ===
+                    func_logger.info( # Changed to INFO to ensure visibility if added
+                        f"[T0 Turn Check] Including preceding 'user' turn (dialogue index {preceding_dialogue_index}) "
+                        f"as projected tokens ({projected_tokens}) <= overflow limit ({calculated_overflow_limit:.0f})."
                     )
                     selected_history.insert(0, preceding_msg) # Prepend the user message
                     current_tokens = projected_tokens # Update token count
                 else:
-                    if is_debug_enabled: func_logger.debug("[T0 Turn Check] Preceding 'user' turn excluded as it exceeds overflow limit.")
+                    if is_debug_enabled: func_logger.debug( # Keep this DEBUG unless problematic
+                        f"[T0 Turn Check] Preceding 'user' turn excluded as projected tokens ({projected_tokens}) "
+                        f"> overflow limit ({calculated_overflow_limit:.0f})."
+                        )
             else:
                 if is_debug_enabled: func_logger.debug("[T0 Turn Check] Preceding 'user' turn tokenization failed, cannot check overflow.")
         # This case should ideally not happen if history alternates user/assistant

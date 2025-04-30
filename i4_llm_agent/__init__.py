@@ -1,6 +1,6 @@
 # === START OF FILE i4_llm_agent/__init__.py ===
 
-# [[START MODIFIED __init__.py - Add Summarizer/RAGQ Prompt Exports]]
+# [[START MODIFIED __init__.py - Remove World State Parser & Scene Generator]]
 # i4_llm_agent/__init__.py
 import logging
 import asyncio
@@ -19,10 +19,8 @@ from .prompting import (
     DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
     DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
-    # === NEW EXPORTS ===
     DEFAULT_SUMMARIZER_SYSTEM_PROMPT,
     DEFAULT_RAGQ_LLM_PROMPT,
-    # === END NEW ===
     # Formatting Functions
     format_stateless_refiner_prompt,
     format_cache_update_prompt,
@@ -81,7 +79,7 @@ from .database import (
 from .orchestration import SessionPipeOrchestrator
 
 # --- Utilities (Existing) ---
-from .utils import count_tokens, calculate_string_similarity
+from .utils import TIKTOKEN_AVAILABLE, count_tokens, calculate_string_similarity
 
 # --- Inventory Management (Existing Module Import) ---
 try:
@@ -107,37 +105,37 @@ except ImportError as e:
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Template Load Error]"
     async def generate_event_hint(*args, **kwargs): await asyncio.sleep(0); return None, {} # Return tuple expected by orchestrator
 
-# --- World State Parser (Existing Import) ---
-try:
-    from .world_state_parser import (
-        parse_world_state_with_llm,
-        confirm_weather_change_with_llm,
-        DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT
-    )
-    WORLD_STATE_PARSER_AVAILABLE = True
-except ImportError as e:
-    logging.getLogger(__name__).error(f"Failed to import world_state_parser module: {e}", exc_info=True)
-    WORLD_STATE_PARSER_AVAILABLE = False
-    DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = "[Default World State Parse Template Load Error]"
-    async def parse_world_state_with_llm(*args, **kwargs): await asyncio.sleep(0); return {}
-    async def confirm_weather_change_with_llm(*args, **kwargs): await asyncio.sleep(0); return False
+# --- World State Parser (REMOVED Import Block) ---
 
-# --- Scene Generator (NEW Import) ---
+# --- Scene Generator (REMOVED Import Block) ---
+
+# --- State Assessment (NEW Import - Keep this!) ---
 try:
-    from .scene_generator import (
-        assess_and_generate_scene,
-        DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT
+    from .state_assessment import (
+        update_state_via_full_turn_assessment,
+        DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT
     )
-    SCENE_GENERATOR_AVAILABLE = True
+    STATE_ASSESSMENT_AVAILABLE = True
 except ImportError as e:
-    logging.getLogger(__name__).error(f"Failed to import scene_generator module: {e}", exc_info=True)
-    SCENE_GENERATOR_AVAILABLE = False
-    DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = "[Default Scene Assessment Template Load Error]"
-    async def assess_and_generate_scene(*args, **kwargs):
-        # Fallback needs to return expected structure (dict), potentially previous state if passed
-        # For simplicity, return empty default if module fails load
+    logging.getLogger(__name__).error(f"Failed to import state_assessment module: {e}", exc_info=True)
+    STATE_ASSESSMENT_AVAILABLE = False
+    DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = "[Default Unified State Assessment Template Load Error]"
+    # Fallback function for state assessment
+    async def update_state_via_full_turn_assessment(*args, **kwargs):
         await asyncio.sleep(0)
-        return {"keywords": [], "description": ""}
+        # Fallback needs to return the expected dictionary structure
+        # Assuming previous state is passed in kwargs or args if needed, otherwise return empty defaults
+        previous_world_state = kwargs.get('previous_world_state', {})
+        previous_scene_state = kwargs.get('previous_scene_state', {})
+        return {
+            "new_day": previous_world_state.get("day", 1),
+            "new_time_of_day": previous_world_state.get("time_of_day", "Morning"),
+            "new_weather": previous_world_state.get("weather", "Clear"),
+            "new_season": previous_world_state.get("season", "Summer"),
+            "new_scene_keywords": previous_scene_state.get("keywords", []),
+            "new_scene_description": previous_scene_state.get("description", ""),
+            "scene_changed_flag": False
+        }
 
 # --- Configure basic logging for the library ---
 logger = logging.getLogger(__name__)
@@ -156,11 +154,10 @@ __all__ = [
     "DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT",
     "DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT",
     "DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT",
-    "DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT", # Export scene prompt
-    # === NEW EXPORTS ===
+    # === REMOVED DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT (now handled by state_assessment) ===
     "DEFAULT_SUMMARIZER_SYSTEM_PROMPT",
     "DEFAULT_RAGQ_LLM_PROMPT",
-    # === END NEW ===
+    "DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT", # Keep this one
     "format_stateless_refiner_prompt",
     "format_cache_update_prompt",
     "format_final_context_selection_prompt",
@@ -208,6 +205,7 @@ __all__ = [
     # utils
     "count_tokens",
     "calculate_string_similarity",
+    "TIKTOKEN_AVAILABLE", # Export flag
     # inventory (Module Functions)
     "format_inventory_for_prompt",
     "update_inventories_from_llm",
@@ -216,16 +214,12 @@ __all__ = [
     "generate_event_hint", # Export function too
     "DEFAULT_EVENT_HINT_TEMPLATE_TEXT",
     "EVENT_HINTS_AVAILABLE", # Flag
-    # world_state_parser
-    "parse_world_state_with_llm", # Export functions too
-    "confirm_weather_change_with_llm",
-    "DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT",
-    "WORLD_STATE_PARSER_AVAILABLE", # Flag
-    # scene_generator
-    "assess_and_generate_scene",
-    "DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT",
-    "SCENE_GENERATOR_AVAILABLE", # Flag
+    # world_state_parser (REMOVED Exports)
+    # scene_generator (REMOVED Exports)
+    # state_assessment
+    "update_state_via_full_turn_assessment", # Export function
+    "STATE_ASSESSMENT_AVAILABLE", # Export flag
 ]
-# [[END MODIFIED __init__.py - Add Summarizer/RAGQ Prompt Exports]]
+# [[END MODIFIED __init__.py - Remove World State Parser & Scene Generator]]
 
 # === END OF FILE i4_llm_agent/__init__.py ===

@@ -24,6 +24,7 @@
   <ItemGroup>
     <Compile Include="api_client.py" />
     <Compile Include="cache.py" />
+    <Compile Include="context_processor.py" />
     <Compile Include="event_hints.py" />
     <Compile Include="history.py" />
     <Compile Include="inventory.py" />
@@ -36,7 +37,6 @@
     <Compile Include="session.py" />
     <Compile Include="state_assessment.py" />
     <Compile Include="utils.py" />
-    <Compile Include="world_state_parser.py" />
     <Compile Include="__init__.py" />
   </ItemGroup>
   <ItemGroup>
