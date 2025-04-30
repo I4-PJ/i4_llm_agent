@@ -1,4 +1,4 @@
-# === START OF FILE i4_llm_agent/prompting.py ===
+# === START MODIFIED FILE: i4_llm_agent/prompting.py ===
 # i4_llm_agent/prompting.py
 
 import logging
@@ -37,6 +37,7 @@ TAG_LABELS = {
     "owi": "OWI Context",
     "t1": "Recent Summaries (T1)",
     "t2_rag": "Related Summaries (T2 RAG)",
+    "aged": "Context Recaps (Aged)", # <<< NEW Label for Aged Summaries
 }
 EMPTY_CONTEXT_PLACEHOLDER = "[No Background Information Available]"
 
@@ -125,6 +126,50 @@ Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produ
 
 """
 # === END NEW Summarizer Constants ===
+
+
+# === NEW: Memory Aging Prompt Constants ===
+MEMORY_AGING_BATCH_PLACEHOLDER = "{t1_batch_text}"
+DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE = f"""
+[[SYSTEM DIRECTIVE]]
+
+**Role:** Roleplay Memory Condenser
+
+**Objective:** Analyze the provided CONSOLIDATED TEXT (representing a sequence of older dialogue summaries) and produce a **single, concise narrative recap** that preserves the essential plot progression, key emotional shifts, critical relationship developments, and crucial continuity anchors from that period.
+
+**Input:** A block of text containing multiple sequential T1 summaries concatenated together.
+
+**Output:** A single paragraph of text summarizing the input block.
+
+**Instructions:**
+
+1.  **Identify Core Narrative Arc:** Read the CONSOLIDATED TEXT to understand the main events, character interactions, and emotional flow across the summarized period. What was the overall journey or change during this time?
+2.  **Extract Key Developments:** Identify the most important plot points, decisions, discoveries, relationship changes (positive or negative), and significant emotional moments described in the input text.
+3.  **Synthesize, Don't Just List:** Combine the extracted developments into a flowing narrative recap. Focus on cause and effect, character motivations (as described), and the *outcome* of the events in the batch.
+4.  **Prioritize Continuity:** Ensure the recap includes details necessary to understand *why* the current situation (following this batch) is the way it is. What information *must* be retained for the story to make sense going forward?
+5.  **Condense Ruthlessly:** While preserving essential information, omit minor details, repetitive descriptions, and less critical dialogue snippets found in the original summaries. Aim for significant token reduction compared to the input text.
+6.  **Maintain Tone:** Reflect the general emotional tone of the period summarized (e.g., hopeful, tense, tragic).
+7.  **Single Paragraph Output:** The final output must be a single block of text (one paragraph).
+
+**Accuracy Note:** Base the recap *only* on the information present in the CONSOLIDATED TEXT. Do not infer or add external knowledge.
+
+---
+
+[[INPUT]]
+
+**CONSOLIDATED TEXT (Sequential T1 Summaries):**
+---
+{MEMORY_AGING_BATCH_PLACEHOLDER}
+---
+
+---
+
+[[OUTPUT]]
+
+**(Single Paragraph Narrative Recap):**
+"""
+# === END NEW Memory Aging Constants ===
+
 
 # === NEW: RAG Query Prompt Constant (Moved from script.txt) ===
 DEFAULT_RAGQ_LLM_PROMPT = """Based on the latest user message and recent dialogue context, generate a concise search query focusing on the key entities, topics, or questions raised.
@@ -366,7 +411,7 @@ DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 **OUTPUT (JSON object with detected inventory updates):**
 """
 
-# --- Function Implementations (Existing ones remain largely unchanged) ---
+# --- Function Implementations ---
 
 # --- Function: Clean Context Tags (Existing - Unchanged) ---
 def clean_context_tags(system_content: str) -> str:
@@ -542,7 +587,7 @@ def format_final_context_selection_prompt(
     except Exception as e: func_logger.error(f"Error formatting final selection prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
 
-# === Function: Generate RAG Query (MODIFIED) ===
+# === Function: Generate RAG Query (Existing - Unchanged structure) ===
 async def generate_rag_query(
     latest_message_str: str,
     dialogue_context_str: str,
@@ -643,11 +688,9 @@ async def generate_rag_query(
             return f"[Error: {err_type} - {err_msg_detail}]"
         else:
             return f"[Error: RAGQ Failed - {error_msg[:50]}]"
-# === END MODIFIED Function: Generate RAG Query ===
 
 
 # --- Function: Construct Final LLM Payload (Existing - Unchanged structure) ---
-# === START MODIFIED construct_final_llm_payload ===
 def construct_final_llm_payload(
     system_prompt: str,
     history: List[Dict],
@@ -788,15 +831,40 @@ The background information may contain a "Proposed Weather Change: From X to Y".
     final_payload = {"contents": gemini_contents}
     func_logger.debug(f"Final payload constructed with {len(gemini_contents)} turns using strategy '{strategy}'.")
     return final_payload
-# === END MODIFIED construct_final_llm_payload ===
 
 
-# --- Function: Combine Background Context (MODIFIED to include Scene Description) ---
+# --- Function: Format Memory Aging Prompt (NEW) ---
+def format_memory_aging_prompt(t1_batch_text: str, template: Optional[str] = None) -> str:
+    """Formats the prompt for the Memory Aging LLM."""
+    func_logger = logging.getLogger(__name__ + '.format_memory_aging_prompt')
+    prompt_template = template if template is not None else DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE
+    if not prompt_template or prompt_template == "[Default Memory Aging Prompt Load Failed]":
+        return "[Error: Invalid or Missing Template for Memory Aging]"
+
+    # Basic safety for formatting - replace curly braces in the input text
+    safe_batch_text = t1_batch_text.replace("{", "{{").replace("}", "}}") if isinstance(t1_batch_text, str) else ""
+
+    try:
+        # Format using the placeholder defined in the constant
+        formatted_prompt = prompt_template.format(
+            **{MEMORY_AGING_BATCH_PLACEHOLDER.strip('{}'): safe_batch_text}
+        )
+        return formatted_prompt
+    except KeyError as e:
+        func_logger.error(f"Missing placeholder in memory aging prompt: {e}")
+        return f"[Error: Missing placeholder '{e}']"
+    except Exception as e:
+        func_logger.error(f"Error formatting memory aging prompt: {e}", exc_info=True)
+        return f"[Error formatting memory aging prompt: {type(e).__name__}]"
+
+
+# --- Function: Combine Background Context (MODIFIED for Aged Summaries & Sorting) ---
 def combine_background_context(
     final_selected_context: Optional[str],
-    t1_summaries: Optional[List[str]],
-    t2_rag_results: Optional[List[str]],
-    scene_description: Optional[str] = None, # <<< NEW Parameter
+    t1_summaries: Optional[List[Tuple[str, Dict[str, Any]]]], # Expecting tuples with metadata
+    aged_summaries: Optional[List[Tuple[str, Dict[str, Any]]]], # <<< NEW Parameter: Expecting tuples
+    t2_rag_results: Optional[List[str]], # T2 RAG results might lack consistent sortable metadata
+    scene_description: Optional[str] = None,
     inventory_context: Optional[str] = None,
     current_day: Optional[int] = None,
     current_time_of_day: Optional[str] = None,
@@ -807,16 +875,17 @@ def combine_background_context(
 ) -> str:
     """
     Combines various background context sources into a single formatted string
-    suitable for injection into the final LLM prompt. Now includes scene description,
-    world state, inventory, and the proposed weather change.
+    suitable for injection into the final LLM prompt, following a tiered
+    chronological order: World/Scene/Inv -> Selected -> Aged -> T1 -> T2.
 
-    Order: World State, Proposed Weather, Scene, Inventory, Selected Context, T1, T2.
+    Sorts Aged and T1 summaries based on metadata.
 
     Args:
         final_selected_context: Context from OWI/Cache/Stateless refinement.
-        t1_summaries: List of recent Tier 1 summary strings.
+        t1_summaries: List of (text, metadata_dict) tuples for recent T1 summaries.
+        aged_summaries: List of (text, metadata_dict) tuples for recent Aged summaries. <<< NEW
         t2_rag_results: List of retrieved Tier 2 RAG result strings.
-        scene_description: The description text for the current scene. <<< NEW
+        scene_description: The description text for the current scene.
         inventory_context: Formatted string of current character inventories.
         current_day: The current day number for the session.
         current_time_of_day: The current time of day string (e.g., "Morning").
@@ -831,74 +900,98 @@ def combine_background_context(
     """
     func_logger = logging.getLogger(__name__ + '.combine_background_context')
     context_parts = []
+    separator = "\n---\n" # Separator between items within a section
 
-    # 1. Add World State Section
+    # --- Tier 0: Current State ---
+    # 1. World State
     world_state_parts = []
-    if isinstance(current_day, int) and current_day > 0:
-        world_state_parts.append(f"Day: {current_day}")
-    if isinstance(current_time_of_day, str) and current_time_of_day.strip() and "Unknown" not in current_time_of_day:
-        world_state_parts.append(f"Time: {current_time_of_day.strip()}")
-    if isinstance(current_season, str) and current_season.strip() and "Unknown" not in current_season:
-        world_state_parts.append(f"Season: {current_season.strip()}")
-    if isinstance(current_weather, str) and current_weather.strip() and "Unknown" not in current_weather:
-        world_state_parts.append(f"Current Weather: {current_weather.strip()}") # Label explicitly as current
-
+    if isinstance(current_day, int) and current_day > 0: world_state_parts.append(f"Day: {current_day}")
+    if isinstance(current_time_of_day, str) and current_time_of_day.strip() and "Unknown" not in current_time_of_day: world_state_parts.append(f"Time: {current_time_of_day.strip()}")
+    if isinstance(current_season, str) and current_season.strip() and "Unknown" not in current_season: world_state_parts.append(f"Season: {current_season.strip()}")
+    if isinstance(current_weather, str) and current_weather.strip() and "Unknown" not in current_weather: world_state_parts.append(f"Current Weather: {current_weather.strip()}")
     if world_state_parts:
-        world_state_label = "Current World State"
-        world_state_string = ", ".join(world_state_parts)
-        context_parts.append(f"--- {world_state_label} ---\n{world_state_string}")
-        func_logger.debug(f"Adding World State section: {world_state_string}")
+        context_parts.append(f"--- Current World State ---\n" + ", ".join(world_state_parts))
+        func_logger.debug(f"Adding World State section: {', '.join(world_state_parts)}")
 
-    # 2. Add Proposed Weather Change Section
+    # 2. Proposed Weather Change
     if isinstance(weather_proposal, dict):
-        prev_w = weather_proposal.get("previous_weather")
-        new_w = weather_proposal.get("new_weather")
+        prev_w = weather_proposal.get("previous_weather"); new_w = weather_proposal.get("new_weather")
         if isinstance(prev_w, str) and isinstance(new_w, str):
-            proposal_label = "Proposed Weather Change"
             proposal_string = f"From '{prev_w}' to '{new_w}'"
-            context_parts.append(f"--- {proposal_label} ---\n{proposal_string}")
+            context_parts.append(f"--- Proposed Weather Change ---\n{proposal_string}")
             func_logger.debug(f"Adding Weather Proposal section: {proposal_string}")
-        else:
-            func_logger.debug("Skipping weather proposal section: Invalid data types in proposal dict.")
 
-    # 3. Add Scene Description Section <<< NEW >>>
+    # 3. Scene Description
     scene_label = "Current Scene"
     safe_scene_description = scene_description.strip() if isinstance(scene_description, str) else None
     if safe_scene_description:
         func_logger.debug(f"Adding scene description (len: {len(safe_scene_description)}).")
         context_parts.append(f"--- {scene_label} ---\n{safe_scene_description}")
 
-    # 4. Add Inventory Context
+    # 4. Inventory Context
     inventory_label = "Current Inventories"
     safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
     if safe_inventory_context and "[No Inventory" not in safe_inventory_context and "[Error" not in safe_inventory_context and "[Disabled]" not in safe_inventory_context:
         func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
         context_parts.append(f"--- {inventory_label} ---\n{safe_inventory_context}")
 
-    # 5. Add Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
-    selected_context_label = "Selected Background Context" # e.g., Character details, Lore
+    # 5. Final Selected Context (Result of Cache/Stateless Refinement or raw OWI)
+    selected_context_label = "Selected Background Context"
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
     if safe_selected_context and "[No relevant background context found" not in safe_selected_context:
         func_logger.debug(f"Adding selected context (len: {len(safe_selected_context)}).")
         context_parts.append(f"--- {selected_context_label} ---\n{safe_selected_context}")
 
-    # 6. Add T1 Summaries
-    t1_label = labels.get("t1", "Recent Summaries (T1)")
-    if t1_summaries:
-        combined_t1 = "\n---\n".join(s.strip() for s in t1_summaries if isinstance(s, str) and s.strip())
+    # --- Tier 1: Medium-Term Context (Aged Summaries) ---
+    aged_label = labels.get("aged", "Context Recaps (Aged)")
+    valid_aged_summaries = []
+    if aged_summaries and isinstance(aged_summaries, list):
+        # Sort by creation timestamp DESC (most recent first)
+        # Fallback to 0 if key is missing
+        try:
+            aged_summaries.sort(key=lambda item: item[1].get('creation_timestamp_utc', 0), reverse=True)
+            valid_aged_summaries = [item[0].strip() for item in aged_summaries if isinstance(item, tuple) and len(item) > 0 and isinstance(item[0], str) and item[0].strip()]
+        except Exception as e_sort_aged:
+            func_logger.error(f"Error sorting aged summaries: {e_sort_aged}. Using original order.")
+            valid_aged_summaries = [item[0].strip() for item in aged_summaries if isinstance(item, tuple) and len(item) > 0 and isinstance(item[0], str) and item[0].strip()]
+
+    if valid_aged_summaries:
+        combined_aged = separator.join(valid_aged_summaries)
+        if combined_aged:
+            func_logger.debug(f"Adding {len(valid_aged_summaries)} Aged summaries (Combined len: {len(combined_aged)}).")
+            context_parts.append(f"--- {aged_label} ---\n{combined_aged}")
+
+    # --- Tier 2: Recent Dialogue Summaries (Active T1) ---
+    t1_label = labels.get("t1", "Recent Dialogue Summaries (T1)")
+    valid_t1_summaries = []
+    if t1_summaries and isinstance(t1_summaries, list):
+         # Sort by turn_end_index DESC (most recent first)
+         # Fallback to -1 if key is missing
+        try:
+            t1_summaries.sort(key=lambda item: item[1].get('turn_end_index', -1), reverse=True)
+            valid_t1_summaries = [item[0].strip() for item in t1_summaries if isinstance(item, tuple) and len(item) > 0 and isinstance(item[0], str) and item[0].strip()]
+        except Exception as e_sort_t1:
+            func_logger.error(f"Error sorting T1 summaries: {e_sort_t1}. Using original order.")
+            valid_t1_summaries = [item[0].strip() for item in t1_summaries if isinstance(item, tuple) and len(item) > 0 and isinstance(item[0], str) and item[0].strip()]
+
+    if valid_t1_summaries:
+        combined_t1 = separator.join(valid_t1_summaries)
         if combined_t1:
-            func_logger.debug(f"Adding {len(t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
+            func_logger.debug(f"Adding {len(valid_t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
             context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
 
-    # 7. Add T2 RAG Results
-    t2_label = labels.get("t2_rag", "Related Older Summaries (T2 RAG)")
+    # --- Tier 3: Long-Term Context (T2 RAG) ---
+    t2_label = labels.get("t2_rag", "Related Older Information (T2 RAG)")
     if t2_rag_results:
-        combined_t2 = "\n---\n".join(s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip())
-        if combined_t2:
-            func_logger.debug(f"Adding {len(t2_rag_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
-            context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
+        # Assume already sorted by relevance by the query function
+        valid_t2_results = [s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip()]
+        if valid_t2_results:
+            combined_t2 = separator.join(valid_t2_results)
+            if combined_t2:
+                func_logger.debug(f"Adding {len(valid_t2_results)} T2 RAG results (Combined len: {len(combined_t2)}).")
+                context_parts.append(f"--- {t2_label} ---\n{combined_t2}")
 
-    # 8. Combine parts or return placeholder
+    # --- Combine and Return ---
     if context_parts:
         full_context_string = "\n\n".join(context_parts)
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}). Sections: {len(context_parts)}")
@@ -945,4 +1038,4 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         if match: extracted[key] = match.group(1).strip()
     return extracted
 
-# === END OF FILE i4_llm_agent/prompting.py ===
+# === END MODIFIED FILE: i4_llm_agent/prompting.py ===

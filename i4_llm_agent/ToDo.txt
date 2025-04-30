@@ -7,3 +7,5 @@
 - Rename Inv Llm Api Url to Inventory and World related APIs
 - Remove Tokenizer Encoding Name from Valves
 - Implement T1 memory decaying and compression (even still within T1 memory)
+- Cache Update Skip Owi Threshold valve to be removed
+- Cache Update Similarity Threshold valve to be removed
