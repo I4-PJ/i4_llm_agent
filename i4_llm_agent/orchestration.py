@@ -641,7 +641,7 @@ class SessionPipeOrchestrator:
         return t0_raw_history_slice, t0_dialogue_tokens
 
 
-    # === _calculate_and_format_status ===
+# === _calculate_and_format_status (MODIFIED - Scene=PRE/POST, Cache at end) ===
     async def _calculate_and_format_status(
         self, session_id: str,
         t1_retrieved_count: int,
@@ -650,7 +650,8 @@ class SessionPipeOrchestrator:
         t0_dialogue_tokens: int,
         inventory_prompt_tokens: int,
         final_llm_payload_contents: Optional[List[Dict]],
-        # --- MODIFIED: Now requires FINAL confirmed state ---
+        # --- MODIFIED: Now requires BOTH pre and final flags ---
+        pre_scene_changed_flag: bool,
         final_confirmed_world_state: Dict[str, Any],
         final_confirmed_scene_state: Dict[str, Any],
         final_scene_changed_flag: bool,
@@ -658,8 +659,12 @@ class SessionPipeOrchestrator:
         context_status_info: Dict[str, Any],
         session_process_owi_rag: bool,
     ) -> Tuple[str, int]:
-        """ Calculates final status string using info from context processor and FINAL confirmed state. """
-        # [[ Implementation Modified to use final state ]]
+        """
+        Calculates final status string using info from context processor,
+        pre/post assessment flags, and FINAL confirmed state.
+        Formats Scene status as Scene=PRE/POST and moves Cache status to the end.
+        """
+        # [[ Implementation Modified for Scene=PRE/POST and Cache position ]]
         final_payload_tokens = -1
         if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
             try: final_payload_tokens = sum( self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents if isinstance(turn, dict) for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str))
@@ -670,7 +675,7 @@ class SessionPipeOrchestrator:
         t2_retrieved_count = context_status_info.get("t2_retrieved_count", 0)
         initial_owi_context_tokens = context_status_info.get("initial_owi_context_tokens", -1)
         refined_context_tokens = context_status_info.get("refined_context_tokens", -1)
-        cache_update_skipped = context_status_info.get("cache_update_skipped", False)
+        # cache_update_skipped = context_status_info.get("cache_update_skipped", False) # Use flags below
         final_context_selection_performed = context_status_info.get("final_context_selection_performed", False)
         stateless_refinement_performed = context_status_info.get("stateless_refinement_performed", False)
 
@@ -678,15 +683,12 @@ class SessionPipeOrchestrator:
         status_parts.append(f"T1={t1_retrieved_count}")
         status_parts.append(f"T2={t2_retrieved_count}")
 
-        # Refinement indicator logic remains the same
-        enable_rag_cache_global = getattr(self.config, 'enable_rag_cache', False); enable_stateless_refin_global = getattr(self.config, 'enable_stateless_refinement', False); refinement_indicator = None
-        if enable_rag_cache_global and final_context_selection_performed: refinement_indicator = f"Cache(S1Skip={'Y' if cache_update_skipped else 'N'})"
-        elif enable_stateless_refin_global and stateless_refinement_performed: refinement_indicator = "StatelessRef"
-        if refinement_indicator: status_parts.append(refinement_indicator)
-
-        # Scene status based on FINAL confirmed flag
-        scene_status = "Scene=NEW" if final_scene_changed_flag else "Scene=OK"
+        # --- MODIFIED: Scene status formatting ---
+        pre_status_str = "NEW" if pre_scene_changed_flag else "OK"
+        post_status_str = "NEW" if final_scene_changed_flag else "OK"
+        scene_status = f"Scene={pre_status_str}/{post_status_str}"
         status_parts.append(scene_status)
+        # --- END MODIFICATION ---
 
         # World state string based on FINAL confirmed world state
         final_day = final_confirmed_world_state.get("day", "?")
@@ -707,8 +709,15 @@ class SessionPipeOrchestrator:
         if token_parts: self.logger.debug(f"[{session_id}] Status Tokens: Adding token section: {token_parts}"); token_string = f" | Tok: {' '.join(token_parts)}"
         else: self.logger.debug(f"[{session_id}] Status Tokens: Skipping token section (no valid tokens >= 0).")
 
+        # Construct main part of the status message (Cache status added later)
         status_message = ", ".join(status_parts) + world_state_status_str + token_string
-        return status_message, final_payload_tokens
+
+        # --- MODIFIED: Determine Cache status indicator for the end ---
+        cache_performed = final_context_selection_performed or stateless_refinement_performed
+        cache_status_indicator = "Cache=Y" if cache_performed else "Cache=N"
+        # --- END MODIFICATION ---
+
+        return status_message, final_payload_tokens # Return message without Cache/Inv yet
 
 
     # === _execute_or_prepare_output ===
@@ -1135,13 +1144,20 @@ class SessionPipeOrchestrator:
             else: self.logger.debug(f"[{session_id}] Skipping inventory update: Disabled by global valve."); inventory_update_completed = False
 
 
-            # --- Final Status Calculation and Emission ---
+# --- Final Status Calculation and Emission ---
             inv_stat_indicator = "Inv=OFF";
             if inventory_enabled:
                  if not _ORCH_INVENTORY_MODULE_AVAILABLE: inv_stat_indicator = "Inv=MISSING"
                  else: inv_stat_indicator = "Inv=OK" if inventory_update_success_flag else ("Inv=FAIL" if inventory_update_completed else "Inv=SKIP")
 
-            final_status_string, final_payload_tokens = await self._calculate_and_format_status(
+            # --- MODIFIED: Extract pre_scene_changed_flag ---
+            pre_scene_changed_flag = False # Default if pre-assessment failed/skipped
+            if pre_assessed_state_dict and isinstance(pre_assessed_state_dict, dict):
+                pre_scene_changed_flag = pre_assessed_state_dict.get("scene_changed_flag", False)
+            # --- END MODIFICATION ---
+
+            # Call the modified status calculation function
+            base_status_string, final_payload_tokens = await self._calculate_and_format_status(
                  session_id=session_id,
                  t1_retrieved_count=t1_retrieved_count,
                  summarization_prompt_tokens=summarization_prompt_tokens,
@@ -1149,14 +1165,25 @@ class SessionPipeOrchestrator:
                  t0_dialogue_tokens=t0_dialogue_tokens,
                  inventory_prompt_tokens=inventory_prompt_tokens,
                  final_llm_payload_contents=final_llm_payload_contents,
-                 final_confirmed_world_state=final_world_state, # Pass FINAL state
-                 final_confirmed_scene_state=final_scene_state, # Pass FINAL state
-                 final_scene_changed_flag=scene_state_changed_final, # Pass FINAL flag
+                 pre_scene_changed_flag=pre_scene_changed_flag, # Pass the flag
+                 final_confirmed_world_state=final_world_state,
+                 final_confirmed_scene_state=final_scene_state,
+                 final_scene_changed_flag=final_scene_changed_flag, # Keep passing final flag
                  context_status_info=context_status_info,
                  session_process_owi_rag=bool(getattr(user_valves, 'process_owi_rag', True)),
             )
 
-            final_status_string += f" | {inv_stat_indicator}" # Append inventory status
+            # --- MODIFIED: Append Inventory and Cache status ---
+            # Determine Cache status indicator (needs flags from context_status_info)
+            final_context_selection_performed = context_status_info.get("final_context_selection_performed", False)
+            stateless_refinement_performed = context_status_info.get("stateless_refinement_performed", False)
+            cache_performed = final_context_selection_performed or stateless_refinement_performed
+            cache_status_indicator = "Cache=Y" if cache_performed else "Cache=N"
+
+            # Combine final status string
+            final_status_string = f"{base_status_string} | {inv_stat_indicator} | {cache_status_indicator}"
+            # --- END MODIFICATION ---
+
             self.logger.info(f"[{session_id}] Orchestrator FINAL STATUS: {final_status_string}") # Keep INFO
             await self._emit_status(event_emitter, session_id, final_status_string, done=True)
 
