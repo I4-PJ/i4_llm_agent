@@ -1,6 +1,6 @@
 # === START OF FILE i4_llm_agent/orchestration.py ===
 
-# [[START CORRECTED orchestration.py - Restore Helper Logic]]
+# [[START MODIFIED orchestration.py - Two-Stage State Assessment]]
 # i4_llm_agent/orchestration.py
 
 import logging
@@ -77,7 +77,8 @@ except ImportError as e_import:
     async def generate_event_hint(*args, **kwargs):
         logging.getLogger(__name__).error("Executing FALLBACK generate_event_hint due to import error.")
         await asyncio.sleep(0)
-        return None, {} # Return hint text and empty dict (for removed proposal)
+        # Return hint text and weather proposal dict
+        return None, {"previous_weather": None, "new_weather": None}
     EVENT_HANDLING_GUIDELINE_TEXT = "[EVENT GUIDELINE LOAD FAILED]"
     def format_hint_for_query(hint): return f"[[Hint Load Failed: {hint}]]"
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Template Load Failed]"
@@ -153,15 +154,16 @@ logger = logging.getLogger(__name__) # i4_llm_agent.orchestration
 OrchestratorResult = Union[Dict, str]
 
 # ==============================================================================
-# === Session Pipe Orchestrator Class (Refactored)                           ===
+# === Session Pipe Orchestrator Class (Refactored for Two-Stage Assessment)  ===
 # ==============================================================================
 
 class SessionPipeOrchestrator:
     """
     Orchestrates the core processing logic of the Session Memory Pipe.
-    Coordinates memory management, state assessment, context processing,
-    inventory updates, and final LLM calls/payload preparation.
-    Relies on context_processor module for background prep and payload construction.
+    Implements a **two-stage state assessment**:
+    1. Pre-assessment before main LLM call (based on query) for context injection.
+    2. Post-assessment after main LLM call (based on final response) for DB saving.
+    Coordinates memory, state, context processing, inventory, hints, and LLM calls.
     """
 
     def __init__(
@@ -211,7 +213,7 @@ class SessionPipeOrchestrator:
         elif not TIKTOKEN_AVAILABLE:
              self.logger.warning("Orchestrator: tiktoken unavailable. Token counting disabled.")
 
-        # --- Function Aliases (REDUCED) ---
+        # --- Function Aliases ---
         self._llm_call_func = call_google_llm_api # For final, state, inv calls
         self._format_history_func = format_history_for_llm # Used for inv update context
         self._get_recent_turns_func = get_recent_turns # Used for inv update context & T0 select
@@ -226,18 +228,19 @@ class SessionPipeOrchestrator:
         self._set_scene_state_db_func = set_scene_state
         # Event Hint alias
         self._generate_hint_func = generate_event_hint if _EVENT_HINTS_AVAILABLE else None
-        # Unified State Assessment Alias
-        self._unified_state_func = update_state_via_full_turn_assessment
+        # Unified State Assessment Alias (Used for BOTH stages)
+        self._unified_state_func = update_state_via_full_turn_assessment if _UNIFIED_STATE_ASSESSMENT_AVAILABLE else None
         # Inventory Update Alias (Formatting moved, Update stays)
         if _ORCH_INVENTORY_MODULE_AVAILABLE:
             self._update_inventories_func = _real_update_inventories_func
         else:
             self._update_inventories_func = _dummy_update_inventories
 
-        # === NEW ALIAS for context processor ===
+        # Context Processor Alias
         self._context_processor_func = process_context_and_prepare_payload if _CONTEXT_PROCESSOR_AVAILABLE else None
 
-        self.logger.info("SessionPipeOrchestrator initialized (Refactored Context Processing).")
+        self.logger.info("SessionPipeOrchestrator initialized (Two-Stage State Assessment).")
+        self.logger.info(f"Unified State Assessment Status Check (Init): Available={_UNIFIED_STATE_ASSESSMENT_AVAILABLE}")
         self.logger.info(f"Context Processor Status Check (Init): Available={_CONTEXT_PROCESSOR_AVAILABLE}")
 
 
@@ -250,7 +253,7 @@ class SessionPipeOrchestrator:
         done: bool = False
     ):
         """Emits status updates via the provided callable if configured."""
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         if event_emitter and callable(event_emitter) and getattr(self.config, 'emit_status_updates', True):
             try:
                 status_data = { "type": "status", "data": {"description": str(description), "done": bool(done)} }
@@ -275,7 +278,7 @@ class SessionPipeOrchestrator:
         caller_info: str = "Orchestrator_LLM",
     ) -> Tuple[bool, Union[str, Dict]]:
         """ Wraps the library's LLM call function for error handling. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         if not self._llm_call_func:
             self.logger.error(f"[{caller_info}] LLM func alias unavailable in orchestrator.")
             return False, {"error_type": "SetupError", "message": "LLM func alias unavailable"}
@@ -301,7 +304,7 @@ class SessionPipeOrchestrator:
     # --- Debug Logging Helpers ---
     def _orchestrator_get_debug_log_path(self, suffix: str) -> Optional[str]:
         """ Gets the path for a debug log file based on the main log path and a suffix. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         func_logger = getattr(self, 'pipe_logger', self.logger)
         func_logger.debug(f"_orchestrator_get_debug_log_path called with suffix: '{suffix}'")
         try:
@@ -325,7 +328,7 @@ class SessionPipeOrchestrator:
 
     def _orchestrator_log_debug_payload(self, session_id: str, payload_body: Dict):
         """ Logs the final constructed LLM payload to a debug file if enabled. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_PAYLOAD")
         if not debug_log_path: self.logger.error(f"[{session_id}] Orch: Cannot log final payload: No path determined."); return
         try:
@@ -346,7 +349,7 @@ class SessionPipeOrchestrator:
 
     def _orchestrator_log_debug_inventory_llm(self, session_id: str, text: str, is_prompt: bool):
         """ Logs the inventory LLM prompt or response to the debug payload file. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         debug_log_path = self._orchestrator_get_debug_log_path(".DEBUG_PAYLOAD") # Log to same file as payload
         if not debug_log_path: self.logger.error(f"[{session_id}] Orch: Cannot log inventory LLM text: No path determined."); return
         # Check the same debug flag as the main payload
@@ -368,7 +371,7 @@ class SessionPipeOrchestrator:
         self, session_id: str, current_active_history: List[Dict], is_regeneration_heuristic: bool
     ) -> Tuple[str, List[Dict], Optional[str]]:
         """ Determines the effective user query, history slice, and last assistant response. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         effective_user_message_index = -1
         last_assistant_message_str: Optional[str] = None
         history_for_processing: List[Dict] = []
@@ -433,7 +436,7 @@ class SessionPipeOrchestrator:
         self, session_id: str, user_id: str, current_active_history: List[Dict], is_regeneration_heuristic: bool, event_emitter: Optional[Callable]
     ) -> Tuple[bool, Optional[str], int, int]:
         """ Handles checking for and executing Tier 1 summarization. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         await self._emit_status(event_emitter, session_id, "Status: Checking summarization...")
         summarization_performed_successfully = False; generated_summary = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1
         summarizer_url = getattr(self.config, 'summarizer_api_url', None)
@@ -487,7 +490,7 @@ class SessionPipeOrchestrator:
         self, session_id: str, t1_success: bool, chroma_embed_wrapper: Optional[Any], event_emitter: Optional[Callable]
     ) -> None:
         """ Handles checking and transitioning oldest T1 summary to T2 if limits exceeded. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         await self._emit_status(event_emitter, session_id, "Status: Checking long-term memory capacity...")
         tier2_collection = None
         max_t1_blocks = getattr(self.config, 'max_stored_summary_blocks', 0)
@@ -575,7 +578,7 @@ class SessionPipeOrchestrator:
     # === _get_t1_summaries ===
     async def _get_t1_summaries(self, session_id: str) -> Tuple[List[str], int]:
         """ Retrieves recent T1 summaries from the database. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         recent_t1_summaries = []; t1_retrieved_count = 0
         max_blocks_t1 = getattr(self.config, 'max_stored_summary_blocks', 0)
         if self.sqlite_cursor and get_recent_tier1_summaries and max_blocks_t1 > 0:
@@ -600,7 +603,7 @@ class SessionPipeOrchestrator:
     # === _select_t0_history_slice ===
     async def _select_t0_history_slice(self, session_id: str, history_for_processing: List[Dict]) -> Tuple[List[Dict], int]:
         """ Selects the T0 history slice based on token limits or fallback count. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         t0_raw_history_slice = []; t0_dialogue_tokens = -1
         t0_token_limit = getattr(self.config, 't0_active_history_token_limit', 4000)
         try:
@@ -638,33 +641,35 @@ class SessionPipeOrchestrator:
         return t0_raw_history_slice, t0_dialogue_tokens
 
 
-    # === _calculate_and_format_status (MODIFIED - Takes status_info dict) ===
+    # === _calculate_and_format_status ===
     async def _calculate_and_format_status(
         self, session_id: str,
-        t1_retrieved_count: int, # Still passed directly
-        summarization_prompt_tokens: int, # Still passed directly
-        summarization_output_tokens: int, # Still passed directly
-        t0_dialogue_tokens: int, # Still passed directly
-        inventory_prompt_tokens: int, # Still passed directly
-        final_llm_payload_contents: Optional[List[Dict]], # Still passed directly
-        scene_changed_flag: bool, # Still passed directly
-        world_state_status_str: str, # Still passed directly
-        context_status_info: Dict[str, Any], # NEW: Dict from context processor
-        session_process_owi_rag: bool, # Still needed for context
+        t1_retrieved_count: int,
+        summarization_prompt_tokens: int,
+        summarization_output_tokens: int,
+        t0_dialogue_tokens: int,
+        inventory_prompt_tokens: int,
+        final_llm_payload_contents: Optional[List[Dict]],
+        # --- MODIFIED: Now requires FINAL confirmed state ---
+        final_confirmed_world_state: Dict[str, Any],
+        final_confirmed_scene_state: Dict[str, Any],
+        final_scene_changed_flag: bool,
+        # ----------------------------------------------------
+        context_status_info: Dict[str, Any],
+        session_process_owi_rag: bool,
     ) -> Tuple[str, int]:
-        """ Calculates final status string using info from context processor. """
-        # [[ Restored Full Implementation (with modifications for status_info) ]]
+        """ Calculates final status string using info from context processor and FINAL confirmed state. """
+        # [[ Implementation Modified to use final state ]]
         final_payload_tokens = -1
         if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
             try: final_payload_tokens = sum( self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents if isinstance(turn, dict) for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str))
             except Exception as e_tok_final: final_payload_tokens = -1; self.logger.error(f"[{session_id}] Error calculating final payload tokens: {e_tok_final}")
         elif not final_llm_payload_contents: final_payload_tokens = 0
 
-        # Extract info from the context_status_info dict
+        # Extract info from the context_status_info dict (remains the same)
         t2_retrieved_count = context_status_info.get("t2_retrieved_count", 0)
         initial_owi_context_tokens = context_status_info.get("initial_owi_context_tokens", -1)
         refined_context_tokens = context_status_info.get("refined_context_tokens", -1)
-        # cache_update_performed = context_status_info.get("cache_update_performed", False) # Not directly needed for status string
         cache_update_skipped = context_status_info.get("cache_update_skipped", False)
         final_context_selection_performed = context_status_info.get("final_context_selection_performed", False)
         stateless_refinement_performed = context_status_info.get("stateless_refinement_performed", False)
@@ -673,15 +678,22 @@ class SessionPipeOrchestrator:
         status_parts.append(f"T1={t1_retrieved_count}")
         status_parts.append(f"T2={t2_retrieved_count}")
 
-        # Refinement indicator logic remains the same, using flags from status_info
+        # Refinement indicator logic remains the same
         enable_rag_cache_global = getattr(self.config, 'enable_rag_cache', False); enable_stateless_refin_global = getattr(self.config, 'enable_stateless_refinement', False); refinement_indicator = None
         if enable_rag_cache_global and final_context_selection_performed: refinement_indicator = f"Cache(S1Skip={'Y' if cache_update_skipped else 'N'})"
         elif enable_stateless_refin_global and stateless_refinement_performed: refinement_indicator = "StatelessRef"
         if refinement_indicator: status_parts.append(refinement_indicator)
 
-        # Scene status based on flag
-        scene_status = "Scene=NEW" if scene_changed_flag else "Scene=OK"
+        # Scene status based on FINAL confirmed flag
+        scene_status = "Scene=NEW" if final_scene_changed_flag else "Scene=OK"
         status_parts.append(scene_status)
+
+        # World state string based on FINAL confirmed world state
+        final_day = final_confirmed_world_state.get("day", "?")
+        final_time = final_confirmed_world_state.get("time_of_day", "?")
+        final_weather = final_confirmed_world_state.get("weather", "?")
+        final_season = final_confirmed_world_state.get("season", "?")
+        world_state_status_str = f"| World: D{final_day} {final_time} {final_weather} {final_season}"
 
         # Token reporting uses values from status_info and direct args
         self.logger.debug(f"[{session_id}] Status Tokens Check: OWI={initial_owi_context_tokens}, Ref={refined_context_tokens}, Hist={t0_dialogue_tokens}, Inv={inventory_prompt_tokens}, Final={final_payload_tokens}")
@@ -705,7 +717,7 @@ class SessionPipeOrchestrator:
         event_emitter: Optional[Callable], status_message: str, final_payload_tokens: int # final_payload_tokens not used here but part of signature
     ) -> OrchestratorResult:
         """ Executes final LLM call if configured, otherwise returns constructed payload. """
-        # [[ Restored Full Implementation ]]
+        # [[ Implementation Unchanged ]]
         output_body = body.copy() if isinstance(body, dict) else {}
         if not final_llm_payload_contents:
             self.logger.error(f"[{session_id}] Final payload construction failed (input to _execute_or_prepare_output was None).")
@@ -771,7 +783,7 @@ class SessionPipeOrchestrator:
             return {"messages": final_llm_payload_contents}
 
 
-# === MAIN PROCESSING METHOD (MODIFIED to call context processor) ===
+    # === MAIN PROCESSING METHOD (MODIFIED for two-stage state assessment) ===
     async def process_turn(
         self,
         session_id: str,
@@ -784,19 +796,18 @@ class SessionPipeOrchestrator:
         is_regeneration_heuristic: bool = False
     ) -> OrchestratorResult:
         """
-        Processes a single turn coordinating memory, state, context processing,
+        Processes a single turn coordinating memory, state (two-stage), context,
         inventory, hints, and final LLM calls.
-        Delegates context prep/payload construction to context_processor module.
         """
-        # [[ Implementation uses the restored helpers and calls context_processor ]]
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})")
         self.pipe_logger = getattr(self, 'pipe_logger', self.logger); self.pipe_debug_path_getter = self._orchestrator_get_debug_log_path # Use internal getter
 
+        # Log feature status
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False); event_hints_enabled = getattr(self.config, 'enable_event_hints', False)
         self.logger.info(f"[{session_id}] Inventory Mgmt Enabled: {inventory_enabled} (Module Avail: {_ORCH_INVENTORY_MODULE_AVAILABLE})")
         self.logger.info(f"[{session_id}] Event Hints Enabled: {event_hints_enabled} (Module Avail: {_EVENT_HINTS_AVAILABLE})")
-        self.logger.info(f"[{session_id}] State Update Method: Full Turn Assessment LLM (Available: {_UNIFIED_STATE_ASSESSMENT_AVAILABLE})")
+        self.logger.info(f"[{session_id}] State Update Method: Two-Stage Unified Assessment (Available: {_UNIFIED_STATE_ASSESSMENT_AVAILABLE})")
         self.logger.info(f"[{session_id}] Context Processor: Available={_CONTEXT_PROCESSOR_AVAILABLE}")
 
         session_period_setting = getattr(user_valves, 'period_setting', '').strip()
@@ -810,17 +821,19 @@ class SessionPipeOrchestrator:
         inventory_update_completed = False; inventory_update_success_flag = False;
         generated_event_hint_text: Optional[str] = None
         generated_weather_proposal: Dict[str, Optional[str]] = {}
-        scene_changed_flag = False
 
-        # World/Scene state variables
-        default_season = "Summer"; default_weather = "Clear"; default_day = 1; default_time = "Morning";
-        self.current_season: Optional[str] = default_season
-        self.current_weather: Optional[str] = default_weather
-        self.current_day: Optional[int] = default_day
-        self.current_time_of_day: Optional[str] = default_time
-        current_scene_state_dict: Dict = {"keywords": [], "description": ""}
+        # State dictionaries
+        initial_world_state_dict: Dict = {}
+        initial_scene_state_dict: Dict = {"keywords": [], "description": ""}
+        pre_assessed_state_dict: Optional[Dict] = None
+        pre_assessed_world_state_for_context: Dict = {}
+        pre_assessed_scene_state_for_context: Dict = {"keywords": [], "description": ""}
+        final_confirmed_state_dict: Optional[Dict] = None
+        final_confirmed_world_state: Dict = {}
+        final_confirmed_scene_state: Dict = {"keywords": [], "description": ""}
+        final_scene_changed_flag = False
 
-        # --- Context processor status ---
+        # Context processor status
         context_status_info: Dict[str, Any] = {}
 
         try:
@@ -834,37 +847,30 @@ class SessionPipeOrchestrator:
 
             # --- Determine Query, History Slice ---
             latest_user_query_str, history_for_processing, previous_llm_response_str = await self._determine_effective_query( session_id, current_active_history, is_regeneration_heuristic )
-            if latest_user_query_str is None: # Check specifically for None return from helper on error
-                raise ValueError("Failed to determine effective query or history.")
-            if not latest_user_query_str and not is_regeneration_heuristic:
-                raise ValueError("Cannot proceed without an effective user query (and not regeneration).")
+            if latest_user_query_str is None: raise ValueError("Failed to determine effective query or history.")
+            if not latest_user_query_str and not is_regeneration_heuristic: raise ValueError("Cannot proceed without an effective user query (and not regeneration).")
             safe_previous_llm_response_str = previous_llm_response_str if previous_llm_response_str is not None else ""
 
-            # --- Fetch Initial World & Scene State ---
+            # --- Fetch Initial World & Scene State (from DB - represents end of last turn) ---
             await self._emit_status(event_emitter, session_id, "Status: Fetching initial world state...")
-            initial_world_state_db_data = await self._get_world_state_db_func(self.sqlite_cursor, session_id) if self.sqlite_cursor and self._get_world_state_db_func else None
-            if initial_world_state_db_data and isinstance(initial_world_state_db_data, dict):
-                self.current_season = initial_world_state_db_data.get("season", default_season)
-                self.current_weather = initial_world_state_db_data.get("weather", default_weather)
-                self.current_day = initial_world_state_db_data.get("day", default_day)
-                self.current_time_of_day = initial_world_state_db_data.get("time_of_day", default_time)
-                self.logger.debug(f"[{session_id}] Fetched initial world state: D{self.current_day}, {self.current_time_of_day}, {self.current_weather}, {self.current_season}")
-            else:
-                self.logger.debug(f"[{session_id}] No world state found or error fetching. Using defaults.")
-                self.current_season, self.current_weather, self.current_day, self.current_time_of_day = default_season, default_weather, default_day, default_time
-            initial_world_state_dict = {"day": self.current_day, "time_of_day": self.current_time_of_day, "weather": self.current_weather, "season": self.current_season} # Store for context processor
+            default_season = "Summer"; default_weather = "Clear"; default_day = 1; default_time = "Morning";
+            db_world_state = await self._get_world_state_db_func(self.sqlite_cursor, session_id) if self.sqlite_cursor and self._get_world_state_db_func else None
+            initial_world_state_dict = {
+                "day": db_world_state.get("day", default_day) if db_world_state else default_day,
+                "time_of_day": db_world_state.get("time_of_day", default_time) if db_world_state else default_time,
+                "weather": db_world_state.get("weather", default_weather) if db_world_state else default_weather,
+                "season": db_world_state.get("season", default_season) if db_world_state else default_season,
+            }
+            self.logger.debug(f"[{session_id}] Fetched initial world state: {initial_world_state_dict}")
 
             await self._emit_status(event_emitter, session_id, "Status: Fetching initial scene state...")
-            initial_scene_state_db_data = await self._get_scene_state_db_func(self.sqlite_cursor, session_id) if self.sqlite_cursor and self._get_scene_state_db_func else None
-            if initial_scene_state_db_data and isinstance(initial_scene_state_db_data, dict):
-                kw_json = initial_scene_state_db_data.get("keywords_json"); desc = initial_scene_state_db_data.get("description", "")
-                try: keywords = json.loads(kw_json) if isinstance(kw_json, str) else []
-                except json.JSONDecodeError: keywords = []
-                current_scene_state_dict = {"keywords": keywords if isinstance(keywords, list) else [], "description": desc if isinstance(desc, str) else ""}
-                self.logger.debug(f"[{session_id}] Fetched initial scene state. Desc len: {len(current_scene_state_dict['description'])}")
-            else:
-                self.logger.debug(f"[{session_id}] No scene state found or error fetching. Using empty defaults.")
-                current_scene_state_dict = {"keywords": [], "description": ""}
+            db_scene_state = await self._get_scene_state_db_func(self.sqlite_cursor, session_id) if self.sqlite_cursor and self._get_scene_state_db_func else None
+            kw_json = db_scene_state.get("keywords_json") if db_scene_state else None
+            desc = db_scene_state.get("description", "") if db_scene_state else ""
+            try: keywords = json.loads(kw_json) if isinstance(kw_json, str) else []
+            except json.JSONDecodeError: keywords = []
+            initial_scene_state_dict = {"keywords": keywords if isinstance(keywords, list) else [], "description": desc if isinstance(desc, str) else ""}
+            self.logger.debug(f"[{session_id}] Fetched initial scene state. Desc len: {len(initial_scene_state_dict['description'])}")
 
             # --- Memory Management (T1/T2) ---
             (summarization_performed, new_t1_summary_text, summarization_prompt_tokens, summarization_output_tokens) = await self._handle_tier1_summarization( session_id, user_id, current_active_history, is_regeneration_heuristic, event_emitter )
@@ -872,26 +878,26 @@ class SessionPipeOrchestrator:
             recent_t1_summaries, t1_retrieved_count = await self._get_t1_summaries(session_id)
 
             # --- Generate Hint AND Weather Proposal ---
-            hint_background_context = current_scene_state_dict.get("description", "")
-            hint_background_context += f"\n(Day: {self.current_day}, Time: {self.current_time_of_day}, Weather: {self.current_weather})"
-            generated_weather_proposal = {}
+            # Hint generation uses the INITIAL state before pre-assessment
+            hint_background_context = initial_scene_state_dict.get("description", "")
+            hint_background_context += f"\n(Day: {initial_world_state_dict.get('day')}, Time: {initial_world_state_dict.get('time_of_day')}, Weather: {initial_world_state_dict.get('weather')})"
+            generated_weather_proposal = {"previous_weather": initial_world_state_dict.get("weather"), "new_weather": None} # Init proposal dict
 
             if event_hints_enabled and self._generate_hint_func:
                 self.logger.debug(f"[{session_id}] Attempting event hint generation (Period: '{session_period_setting}')...")
                 await self._emit_status(event_emitter, session_id, "Status: Generating hint...")
-                hint_llm_url = getattr(self.config, 'event_hint_llm_api_url', None)
-                hint_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
-                if not hint_llm_url or not hint_llm_key:
-                     self.logger.warning(f"[{session_id}] Skipping hint: Config incomplete (event_hint_llm_...).")
+                hint_llm_url = getattr(self.config, 'event_hint_llm_api_url', None); hint_llm_key = getattr(self.config, 'event_hint_llm_api_key', None)
+                if not hint_llm_url or not hint_llm_key: self.logger.warning(f"[{session_id}] Skipping hint: Config incomplete (event_hint_llm_...).")
                 else:
                     try:
-                        generated_event_hint_text, generated_weather_proposal = await self._generate_hint_func(
+                        generated_event_hint_text, temp_weather_proposal = await self._generate_hint_func(
                             config=self.config, history_messages=current_active_history,
-                            background_context=hint_background_context, current_season=self.current_season,
-                            current_weather=self.current_weather, current_time_of_day=self.current_time_of_day,
+                            background_context=hint_background_context, current_season=initial_world_state_dict.get('season'),
+                            current_weather=initial_world_state_dict.get('weather'), current_time_of_day=initial_world_state_dict.get('time_of_day'),
                             llm_call_func=self._async_llm_call_wrapper, logger_instance=self.logger,
                             session_id=session_id, period_setting=session_period_setting
                         )
+                        generated_weather_proposal = temp_weather_proposal # Store the actual proposal
                         if generated_event_hint_text: self.logger.info(f"[{session_id}] Event Hint Generated: '{generated_event_hint_text[:80]}...'")
                         else: self.logger.info(f"[{session_id}] No event hint suggested.")
                         if generated_weather_proposal and generated_weather_proposal.get("new_weather"): self.logger.info(f"[{session_id}] Weather Proposal Received: From '{generated_weather_proposal.get('previous_weather')}' to '{generated_weather_proposal.get('new_weather')}'")
@@ -899,29 +905,79 @@ class SessionPipeOrchestrator:
                         await self._emit_status(event_emitter, session_id, "Status: Hint generation complete.")
                     except Exception as e_hint_gen:
                         self.logger.error(f"[{session_id}] Error during hint generation call: {e_hint_gen}", exc_info=True);
-                        generated_event_hint_text = None; generated_weather_proposal = {}
+                        generated_event_hint_text = None; generated_weather_proposal = {"previous_weather": initial_world_state_dict.get("weather"), "new_weather": None}
             elif event_hints_enabled and not self._generate_hint_func: self.logger.error(f"[{session_id}] Skipping hint: Hint function unavailable.")
-            else: self.logger.debug(f"[{session_id}] Event Hints disabled. Skipping.")
+            else: self.logger.debug(f"[{session_id}] Skipping hint: Disabled by global valve."); generated_weather_proposal = {"previous_weather": initial_world_state_dict.get("weather"), "new_weather": None}
+
+            # --- STAGE 1: Pre-emptive State Assessment ---
+            pre_assessed_state_dict = None
+            if self._unified_state_func:
+                self.logger.info(f"[{session_id}] Performing pre-emptive state assessment...")
+                await self._emit_status(event_emitter, session_id, "Status: Assessing pre-emptive state...", done=False)
+                try:
+                    # Use the same LLM config as the final state assessment for now
+                    state_assess_llm_config = { "url": getattr(self.config, 'event_hint_llm_api_url', None), "key": getattr(self.config, 'event_hint_llm_api_key', None), "temp": getattr(self.config, 'state_assess_llm_temperature', 0.3), "prompt_template": DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT }
+                    if not state_assess_llm_config["url"] or not state_assess_llm_config["key"]:
+                        self.logger.error(f"[{session_id}] Pre-emptive State Assessment LLM URL/Key missing. Skipping assessment."); pre_assessed_state_dict = None
+                    else:
+                        # Call with PREVIOUS response string instead of final one
+                        pre_assessed_state_dict = await self._unified_state_func(
+                            session_id=session_id,
+                            previous_world_state=initial_world_state_dict,
+                            previous_scene_state=initial_scene_state_dict,
+                            current_user_query=latest_user_query_str,
+                            assistant_response_text=safe_previous_llm_response_str, # Use previous response
+                            history_messages=current_active_history, # Pass full history for context
+                            llm_call_func=self._async_llm_call_wrapper,
+                            state_assessment_llm_config=state_assess_llm_config,
+                            logger_instance=self.logger,
+                            event_emitter=event_emitter,
+                            weather_proposal=generated_weather_proposal
+                        )
+                        if pre_assessed_state_dict and isinstance(pre_assessed_state_dict, dict):
+                             self.logger.info(f"[{session_id}] Pre-emptive state assessment completed.")
+                             # Extract state for context injection
+                             pre_assessed_world_state_for_context = {k: pre_assessed_state_dict.get(f"new_{k}", initial_world_state_dict[k]) for k in ["day", "time_of_day", "weather", "season"]}
+                             pre_assessed_scene_state_for_context = {
+                                 "keywords": pre_assessed_state_dict.get("new_scene_keywords", initial_scene_state_dict["keywords"]),
+                                 "description": pre_assessed_state_dict.get("new_scene_description", initial_scene_state_dict["description"])
+                             }
+                             self.logger.debug(f"[{session_id}] Pre-assessed World for Context: {pre_assessed_world_state_for_context}")
+                             self.logger.debug(f"[{session_id}] Pre-assessed Scene Desc for Context len: {len(pre_assessed_scene_state_for_context['description'])}")
+                        else:
+                             self.logger.error(f"[{session_id}] Pre-emptive state assessment returned invalid data. Using initial state for context.")
+                             pre_assessed_state_dict = None # Ensure it's None if failed
+                             pre_assessed_world_state_for_context = initial_world_state_dict.copy()
+                             pre_assessed_scene_state_for_context = initial_scene_state_dict.copy()
+
+                except Exception as e_pre_assess:
+                    self.logger.error(f"[{session_id}] Exception during pre-emptive state assessment call: {e_pre_assess}", exc_info=True)
+                    pre_assessed_state_dict = None
+                    pre_assessed_world_state_for_context = initial_world_state_dict.copy()
+                    pre_assessed_scene_state_for_context = initial_scene_state_dict.copy()
+            else:
+                 self.logger.error(f"[{session_id}] Skipping pre-emptive state assessment: Unified state function unavailable.")
+                 pre_assessed_world_state_for_context = initial_world_state_dict.copy()
+                 pre_assessed_scene_state_for_context = initial_scene_state_dict.copy()
+
 
             # --- Select T0 History Slice ---
-            # This gets the correctly token-limited slice
             t0_raw_history_slice, t0_dialogue_tokens = await self._select_t0_history_slice( session_id, history_for_processing )
 
             # --- Call Context Processor ---
-            if not self._context_processor_func:
-                raise RuntimeError("Context processor function is unavailable.")
-
+            if not self._context_processor_func: raise RuntimeError("Context processor function is unavailable.")
             await self._emit_status(event_emitter, session_id, "Status: Processing background context...")
-            # === MODIFIED CALL: Pass t0_raw_history_slice ===
             final_llm_payload_contents, context_status_info = await self._context_processor_func(
                 session_id=session_id, body=body, user_valves=user_valves,
                 current_active_history=current_active_history,
-                history_for_processing=history_for_processing, # Still pass pre-query slice for T2/Refinement context
-                t0_history_slice=t0_raw_history_slice,        # Pass the CORRECT slice for final payload
+                history_for_processing=history_for_processing,
+                t0_history_slice=t0_raw_history_slice,
                 latest_user_query_str=latest_user_query_str,
                 recent_t1_summaries=recent_t1_summaries,
-                current_scene_state_dict=current_scene_state_dict,
-                current_world_state_dict=initial_world_state_dict,
+                # === MODIFIED: Pass PRE-ASSESSED state for context ===
+                current_scene_state_dict=pre_assessed_scene_state_for_context,
+                current_world_state_dict=pre_assessed_world_state_for_context,
+                # ====================================================
                 generated_event_hint_text=generated_event_hint_text,
                 generated_weather_proposal=generated_weather_proposal, # Pass weather proposal
                 config=self.config, logger=self.logger,
@@ -936,14 +992,9 @@ class SessionPipeOrchestrator:
                 dialogue_roles=self._dialogue_roles,
                 session_period_setting=session_period_setting,
             )
-            # === END MODIFIED CALL ===
             await self._emit_status(event_emitter, session_id, "Status: Context processing complete.")
-
-            if context_status_info.get("error"):
-                self.logger.error(f"[{session_id}] Error reported from context processor: {context_status_info['error']}")
-            if final_llm_payload_contents is None:
-                 self.logger.error(f"[{session_id}] Context processor failed to return payload contents.")
-                 return {"error": "Failed to prepare LLM payload.", "status_code": 500}
+            if context_status_info.get("error"): self.logger.error(f"[{session_id}] Error reported from context processor: {context_status_info['error']}")
+            if final_llm_payload_contents is None: raise ValueError("Context processor failed to return payload contents.")
 
             # --- Execute Final LLM Call or Prepare Output ---
             final_result = await self._execute_or_prepare_output(
@@ -953,63 +1004,99 @@ class SessionPipeOrchestrator:
                  final_payload_tokens=-1 # Tokens calculated later
                  )
 
-            # --- Post-Turn Unified State Update ---
-            new_state_dict = None
-            if isinstance(final_result, str) and self._unified_state_func:
-                narrative_response_text = final_result
-                self.logger.info(f"[{session_id}] Performing post-turn unified state assessment...")
-                await self._emit_status(event_emitter, session_id, "Status: Assessing state changes...", done=False)
-                previous_world_state_for_assessment = {"day": self.current_day, "time_of_day": self.current_time_of_day, "weather": self.current_weather, "season": self.current_season }
-                previous_scene_state_for_assessment = current_scene_state_dict
-                try:
-                    state_assess_llm_config = { "url": getattr(self.config, 'event_hint_llm_api_url', None), "key": getattr(self.config, 'event_hint_llm_api_key', None), "temp": getattr(self.config, 'state_assess_llm_temperature', 0.3), "prompt_template": DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT }
-                    if not state_assess_llm_config["url"] or not state_assess_llm_config["key"]: self.logger.error(f"[{session_id}] State Assessment LLM URL/Key missing. Skipping state update."); new_state_dict = None
-                    else:
-                        new_state_dict = await self._unified_state_func( session_id=session_id, previous_world_state=previous_world_state_for_assessment, previous_scene_state=previous_scene_state_for_assessment, current_user_query=latest_user_query_str, assistant_response_text=narrative_response_text, history_messages=current_active_history, llm_call_func=self._async_llm_call_wrapper, state_assessment_llm_config=state_assess_llm_config, logger_instance=self.logger, event_emitter=event_emitter, weather_proposal=generated_weather_proposal )
-                    if new_state_dict and isinstance(new_state_dict, dict):
-                        old_day = self.current_day; old_time = self.current_time_of_day; old_weather = self.current_weather; old_season = self.current_season
-                        self.current_day = new_state_dict.get("new_day", self.current_day)
-                        self.current_time_of_day = new_state_dict.get("new_time_of_day", self.current_time_of_day)
-                        self.current_weather = new_state_dict.get("new_weather", self.current_weather)
-                        self.current_season = new_state_dict.get("new_season", self.current_season)
-                        new_scene_keywords = new_state_dict.get("new_scene_keywords", current_scene_state_dict.get("keywords",[]))
-                        new_scene_description = new_state_dict.get("new_scene_description", current_scene_state_dict.get("description",""))
-                        scene_changed_flag = new_state_dict.get("scene_changed_flag", False)
-                        current_scene_state_dict = {"keywords": new_scene_keywords, "description": new_scene_description }
-                        world_state_changed = ( self.current_day != old_day or self.current_time_of_day != old_time or self.current_weather != old_weather or self.current_season != old_season )
-                        scene_state_changed = scene_changed_flag
-                        self.logger.debug(f"[{session_id}] Unified state assessment complete.")
-                        if world_state_changed: self.logger.info(f"[{session_id}] New World State: D{self.current_day} {self.current_time_of_day} {self.current_weather} {self.current_season}")
-                        else: self.logger.info(f"[{session_id}] No world state change detected.")
-                        if scene_state_changed: self.logger.info(f"[{session_id}] New Scene State: Desc len {len(new_scene_description)}, Keywords {new_scene_keywords}")
-                        else: self.logger.info(f"[{session_id}] No scene state change detected.")
-                        # Save Updated World State
-                        if world_state_changed and self.sqlite_cursor and self._set_world_state_db_func:
-                             await self._emit_status(event_emitter, session_id, "Status: Saving world state...", done=False)
-                             try:
-                                 update_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, self.current_season, self.current_weather, self.current_day, self.current_time_of_day )
-                                 if update_success: self.logger.info(f"[{session_id}] World state successfully saved.")
-                                 else: self.logger.error(f"[{session_id}] Failed to save world state.")
-                             except Exception as e_set_world: self.logger.error(f"[{session_id}] Error saving world state: {e_set_world}", exc_info=True)
-                        # Save Updated Scene State
-                        if scene_state_changed and self.sqlite_cursor and self._set_scene_state_db_func:
-                             await self._emit_status(event_emitter, session_id, "Status: Saving scene state...", done=False)
-                             try:
-                                 kw_json_to_save = json.dumps(new_scene_keywords)
-                                 update_success = await self._set_scene_state_db_func( self.sqlite_cursor, session_id, kw_json_to_save, new_scene_description )
-                                 if update_success: self.logger.info(f"[{session_id}] Scene state successfully saved.")
-                                 else: self.logger.error(f"[{session_id}] Failed to save scene state.")
-                             except Exception as e_set_scene: self.logger.error(f"[{session_id}] Error saving scene state: {e_set_scene}", exc_info=True)
-                    else: self.logger.error(f"[{session_id}] Unified state assessment returned invalid data."); scene_changed_flag = False
-                except Exception as e_assess: self.logger.error(f"[{session_id}] Exception during unified state assessment call: {e_assess}", exc_info=True); scene_changed_flag = False
-            elif not self._unified_state_func: self.logger.error(f"[{session_id}] Skipping state assessment: Unified state function unavailable."); scene_changed_flag = False
-            elif not isinstance(final_result, str): self.logger.debug(f"[{session_id}] Skipping state assessment: Final result was not string."); scene_changed_flag = False
+            # --- STAGE 2: Post-Turn State Assessment (Finalization) ---
+            final_confirmed_state_dict = None
+            narrative_response_text = final_result if isinstance(final_result, str) else None
 
+            if narrative_response_text and self._unified_state_func:
+                self.logger.info(f"[{session_id}] Performing post-turn state finalization assessment...")
+                await self._emit_status(event_emitter, session_id, "Status: Finalizing state assessment...", done=False)
+                try:
+                    # Use the same LLM config
+                    state_assess_llm_config = { "url": getattr(self.config, 'event_hint_llm_api_url', None), "key": getattr(self.config, 'event_hint_llm_api_key', None), "temp": getattr(self.config, 'state_assess_llm_temperature', 0.3), "prompt_template": DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT }
+                    if not state_assess_llm_config["url"] or not state_assess_llm_config["key"]:
+                        self.logger.error(f"[{session_id}] Post-turn State Assessment LLM URL/Key missing. Skipping finalization."); final_confirmed_state_dict = None
+                    else:
+                        # Call with ACTUAL final response and INITIAL previous state
+                        final_confirmed_state_dict = await self._unified_state_func(
+                            session_id=session_id,
+                            previous_world_state=initial_world_state_dict, # Use state from START of turn
+                            previous_scene_state=initial_scene_state_dict, # Use state from START of turn
+                            current_user_query=latest_user_query_str,
+                            assistant_response_text=narrative_response_text, # Use ACTUAL final response
+                            history_messages=current_active_history,
+                            llm_call_func=self._async_llm_call_wrapper,
+                            state_assessment_llm_config=state_assess_llm_config,
+                            logger_instance=self.logger,
+                            event_emitter=event_emitter,
+                            weather_proposal=generated_weather_proposal # Pass proposal again for final check
+                        )
+                        if final_confirmed_state_dict and isinstance(final_confirmed_state_dict, dict):
+                             self.logger.info(f"[{session_id}] Post-turn state finalization assessment completed.")
+                        else:
+                             self.logger.error(f"[{session_id}] Post-turn state finalization returned invalid data.")
+                             final_confirmed_state_dict = None # Ensure it's None if failed
+
+                except Exception as e_post_assess:
+                    self.logger.error(f"[{session_id}] Exception during post-turn state finalization call: {e_post_assess}", exc_info=True)
+                    final_confirmed_state_dict = None
+
+            elif not self._unified_state_func: self.logger.error(f"[{session_id}] Skipping post-turn state finalization: Unified state function unavailable.")
+            elif not narrative_response_text: self.logger.debug(f"[{session_id}] Skipping post-turn state finalization: Final result was not string (LLM call likely disabled).")
+
+
+            # --- Update Orchestrator State & Save FINAL Confirmed State ---
+            # Use the final confirmed state if available, otherwise fallback to pre-assessed, else initial
+            if final_confirmed_state_dict:
+                self.logger.debug(f"[{session_id}] Using final confirmed state for saving and status.")
+                final_world_state = {k: final_confirmed_state_dict.get(f"new_{k}", initial_world_state_dict[k]) for k in ["day", "time_of_day", "weather", "season"]}
+                final_scene_state = {
+                    "keywords": final_confirmed_state_dict.get("new_scene_keywords", initial_scene_state_dict["keywords"]),
+                    "description": final_confirmed_state_dict.get("new_scene_description", initial_scene_state_dict["description"])
+                }
+                final_scene_changed_flag = final_confirmed_state_dict.get("scene_changed_flag", False)
+            elif pre_assessed_state_dict:
+                self.logger.warning(f"[{session_id}] Post-turn finalization failed or skipped. Using pre-assessed state for saving/status.")
+                final_world_state = pre_assessed_world_state_for_context # Already extracted
+                final_scene_state = pre_assessed_scene_state_for_context # Already extracted
+                final_scene_changed_flag = pre_assessed_state_dict.get("scene_changed_flag", False) # Use flag from pre-assessment
+            else:
+                self.logger.warning(f"[{session_id}] Both state assessments failed or skipped. Using initial state. State will not be saved.")
+                final_world_state = initial_world_state_dict
+                final_scene_state = initial_scene_state_dict
+                final_scene_changed_flag = False # Assume no change if assessment failed
+
+            # Determine if final state needs saving
+            world_state_changed_final = final_world_state != initial_world_state_dict
+            scene_state_changed_final = final_scene_changed_flag # Use the flag from the chosen final state dict
+
+            # Save FINAL World State
+            if world_state_changed_final and self.sqlite_cursor and self._set_world_state_db_func:
+                await self._emit_status(event_emitter, session_id, "Status: Saving final world state...", done=False)
+                try:
+                    update_success = await self._set_world_state_db_func( self.sqlite_cursor, session_id, final_world_state["season"], final_world_state["weather"], final_world_state["day"], final_world_state["time_of_day"] )
+                    if update_success: self.logger.info(f"[{session_id}] Final world state successfully saved: {final_world_state}")
+                    else: self.logger.error(f"[{session_id}] Failed to save final world state.")
+                except Exception as e_set_world: self.logger.error(f"[{session_id}] Error saving final world state: {e_set_world}", exc_info=True)
+            elif not world_state_changed_final:
+                 self.logger.debug(f"[{session_id}] No final world state change detected. Skipping save.")
+
+            # Save FINAL Scene State
+            if scene_state_changed_final and self.sqlite_cursor and self._set_scene_state_db_func:
+                await self._emit_status(event_emitter, session_id, "Status: Saving final scene state...", done=False)
+                try:
+                    kw_json_to_save = json.dumps(final_scene_state["keywords"])
+                    update_success = await self._set_scene_state_db_func( self.sqlite_cursor, session_id, kw_json_to_save, final_scene_state["description"] )
+                    if update_success: self.logger.info(f"[{session_id}] Final scene state successfully saved. Desc len: {len(final_scene_state['description'])}")
+                    else: self.logger.error(f"[{session_id}] Failed to save final scene state.")
+                except Exception as e_set_scene: self.logger.error(f"[{session_id}] Error saving final scene state: {e_set_scene}", exc_info=True)
+            elif not scene_state_changed_final:
+                 self.logger.debug(f"[{session_id}] No final scene state change detected. Skipping save.")
 
             # --- Post-Turn Inventory Update ---
             if inventory_enabled and _ORCH_INVENTORY_MODULE_AVAILABLE and self._update_inventories_func:
                 inventory_update_completed = True
-                if isinstance(final_result, str):
+                if narrative_response_text: # Only run if we got a final response string
                     self.logger.debug(f"[{session_id}] Performing post-turn inventory update...")
                     await self._emit_status(event_emitter, session_id, "Status: Updating inventory state...", done=False)
                     inv_llm_url = getattr(self.config, 'inv_llm_api_url', None); inv_llm_key = getattr(self.config, 'inv_llm_api_key', None);
@@ -1020,7 +1107,7 @@ class SessionPipeOrchestrator:
                     else:
                         inv_llm_config = {"url": inv_llm_url, "key": inv_llm_key, "temp": getattr(self.config, 'inv_llm_temperature', 0.3), "prompt_template": inv_llm_prompt_template}
                         history_for_inv_update_list = self._get_recent_turns_func(current_active_history, 4, exclude_last=False); history_for_inv_update_str = self._format_history_func(history_for_inv_update_list)
-                        inv_prompt_text = format_inventory_update_prompt( main_llm_response=final_result, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str, template=inv_llm_config['prompt_template'])
+                        inv_prompt_text = format_inventory_update_prompt( main_llm_response=narrative_response_text, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str, template=inv_llm_config['prompt_template'])
                         if inv_prompt_text and not inv_prompt_text.startswith("[Error") and self._count_tokens_func and self._tokenizer:
                             try: inventory_prompt_tokens = self._count_tokens_func(inv_prompt_text, self._tokenizer); self.logger.debug(f"[{session_id}] Calculated Inventory Prompt Tokens: {inventory_prompt_tokens}")
                             except Exception as e_inv_tok: inventory_prompt_tokens = -1
@@ -1031,7 +1118,7 @@ class SessionPipeOrchestrator:
                              try:
                                  new_cursor = self.sqlite_cursor.connection.cursor()
                                  if getattr(self.config, 'debug_log_final_payload', False): self._orchestrator_log_debug_inventory_llm(session_id, inv_prompt_text, is_prompt=True)
-                                 update_success = await self._update_inventories_func( cursor=new_cursor, session_id=session_id, main_llm_response=final_result, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str, llm_call_func=self._async_llm_call_wrapper, db_get_inventory_func=get_character_inventory_data, db_update_inventory_func=add_or_update_character_inventory, inventory_llm_config=inv_llm_config,)
+                                 update_success = await self._update_inventories_func( cursor=new_cursor, session_id=session_id, main_llm_response=narrative_response_text, user_query=latest_user_query_str, recent_history_str=history_for_inv_update_str, llm_call_func=self._async_llm_call_wrapper, db_get_inventory_func=get_character_inventory_data, db_update_inventory_func=add_or_update_character_inventory, inventory_llm_config=inv_llm_config,)
                                  inventory_update_success_flag = update_success
                                  if update_success: self.logger.info(f"[{session_id}] Post-turn inventory update successful.")
                                  else: self.logger.warning(f"[{session_id}] Post-turn inventory update function returned False.")
@@ -1049,7 +1136,6 @@ class SessionPipeOrchestrator:
 
 
             # --- Final Status Calculation and Emission ---
-            world_state_status_str = f"| World: D{self.current_day} {self.current_time_of_day} {self.current_weather} {self.current_season}"
             inv_stat_indicator = "Inv=OFF";
             if inventory_enabled:
                  if not _ORCH_INVENTORY_MODULE_AVAILABLE: inv_stat_indicator = "Inv=MISSING"
@@ -1063,9 +1149,10 @@ class SessionPipeOrchestrator:
                  t0_dialogue_tokens=t0_dialogue_tokens,
                  inventory_prompt_tokens=inventory_prompt_tokens,
                  final_llm_payload_contents=final_llm_payload_contents,
-                 scene_changed_flag=scene_changed_flag,
-                 world_state_status_str=world_state_status_str,
-                 context_status_info=context_status_info, # Pass the dict here
+                 final_confirmed_world_state=final_world_state, # Pass FINAL state
+                 final_confirmed_scene_state=final_scene_state, # Pass FINAL state
+                 final_scene_changed_flag=scene_state_changed_final, # Pass FINAL flag
+                 context_status_info=context_status_info,
                  session_process_owi_rag=bool(getattr(user_valves, 'process_owi_rag', True)),
             )
 
@@ -1085,7 +1172,7 @@ class SessionPipeOrchestrator:
             raise
         except ValueError as ve:
             session_id_for_log = session_id if 'session_id' in locals() else 'unknown'
-            self.logger.error(f"[{session_id_for_log}] Orchestrator ValueError in process_turn: {ve}", exc_info=True) # Added exc_info
+            self.logger.error(f"[{session_id_for_log}] Orchestrator ValueError in process_turn: {ve}", exc_info=True)
             try: await self._emit_status(event_emitter, session_id_for_log, f"ERROR: {ve}", done=True)
             except Exception: pass
             return {"error": f"Orchestrator failed: {ve}", "status_code": 500}
@@ -1097,5 +1184,5 @@ class SessionPipeOrchestrator:
             # Return a dict for OWI error handling
             return {"error": f"Orchestrator failed: {type(e_orch).__name__}", "status_code": 500}
 
-# [[END CORRECTED orchestration.py - Restore Helper Logic]]
+# [[END MODIFIED orchestration.py - Two-Stage State Assessment]]
 # === END OF FILE i4_llm_agent/orchestration.py ===
