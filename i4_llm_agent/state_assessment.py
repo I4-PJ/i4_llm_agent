@@ -24,11 +24,14 @@ PREVIOUS_STATE_PLACEHOLDER = "{previous_state_json}"
 CURRENT_QUERY_PLACEHOLDER = "{current_user_query}"
 ASSISTANT_RESPONSE_PLACEHOLDER = "{current_assistant_response}"
 HISTORY_CONTEXT_PLACEHOLDER = "{recent_history_str}"
+# === NEW PLACEHOLDER ===
+WEATHER_PROPOSAL_PLACEHOLDER = "{weather_proposal_text}"
 
+# === MODIFIED PROMPT (v2 - Includes Weather Proposal Input) ===
 DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = f"""
 [[SYSTEM ROLE: Unified World & Scene State Assessor]]
 
-**Objective:** Analyze the complete context of the **Current Turn** (Previous State, User Input, Assistant Response) to determine the definitive **New State** (World settings and Scene description) that should be carried forward to the *next* turn. Output ONLY a single, valid JSON object containing this complete new state.
+**Objective:** Analyze the complete context of the **Current Turn** (Previous State, User Input, Assistant Response, Weather Proposal) to determine the definitive **New State** (World settings and Scene description) that should be carried forward to the *next* turn. Output ONLY a single, valid JSON object containing this complete new state.
 
 **Inputs:**
 
@@ -53,26 +56,28 @@ DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = f"""
     {HISTORY_CONTEXT_PLACEHOLDER}
     ```
 
+5.  **Weather Proposal (From Hint System):** A suggestion for the next likely weather state.
+    ```text
+    {WEATHER_PROPOSAL_PLACEHOLDER}
+    ```
+    *(Format: "Proposal: From [Previous] to [New]" or "[No Proposal Provided]")*
+
 **Instructions:**
 
-1.  **Analyze Full Turn:** Consider the `Previous State`, `Current User Input`, and `Current Assistant Response` together to understand what happened during this turn.
-2.  **Prioritize User Commands:** If the `Current User Input` contains an explicit `STORY:` command dictating a state change (e.g., "STORY: Skip two days", "STORY: Morning arrived"), that command generally takes precedence for determining large jumps in time or explicit scene shifts, *even if* the `Current Assistant Response` doesn't fully narrate the transition. However, use the `Current Assistant Response` for details *within* the turn or if no overriding user command exists.
+1.  **Analyze Full Turn:** Consider all inputs together to understand what happened during this turn.
+2.  **Prioritize User Commands:** Explicit `STORY:` commands in the `Current User Input` generally take precedence for dictating state changes (especially time/scene shifts).
 3.  **Determine New World State:**
-    *   **`new_day` & `new_time_of_day`**: Calculate the day and time based on the `Previous State` and any progression indicated in the `Current User Input` (commands) or `Current Assistant Response` (narrative like "dawn", "afternoon", "next day", "slept and woke up"). Increment the day number appropriately. If the day increments, the time typically resets to "Morning" unless specified otherwise in the input/response. If no change is indicated, return the `previous_day` and `previous_time_of_day`.
-    *   **`new_weather`**: Determine the weather. Primarily use the `Current Assistant Response` for descriptions ("rain started", "sun came out"). If the response describes weather consistent with the `previous_weather`, keep it. If the response clearly describes *new* weather, update it. If no weather is mentioned, generally keep the `previous_weather`. Do not infer weather changes solely based on time of day (e.g., don't assume night is stormy).
-    *   **`new_season`**: Keep the `previous_season` unless the narrative or user command explicitly indicates a significant time jump spanning seasons (e.g., "a year passed", "winter set in").
+    *   **`new_day` & `new_time_of_day`**: Calculate based on `Previous State` and progression indicated in `Current User Input` (commands) or `Current Assistant Response` (narrative). Increment day if needed (usually resets time to Morning). If no change indicated, return previous values.
+    *   **`new_weather`**:
+        *   **Prioritize the `Weather Proposal`:** If a proposal is provided (not "[No Proposal Provided]"), use its suggested `new_weather` value **UNLESS** the `Current User Input` (e.g., `STORY: The sun came out`) or the `Current Assistant Response` *explicitly and strongly contradicts* it (e.g., proposal is "Rainy" but response says "clear skies").
+        *   If no proposal is provided OR if the proposal is contradicted by explicit commands/narrative, determine the weather based primarily on the `Current Assistant Response` descriptions.
+        *   If the response is consistent with `previous_weather` and no proposal/command contradicts, keep `previous_weather`.
+        *   If no weather is mentioned anywhere and no proposal exists, generally keep `previous_weather`.
+    *   **`new_season`**: Keep `previous_season` unless explicitly changed by command or long narrative time jump.
 4.  **Determine New Scene State:**
-    *   **Assess Change:** Compare the events and descriptions in the `Current User Input` and `Current Assistant Response` against the `previous_scene_description` and `previous_scene_keywords`. Has the effective location, core environmental features, or fundamental atmosphere **fundamentally changed**?
-        *   Examples of **Change:** Explicit user command (`STORY: They enter the cave`), narrative showing movement to a new distinct location (clearing -> path, path -> riverbank, forest -> town street), environment drastically altering (calm -> battlefield, building fire).
-        *   Examples of **No Change:** Dialogue continuation, minor actions within the same described location, mood shifts without location change, weather starting/stopping in the same location.
-    *   **If Scene Changed:**
-        *   Generate a **new**, brief (1-3 sentences) **static description** (`new_scene_description`) of the *new* scene's environment (location type, key features, static sensory details, atmosphere). **DO NOT narrate actions, dialogue, or transitions in the description.**
-        *   Generate 3-5 **new** keywords (`new_scene_keywords`) capturing the essence of the *new* scene.
-        *   Set `scene_changed_flag: true`.
-    *   **If No Scene Change:**
-        *   Return the **exact** `previous_scene_description` as `new_scene_description`.
-        *   Return the **exact** `previous_scene_keywords` as `new_scene_keywords`.
-        *   Set `scene_changed_flag: false`.
+    *   **Assess Change:** Compare `Current User Input` / `Current Assistant Response` against `previous_scene_description` / `previous_scene_keywords`. Has the location/environment fundamentally changed?
+    *   **If Scene Changed:** Generate new `new_scene_description` (1-3 static sentences, no actions) and new `new_scene_keywords` (3-5 keywords). Set `scene_changed_flag: true`.
+    *   **If No Scene Change:** Return exact `previous_scene_description` and `previous_scene_keywords`. Set `scene_changed_flag: false`.
 5.  **Output Format:** Respond ONLY with a single, valid JSON object containing the complete new state. Ensure all keys listed below are present.
 
     ```json
@@ -89,9 +94,11 @@ DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = f"""
 
 **JSON Output Only:**
 """
+# === END MODIFIED PROMPT ===
 
 # --- Helper Function ---
 
+# === MODIFIED HELPER (v2 - Accepts and formats weather_proposal) ===
 def _format_unified_state_assessment_prompt(
     template: str,
     previous_world_state: Dict[str, Any],
@@ -99,6 +106,7 @@ def _format_unified_state_assessment_prompt(
     current_user_query: str,
     current_assistant_response: str,
     recent_history_str: str,
+    weather_proposal: Optional[Dict[str, Optional[str]]] = None # <<< NEW PARAMETER
 ) -> str:
     """Formats the prompt for the Unified State Assessment LLM."""
     func_logger = logging.getLogger(__name__ + '._format_unified_state_assessment_prompt')
@@ -121,6 +129,18 @@ def _format_unified_state_assessment_prompt(
     except Exception as e_ser:
         func_logger.error(f"Failed to serialize previous state to JSON: {e_ser}")
 
+    # Format Weather Proposal for prompt
+    proposal_text = "[No Proposal Provided]"
+    if isinstance(weather_proposal, dict) and \
+       "previous_weather" in weather_proposal and \
+       "new_weather" in weather_proposal:
+        prev_w = weather_proposal.get("previous_weather") or "Unknown"
+        new_w = weather_proposal.get("new_weather") or "Unknown"
+        if new_w != prev_w: # Only format if there's a proposed change
+            proposal_text = f"Proposal: From '{prev_w}' to '{new_w}'"
+        else:
+            proposal_text = f"Proposal: No change suggested (Remain '{prev_w}')"
+
     # Basic safety for other inputs
     safe_user_query = str(current_user_query)
     safe_assistant_response = str(current_assistant_response)
@@ -132,11 +152,14 @@ def _format_unified_state_assessment_prompt(
         formatted_prompt = formatted_prompt.replace(CURRENT_QUERY_PLACEHOLDER, safe_user_query)
         formatted_prompt = formatted_prompt.replace(ASSISTANT_RESPONSE_PLACEHOLDER, safe_assistant_response)
         formatted_prompt = formatted_prompt.replace(HISTORY_CONTEXT_PLACEHOLDER, safe_history)
+        # === NEW REPLACEMENT ===
+        formatted_prompt = formatted_prompt.replace(WEATHER_PROPOSAL_PLACEHOLDER, proposal_text)
 
         # Check if any placeholders might still exist (simple check)
         if any(ph in formatted_prompt for ph in [
             PREVIOUS_STATE_PLACEHOLDER, CURRENT_QUERY_PLACEHOLDER,
-            ASSISTANT_RESPONSE_PLACEHOLDER, HISTORY_CONTEXT_PLACEHOLDER
+            ASSISTANT_RESPONSE_PLACEHOLDER, HISTORY_CONTEXT_PLACEHOLDER,
+            WEATHER_PROPOSAL_PLACEHOLDER # Check new one too
         ]):
             func_logger.warning(f"Potential placeholder missed during .replace() formatting for unified state prompt.")
 
@@ -144,9 +167,11 @@ def _format_unified_state_assessment_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting unified state assessment prompt: {e}", exc_info=True)
         return f"[Error formatting unified state assessment prompt: {type(e).__name__}]"
+# === END MODIFIED HELPER ===
 
 # --- Core Logic ---
 
+# === MODIFIED CORE FUNCTION (v2 - Accepts weather_proposal) ===
 async def update_state_via_full_turn_assessment(
     session_id: str,
     previous_world_state: Dict[str, Any],
@@ -157,13 +182,14 @@ async def update_state_via_full_turn_assessment(
     llm_call_func: Callable[..., Coroutine[Any, Any, Tuple[bool, Union[str, Dict]]]],
     state_assessment_llm_config: Dict[str, Any], # Needs URL, Key, Temp etc.
     logger_instance: Optional[logging.Logger] = None,
-    event_emitter: Optional[Callable] = None # For potential status updates
+    event_emitter: Optional[Callable] = None, # For potential status updates
+    weather_proposal: Optional[Dict[str, Optional[str]]] = None # <<< NEW PARAMETER
     # Add debug_path_getter if needed for LLM call logging
 ) -> Dict[str, Any]:
     """
     Uses a single LLM call to assess the full turn context (previous state,
-    user query, assistant response) and determine the complete new world
-    and scene state.
+    user query, assistant response, **and weather proposal**) to determine
+    the complete new world and scene state.
 
     Args:
         session_id: The session ID for logging.
@@ -176,9 +202,10 @@ async def update_state_via_full_turn_assessment(
         state_assessment_llm_config: Dict containing 'url', 'key', 'temp', 'prompt_template'
                                      for the State Assessment LLM.
                                      ***Ensure this contains the desired LLM endpoint/key***
-                                     ***(e.g., from Event Hint config as requested).***
         logger_instance: Optional logger instance.
         event_emitter: Optional callable for status updates.
+        weather_proposal: Optional dictionary containing the weather proposal
+                          from the hint system (e.g., {"previous_weather": ..., "new_weather": ...}).
 
     Returns:
         A dictionary containing the complete new state, matching the structure
@@ -208,8 +235,9 @@ async def update_state_via_full_turn_assessment(
     prompt_template = state_assessment_llm_config.get('prompt_template', DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT)
     if not prompt_template or not isinstance(prompt_template, str):
          prompt_template = DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT
-         func_logger.warning(f"[{caller_info}] Invalid prompt template in config, using default unified assessment prompt.")
+         func_logger.warning(f"[{caller_info}] Invalid prompt template in config, using default unified assessment prompt (v2 with weather proposal).")
 
+    # === MODIFIED: Pass weather_proposal to formatter ===
     prompt_text = _format_unified_state_assessment_prompt(
         template=prompt_template,
         previous_world_state=previous_world_state,
@@ -217,6 +245,7 @@ async def update_state_via_full_turn_assessment(
         current_user_query=current_user_query,
         current_assistant_response=assistant_response_text,
         recent_history_str=recent_history_str,
+        weather_proposal=weather_proposal # Pass the proposal here
     )
 
     if not prompt_text or prompt_text.startswith("[Error:"):
@@ -238,9 +267,10 @@ async def update_state_via_full_turn_assessment(
 
     # --- LLM Call ---
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-    func_logger.info(f"[{caller_info}] Calling Unified State Assessment LLM...")
+    func_logger.info(f"[{caller_info}] Calling Unified State Assessment LLM (v2 prompt with weather proposal)...")
     # Optional: Add debug logging for the prompt here if needed
-    # _log_debug(prompt_text, is_input=True, ...)
+    func_logger.debug(f"[{caller_info}] State Assessment Prompt (first 500 chars):\n-------\n{prompt_text[:500]}\n-------")
+
 
     success = False
     response_or_error = "LLM Call Not Attempted"
@@ -262,7 +292,8 @@ async def update_state_via_full_turn_assessment(
     if success and isinstance(response_or_error, str):
         llm_output_text = response_or_error.strip()
         # Optional: Add debug logging for the raw response here
-        # _log_debug(llm_output_text, is_input=False, ...)
+        func_logger.debug(f"[{caller_info}] State Assessment Raw Output:\n{llm_output_text}")
+
 
         try:
             # Basic cleanup - remove potential markdown fences
@@ -296,15 +327,23 @@ async def update_state_via_full_turn_assessment(
                         func_logger.warning(f"[{caller_info}] Parsed JSON missing required key: '{key}'. Output: {llm_output_text[:200]}...")
                         valid = False
                         break
-                    if not isinstance(parsed_json[key], expected_type):
-                        # Special case for keywords list - check elements
+                    # Allow None values temporarily during parsing if LLM outputs null, but expect specific types
+                    current_value = parsed_json[key]
+                    if current_value is None:
+                        # Allow None for description/keywords temporarily if LLM fails, handle later? No, prompt requires values.
+                        func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' has None value, expected {expected_type.__name__}. Output: {llm_output_text[:200]}...")
+                        valid = False
+                        break
+
+                    if not isinstance(current_value, expected_type):
+                         # Special case for keywords list - check elements
                         if key == "new_scene_keywords" and expected_type == list:
-                            if not all(isinstance(item, str) for item in parsed_json[key]):
-                                func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' contains non-string elements. Value: {parsed_json[key]}. Output: {llm_output_text[:200]}...")
+                            if not all(isinstance(item, str) for item in current_value):
+                                func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' contains non-string elements. Value: {current_value}. Output: {llm_output_text[:200]}...")
                                 valid = False
                                 break
                         else:
-                             func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' has wrong type. Expected {expected_type.__name__}, got {type(parsed_json[key]).__name__}. Value: {parsed_json[key]}. Output: {llm_output_text[:200]}...")
+                             func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' has wrong type. Expected {expected_type.__name__}, got {type(current_value).__name__}. Value: {current_value}. Output: {llm_output_text[:200]}...")
                              valid = False
                              break
 

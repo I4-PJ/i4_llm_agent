@@ -121,7 +121,8 @@ except ImportError as e_state_assess:
         session_id: str, previous_world_state: Dict[str, Any], previous_scene_state: Dict[str, Any],
         current_user_query: str, assistant_response_text: str, history_messages: List[Dict],
         llm_call_func: Callable, state_assessment_llm_config: Dict[str, Any],
-        logger_instance: Optional[logging.Logger] = None, event_emitter: Optional[Callable] = None
+        logger_instance: Optional[logging.Logger] = None, event_emitter: Optional[Callable] = None,
+        weather_proposal: Optional[Dict[str, Optional[str]]] = None # Add new param here too
     ) -> Dict[str, Any]:
         lg = logger_instance or logging.getLogger(__name__)
         lg.error(f"[{session_id}] Executing FALLBACK update_state_via_full_turn_assessment due to import error.")
@@ -931,7 +932,7 @@ class SessionPipeOrchestrator:
             return {"messages": final_llm_payload_contents} # Return the dict for OWI
 
 
-    # === MAIN PROCESSING METHOD (MODIFIED Logging) ===
+    # === MAIN PROCESSING METHOD (MODIFIED to pass weather proposal) ===
     async def process_turn(
         self,
         session_id: str,
@@ -948,6 +949,7 @@ class SessionPipeOrchestrator:
         and a unified LLM call for World and Scene state updates.
         Uses library default prompts for Summarizer and RAG Query.
         Injects 'period_setting' from user_valves into Hint and Final LLM prompts.
+        ***Passes generated weather proposal to the state assessment function.***
         """
         pipe_entry_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Orchestrator process_turn [{session_id}]: Started at {pipe_entry_time_iso} (Regen Flag: {is_regeneration_heuristic})") # Keep INFO
@@ -965,7 +967,9 @@ class SessionPipeOrchestrator:
         # Initialize state variables
         summarization_performed = False; new_t1_summary_text = None; summarization_prompt_tokens = -1; summarization_output_tokens = -1; t1_retrieved_count = 0; t2_retrieved_count = 0; retrieved_rag_summaries = []; cache_update_performed = False; cache_update_skipped = False; final_context_selection_performed = False; stateless_refinement_performed = False; initial_owi_context_tokens = -1; refined_context_tokens = -1; t0_dialogue_tokens = -1; final_payload_tokens = -1; inventory_prompt_tokens = -1; formatted_inventory_string_for_status = ""; final_result: Optional[OrchestratorResult] = None; final_llm_payload_contents: Optional[List[Dict]] = None; inventory_update_completed = False; inventory_update_success_flag = False;
         generated_event_hint_text: Optional[str] = None
-        # REMOVED generated_weather_proposal - now part of unified state
+        # === NEW: Variable to hold weather proposal ===
+        generated_weather_proposal: Dict[str, Optional[str]] = {}
+        # === END NEW ===
         # REMOVED effective_scene_description initialization - now part of unified state
         scene_changed_flag = False # Flag from the new state assessment
 
@@ -1052,10 +1056,13 @@ class SessionPipeOrchestrator:
             recent_t1_summaries, t1_retrieved_count = await self._get_t1_summaries(session_id)
             retrieved_rag_summaries, t2_retrieved_count = await self._get_t2_rag_results( session_id, history_for_processing, latest_user_query_str, embedding_func, chroma_embed_wrapper, event_emitter )
 
-            # --- Generate Hint (Weather Proposal is handled by unified state update now) ---
+            # --- Generate Hint AND Weather Proposal ---
             # Use the *loaded* world/scene state for hint generation context
             hint_background_context = current_scene_state_dict.get("description", "")
             hint_background_context += f"\n(Day: {self.current_day}, Time: {self.current_time_of_day}, Weather: {self.current_weather})"
+
+            # Reset proposal for this turn
+            generated_weather_proposal = {}
 
             if event_hints_enabled and self._generate_hint_func:
                 self.logger.debug(f"[{session_id}] Attempting event hint generation (Period: '{session_period_setting}')...") # Changed INFO to DEBUG
@@ -1066,8 +1073,8 @@ class SessionPipeOrchestrator:
                      self.logger.warning(f"[{session_id}] Skipping hint: Config incomplete (event_hint_llm_...).")
                 else:
                     try:
-                        # generate_event_hint now only returns hint text, proposal is removed
-                        generated_event_hint_text, _ = await self._generate_hint_func( # Ignore proposal return
+                        # === MODIFIED: Capture weather proposal ===
+                        generated_event_hint_text, generated_weather_proposal = await self._generate_hint_func(
                             config=self.config,
                             history_messages=current_active_history,
                             background_context=hint_background_context,
@@ -1079,14 +1086,22 @@ class SessionPipeOrchestrator:
                             session_id=session_id,
                             period_setting=session_period_setting
                         )
+                        # === END MODIFIED ===
                         if generated_event_hint_text:
                             self.logger.info(f"[{session_id}] Event Hint Generated: '{generated_event_hint_text[:80]}...'") # Keep INFO
                         else:
                             self.logger.info(f"[{session_id}] No event hint suggested.") # Keep INFO
+                        # Log the proposal if received
+                        if generated_weather_proposal and generated_weather_proposal.get("new_weather"):
+                            self.logger.info(f"[{session_id}] Weather Proposal Received: From '{generated_weather_proposal.get('previous_weather')}' to '{generated_weather_proposal.get('new_weather')}'") # Keep INFO
+                        else:
+                             self.logger.debug(f"[{session_id}] No valid weather proposal received from hint system.")
+
                         await self._emit_status(event_emitter, session_id, "Status: Hint generation complete.")
                     except Exception as e_hint_gen:
                         self.logger.error(f"[{session_id}] Error during hint generation call: {e_hint_gen}", exc_info=True);
                         generated_event_hint_text = None
+                        generated_weather_proposal = {} # Reset on error
             elif event_hints_enabled and not self._generate_hint_func: self.logger.error(f"[{session_id}] Skipping hint: Hint function unavailable.")
             else: self.logger.debug(f"[{session_id}] Event Hints disabled. Skipping.")
 
@@ -1099,6 +1114,7 @@ class SessionPipeOrchestrator:
             # --- Combine Final Background Context ---
             # Use the *loaded* world/scene state for constructing the main prompt context
             # This state will be updated *after* the main LLM call
+            # === MODIFIED: No longer includes weather proposal here ===
             combined_context_string = self._combine_context_func(
                 final_selected_context=refined_owi_cache_context,
                 t1_summaries=recent_t1_summaries,
@@ -1109,8 +1125,9 @@ class SessionPipeOrchestrator:
                 current_time_of_day=self.current_time_of_day,
                 current_season=self.current_season,
                 current_weather=self.current_weather,
-                weather_proposal=None # Weather proposal no longer generated separately
+                weather_proposal=None # Weather proposal is now handled by state assessment
             )
+            # === END MODIFIED ===
 
             # --- Construct Final Payload ---
             await self._emit_status(event_emitter, session_id, "Status: Constructing final request...")
@@ -1150,18 +1167,19 @@ class SessionPipeOrchestrator:
 
                 try:
                     # Define config for the state assessment LLM (fetch from main config)
-                    # TODO: Define appropriate config keys in your main config object
+                    # Use Event Hint LLM settings as requested
                     state_assess_llm_config = {
-                        "url": getattr(self.config, 'state_assess_llm_api_url', getattr(self.config, 'inv_llm_api_url', None)), # Example fallback
-                        "key": getattr(self.config, 'state_assess_llm_api_key', getattr(self.config, 'inv_llm_api_key', None)), # Example fallback
-                        "temp": getattr(self.config, 'state_assess_llm_temperature', 0.3), # Example default
+                        "url": getattr(self.config, 'event_hint_llm_api_url', None),
+                        "key": getattr(self.config, 'event_hint_llm_api_key', None),
+                        "temp": getattr(self.config, 'state_assess_llm_temperature', 0.3), # Keep separate temp? Or use hint temp? Let's keep separate for now.
                         "prompt_template": DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT # Use default from state_assessment.py
                     }
                     if not state_assess_llm_config["url"] or not state_assess_llm_config["key"]:
-                        self.logger.error(f"[{session_id}] State Assessment LLM URL/Key missing in config. Skipping state update.")
+                        self.logger.error(f"[{session_id}] State Assessment LLM URL/Key missing in config (using event hint settings). Skipping state update.")
                         new_state_dict = None # Ensure state update is skipped
                     else:
                         # Call the imported unified state assessment function
+                        # === MODIFIED: Pass weather_proposal ===
                         new_state_dict = await self._unified_state_func(
                             session_id=session_id,
                             previous_world_state=previous_world_state_for_assessment,
@@ -1172,9 +1190,11 @@ class SessionPipeOrchestrator:
                             llm_call_func=self._async_llm_call_wrapper, # Pass the LLM wrapper
                             state_assessment_llm_config=state_assess_llm_config,
                             logger_instance=self.logger,
-                            event_emitter=event_emitter
+                            event_emitter=event_emitter,
+                            weather_proposal=generated_weather_proposal # Pass the captured proposal
                             # Pass debug_path_getter if implemented in state_assessment.py
                         )
+                        # === END MODIFIED ===
 
                     if new_state_dict and isinstance(new_state_dict, dict):
                         # Update orchestrator's internal state variables
