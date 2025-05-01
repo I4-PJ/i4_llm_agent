@@ -872,7 +872,7 @@ def format_memory_aging_prompt(t1_batch_text: str, template: Optional[str] = Non
         return f"[Error formatting memory aging prompt: {type(e).__name__}]"
 
 
-# --- Function: Combine Background Context (MODIFIED for Aged Summaries & Sorting) ---
+# --- Function: Combine Background Context (MODIFIED for Aged Summaries & T1 Sorting Change) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[Tuple[str, Dict[str, Any]]]], # Expecting tuples with metadata
@@ -892,12 +892,13 @@ def combine_background_context(
     suitable for injection into the final LLM prompt, following a tiered
     chronological order: World/Scene/Inv -> Selected -> Aged -> T1 -> T2.
 
-    Sorts Aged and T1 summaries based on metadata.
+    Sorts Aged summaries Newest First (most recent recap first).
+    Sorts T1 summaries Oldest First (chronological dialogue flow). <<< MODIFIED
 
     Args:
         final_selected_context: Context from OWI/Cache/Stateless refinement.
         t1_summaries: List of (text, metadata_dict) tuples for recent T1 summaries.
-        aged_summaries: List of (text, metadata_dict) tuples for recent Aged summaries. <<< NEW
+        aged_summaries: List of (text, metadata_dict) tuples for recent Aged summaries.
         t2_rag_results: List of retrieved Tier 2 RAG result strings.
         scene_description: The description text for the current scene.
         inventory_context: Formatted string of current character inventories.
@@ -960,7 +961,7 @@ def combine_background_context(
     aged_label = labels.get("aged", "Context Recaps (Aged)")
     valid_aged_summaries = []
     if aged_summaries and isinstance(aged_summaries, list):
-        # Sort by creation timestamp DESC (most recent first)
+        # Sort by creation timestamp DESC (most recent recap first)
         # Fallback to 0 if key is missing
         try:
             aged_summaries.sort(key=lambda item: item[1].get('creation_timestamp_utc', 0), reverse=True)
@@ -979,10 +980,11 @@ def combine_background_context(
     t1_label = labels.get("t1", "Recent Dialogue Summaries (T1)")
     valid_t1_summaries = []
     if t1_summaries and isinstance(t1_summaries, list):
-         # Sort by turn_end_index DESC (most recent first)
+         # Sort by turn_end_index ASC (oldest first) <<< MODIFIED HERE
          # Fallback to -1 if key is missing
         try:
-            t1_summaries.sort(key=lambda item: item[1].get('turn_end_index', -1), reverse=True)
+            # <<< MODIFICATION: Changed reverse=True to reverse=False >>>
+            t1_summaries.sort(key=lambda item: item[1].get('turn_end_index', -1), reverse=False) # Changed to False for Oldest First
             valid_t1_summaries = [item[0].strip() for item in t1_summaries if isinstance(item, tuple) and len(item) > 0 and isinstance(item[0], str) and item[0].strip()]
         except Exception as e_sort_t1:
             func_logger.error(f"Error sorting T1 summaries: {e_sort_t1}. Using original order.")
@@ -991,7 +993,7 @@ def combine_background_context(
     if valid_t1_summaries:
         combined_t1 = separator.join(valid_t1_summaries)
         if combined_t1:
-            func_logger.debug(f"Adding {len(valid_t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}).")
+            func_logger.debug(f"Adding {len(valid_t1_summaries)} T1 summaries (Combined len: {len(combined_t1)}, Oldest First).") # Modified log
             context_parts.append(f"--- {t1_label} ---\n{combined_t1}")
 
     # --- Tier 3: Long-Term Context (T2 RAG) ---
