@@ -1,13 +1,14 @@
-# === START OF FILE script.txt ===
+# === START MODIFIED FILE: script.txt ===
 
+# [[START MODIFIED script.txt - Revert DB Name & Add Memory Aging Valves]]
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.19.4)
+title: SESSION_MEMORY PIPE (v0.20.1 - Memory Aging, Reverted DB Name)
 author: Petr Jilek & Assistant Gemini
-version: 0.19.4
-description: Adds 'period_setting' User Valve to inject setting instructions into Scene, Hint, and Final LLM prompts.
-requirements: pydantic, chromadb, i4_llm_agent>=0.1.8, tiktoken, httpx, open_webui (internal utils)
+version: 0.20.1
+description: Adds Memory Aging feature. Condenses oldest T1 summaries into Aged Summaries when count exceeds threshold. Reverted default DB name. Requires i4_llm_agent>=0.2.0.
+requirements: pydantic, chromadb, i4_llm_agent>=0.2.0, tiktoken, httpx, open_webui (internal utils)
 """
 # --- END HEADER ---
 
@@ -142,7 +143,7 @@ except ImportError as e:
 # /////////////////////////////////////////
 # /// 2.5: i4_llm_agent Library Import  ///
 # /////////////////////////////////////////
-# Requires i4_llm_agent version >= 0.1.8
+# Requires i4_llm_agent version >= 0.2.0
 try:
     from i4_llm_agent import (
         SessionManager,
@@ -150,15 +151,14 @@ try:
         initialize_sqlite_tables,
         CHROMADB_AVAILABLE as I4_AGENT_CHROMADB_FLAG,
         DIALOGUE_ROLES as I4_AGENT_DIALOGUE_ROLES,
-        # --- START IMPORT: Import specific default templates ---
+        # --- Import specific default templates ---
         DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT,
         DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT,
         DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT,
         DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE,
         DEFAULT_EVENT_HINT_TEMPLATE_TEXT,
-        DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT,
-        DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT,
-        # --- END IMPORT ---
+        DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT,
+        DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE,
     )
 
     I4_LLM_AGENT_AVAILABLE = True
@@ -175,7 +175,7 @@ except ImportError as e:
     I4_LLM_AGENT_AVAILABLE = False
     IMPORT_ERROR_DETAILS = str(e)
     logging.getLogger("SessionMemoryPipe_startup").critical(
-        f"CRITICAL: Failed import 'i4_llm_agent' (v0.1.8+ required): {e}."
+        f"CRITICAL: Failed import 'i4_llm_agent' (v0.2.0+ required): {e}."
     )
 
     class SessionManager:
@@ -196,12 +196,10 @@ except ImportError as e:
     DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = "[Default Inventory Prompt Load Failed]"
     DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = "[Default Stateless Prompt Load Failed]"
     DEFAULT_EVENT_HINT_TEMPLATE_TEXT = "[Default Event Hint Prompt Load Failed]"
-    DEFAULT_WORLD_STATE_PARSE_TEMPLATE_TEXT = (
-        "[Default World State Parse Prompt Load Failed]"
+    DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = (
+        "[Default Unified State Assessment Prompt Load Failed]"
     )
-    DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = (
-        "[Default Scene Assessment Prompt Load Failed]"
-    )
+    DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE = "[Default Memory Aging Prompt Load Failed]"
 
 
 # /////////////////////////////////////////
@@ -221,7 +219,7 @@ except ImportError:
 
 # === SECTION 3: CONSTANTS & DEFAULTS ===
 DEFAULT_LOG_DIR = r"C:\\Utils\\OpenWebUI"
-DEFAULT_LOG_FILE_NAME = "session_memory_v19_4_pipe_log.log"  # Version updated
+DEFAULT_LOG_FILE_NAME = "session_memory_v20_1_pipe_log.log"  # Version updated
 DEFAULT_LOG_LEVEL = "DEBUG"
 ENV_VAR_LOG_FILE_PATH = "SM_LOG_FILE_PATH"
 ENV_VAR_LOG_LEVEL = "SM_LOG_LEVEL"
@@ -242,15 +240,21 @@ DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT = 4000
 ENV_VAR_T0_ACTIVE_HISTORY_TOKEN_LIMIT = "SM_T0_ACTIVE_HISTORY_TOKEN_LIMIT"
 DEFAULT_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET = 2000
 ENV_VAR_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET = "SM_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET"
-DEFAULT_MAX_STORED_SUMMARY_BLOCKS = 10
+DEFAULT_MAX_STORED_SUMMARY_BLOCKS = 20
 ENV_VAR_MAX_STORED_SUMMARY_BLOCKS = "SM_MAX_STORED_SUMMARY_BLOCKS"
+
+# --- Memory Aging Config (NEW) ---
+DEFAULT_AGING_TRIGGER_THRESHOLD = 15
+ENV_VAR_AGING_TRIGGER_THRESHOLD = "SM_AGING_TRIGGER_THRESHOLD"
+DEFAULT_AGING_BATCH_SIZE = 5
+ENV_VAR_AGING_BATCH_SIZE = "SM_AGING_BATCH_SIZE"
 
 # --- Paths ---
 DEFAULT_CHROMADB_PATH = os.path.join(DEFAULT_LOG_DIR, "session_summary_t2_db")
 ENV_VAR_CHROMADB_PATH = "SM_CHROMADB_PATH"
-DEFAULT_SQLITE_DB_PATH = os.path.join(
-    DEFAULT_LOG_DIR, "session_memory_tier1_cache_inventory.db"
-)
+# <<< REVERTED DEFAULT DB NAME >>>
+DEFAULT_SQLITE_DB_NAME = "session_memory_tier1_cache_inventory.db"
+DEFAULT_SQLITE_DB_PATH = os.path.join(DEFAULT_LOG_DIR, DEFAULT_SQLITE_DB_NAME)
 ENV_VAR_SQLITE_DB_PATH = "SM_SQLITE_DB_PATH"
 
 # --- RAG / T2 Config ---
@@ -317,9 +321,9 @@ DEFAULT_EVENT_HINT_LLM_API_KEY = ""
 DEFAULT_EVENT_HINT_LLM_TEMPERATURE = 0.7
 DEFAULT_EVENT_HINT_HISTORY_COUNT = 6
 
-# --- Scene Generation Feature (Uses Event Hint LLM endpoint) ---
-DEFAULT_ENABLE_SCENE_GENERATION = False
-ENV_VAR_ENABLE_SCENE_GENERATION = "SM_ENABLE_SCENE_GENERATION"
+# --- Unified State Assessment LLM Temp (Uses Event Hint URL/Key) ---
+ENV_VAR_STATE_ASSESS_LLM_TEMPERATURE = "SM_STATE_ASSESS_LLM_TEMPERATURE"
+DEFAULT_STATE_ASSESS_LLM_TEMPERATURE = 0.3
 
 # --- General & Debug ---
 DEFAULT_INCLUDE_ACK_TURNS = True
@@ -332,11 +336,11 @@ DEFAULT_DEBUG_LOG_RAW_INPUT = False
 ENV_VAR_DEBUG_LOG_RAW_INPUT = "SM_DEBUG_LOG_RAW_INPUT"
 
 # --- Logger Setup ---
-logger = logging.getLogger("SessionMemoryPipeV19_4Logger")  # Version updated
+logger = logging.getLogger("SessionMemoryPipeV20_1Logger")  # Version updated
 logging.basicConfig(level=logging.INFO)
 
 
-# === SECTION 4: EMBEDDING WRAPPER ===
+# === SECTION 4: EMBEDDING WRAPPER (Unchanged) ===
 class ChromaDBCompatibleEmbedder:
     def __init__(
         self,
@@ -357,10 +361,28 @@ class ChromaDBCompatibleEmbedder:
             )
         except TypeError:
             try:
-                embeddings = self._owi_embed_func(input)
-            except Exception as retry_e:
+                logger.debug(
+                    "Wrapper: Embedding failed with user context, retrying without..."
+                )
+                embeddings = self._owi_embed_func(
+                    input, prefix=RAG_EMBEDDING_CONTENT_PREFIX
+                )
+            except TypeError:
+                try:
+                    logger.debug(
+                        "Wrapper: Embedding failed with prefix, retrying with input only..."
+                    )
+                    embeddings = self._owi_embed_func(input)
+                except Exception as retry_e:
+                    logger.error(
+                        f"Wrapper: Error embedding retry (input only): {retry_e}",
+                        exc_info=True,
+                    )
+                    embeddings = [[] for _ in input]
+            except Exception as retry_e_prefix:
                 logger.error(
-                    f"Wrapper: Error embedding retry: {retry_e}", exc_info=True
+                    f"Wrapper: Error embedding retry (prefix only): {retry_e_prefix}",
+                    exc_info=True,
                 )
                 embeddings = [[] for _ in input]
         except Exception as e:
@@ -383,9 +405,9 @@ class ChromaDBCompatibleEmbedder:
 
 # === SECTION 5: PIPE CLASS DEFINITION ===
 class Pipe:
-    version = "0.19.4"  # Version updated
+    version = "0.20.1"  # Version updated
 
-    # === SECTION 5.1: VALVES DEFINITION ===
+    # === SECTION 5.1: VALVES DEFINITION (MODIFIED - DB PATH DEFAULT REVERTED) ===
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -395,12 +417,14 @@ class Pipe:
             )
         )
         log_level: str = Field(default=os.getenv(ENV_VAR_LOG_LEVEL, DEFAULT_LOG_LEVEL))
+        # <<< REVERTED DEFAULT DB PATH >>>
         sqlite_db_path: str = Field(
             default=os.getenv(ENV_VAR_SQLITE_DB_PATH, DEFAULT_SQLITE_DB_PATH)
         )
         chromadb_path: str = Field(
             default=os.getenv(ENV_VAR_CHROMADB_PATH, DEFAULT_CHROMADB_PATH)
         )
+
         # --- Core Memory Config ---
         tokenizer_encoding_name: str = Field(
             default=os.getenv(ENV_VAR_TOKENIZER_ENCODING, DEFAULT_TOKENIZER_ENCODING)
@@ -418,7 +442,8 @@ class Pipe:
                 os.getenv(
                     ENV_VAR_MAX_STORED_SUMMARY_BLOCKS, DEFAULT_MAX_STORED_SUMMARY_BLOCKS
                 )
-            )
+            ),
+            description="Maximum T1 summaries before oldest is pushed to T2 RAG vector store.",
         )
         t0_active_history_token_limit: int = Field(
             default=int(
@@ -428,7 +453,22 @@ class Pipe:
                 )
             )
         )
-        # --- Summarizer LLM (Prompt uses library default) ---
+
+        # --- Memory Aging Config (NEW) ---
+        aging_trigger_threshold: int = Field(
+            default=int(
+                os.getenv(
+                    ENV_VAR_AGING_TRIGGER_THRESHOLD, DEFAULT_AGING_TRIGGER_THRESHOLD
+                )
+            ),
+            description="Number of T1 summaries needed to trigger memory aging (must be < max_stored_summary_blocks). Set >= max_stored to disable aging.",
+        )
+        aging_batch_size: int = Field(
+            default=int(os.getenv(ENV_VAR_AGING_BATCH_SIZE, DEFAULT_AGING_BATCH_SIZE)),
+            description="Number of oldest T1 summaries to condense into one aged summary during aging.",
+        )
+
+        # --- Summarizer LLM (Used for T1 & Aging) ---
         summarizer_api_url: str = Field(
             default=os.getenv(ENV_VAR_SUMMARIZER_API_URL, DEFAULT_SUMMARIZER_API_URL)
         )
@@ -443,7 +483,7 @@ class Pipe:
             )
         )
 
-        # --- RAG Query LLM (Prompt uses library default) ---
+        # --- RAG Query LLM ---
         ragq_llm_api_url: str = Field(
             default=os.getenv(ENV_VAR_RAGQ_LLM_API_URL, DEFAULT_RAGQ_LLM_API_URL)
         )
@@ -469,6 +509,7 @@ class Pipe:
                 )
             )
         )
+
         # --- Final LLM Pass-Through Config ---
         final_llm_api_url: str = Field(
             default=os.getenv(ENV_VAR_FINAL_LLM_API_URL, DEFAULT_FINAL_LLM_API_URL)
@@ -484,7 +525,8 @@ class Pipe:
         final_llm_timeout: int = Field(
             default=int(os.getenv(ENV_VAR_FINAL_LLM_TIMEOUT, DEFAULT_FINAL_LLM_TIMEOUT))
         )
-        # --- Refinement / RAG Cache Features (Prompts use library defaults) ---
+
+        # --- Refinement / RAG Cache Features ---
         enable_rag_cache: bool = Field(
             default=str(
                 os.getenv(ENV_VAR_ENABLE_RAG_CACHE, str(DEFAULT_ENABLE_RAG_CACHE))
@@ -540,7 +582,8 @@ class Pipe:
                 )
             )
         )
-        # --- Inventory Management Feature (Prompt uses library default) ---
+
+        # --- Inventory Management Feature ---
         enable_inventory_management: bool = Field(
             default=str(
                 os.getenv(
@@ -562,7 +605,8 @@ class Pipe:
                 os.getenv(ENV_VAR_INV_LLM_TEMPERATURE, DEFAULT_INV_LLM_TEMPERATURE)
             )
         )
-        # --- Event Hint Feature (Prompt uses library default) ---
+
+        # --- Event Hint Feature ---
         enable_event_hints: bool = Field(
             default=str(
                 os.getenv(ENV_VAR_ENABLE_EVENT_HINTS, str(DEFAULT_ENABLE_EVENT_HINTS))
@@ -595,17 +639,18 @@ class Pipe:
                 )
             )
         )
-        # --- Scene Generation Feature (Uses Event Hint LLM endpoint) ---
-        enable_scene_generation: bool = Field(
-            default=str(
+
+        # --- Unified State Assessment LLM Temp ---
+        state_assess_llm_temperature: float = Field(
+            default=float(
                 os.getenv(
-                    ENV_VAR_ENABLE_SCENE_GENERATION,
-                    str(DEFAULT_ENABLE_SCENE_GENERATION),
+                    ENV_VAR_STATE_ASSESS_LLM_TEMPERATURE,
+                    DEFAULT_STATE_ASSESS_LLM_TEMPERATURE,
                 )
-            ).lower()
-            == "true",
-            description="Enable/disable dynamic background scene assessment and generation (Uses Event Hint LLM endpoint).",
+            ),
+            description="Temperature specifically for the Unified State Assessment LLM (uses Event Hint URL/Key).",
         )
+
         # --- General & Debug ---
         include_ack_turns: bool = Field(
             default=str(
@@ -635,8 +680,9 @@ class Pipe:
             == "true"
         )
 
-        # --- Post Init Validation ---
+        # --- Post Init Validation (MODIFIED) ---
         def model_post_init(self, __context: Any) -> None:
+            # Existing validations...
             if self.t0_active_history_token_limit <= 0:
                 self.t0_active_history_token_limit = (
                     DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT
@@ -695,9 +741,44 @@ class Pipe:
             if self.event_hint_history_count < 0:
                 self.event_hint_history_count = DEFAULT_EVENT_HINT_HISTORY_COUNT
                 logger.warning("Reset event_hint_history_count to default.")
+            if not (0.0 <= self.state_assess_llm_temperature <= 2.0):
+                self.state_assess_llm_temperature = DEFAULT_STATE_ASSESS_LLM_TEMPERATURE
+                logger.warning("Reset state_assess_llm_temperature to default.")
+
+            # --- NEW Aging Validations ---
+            if (
+                self.aging_trigger_threshold < 0
+            ):  # Allow 0 to effectively disable aging via threshold
+                self.aging_trigger_threshold = DEFAULT_AGING_TRIGGER_THRESHOLD
+                logger.warning(
+                    f"Reset aging_trigger_threshold to default ({DEFAULT_AGING_TRIGGER_THRESHOLD})."
+                )
+            if self.aging_batch_size <= 0:
+                self.aging_batch_size = DEFAULT_AGING_BATCH_SIZE
+                logger.warning(
+                    f"Reset aging_batch_size to default ({DEFAULT_AGING_BATCH_SIZE})."
+                )
+
+            # --- NEW Cross-Validation for Aging/Max T1 ---
+            if (
+                self.aging_trigger_threshold > 0 and self.aging_batch_size > 0
+            ):  # Only check if aging seems intended
+                if self.aging_trigger_threshold < self.aging_batch_size:
+                    logger.warning(
+                        f"Memory Config: Aging trigger threshold ({self.aging_trigger_threshold}) is less than batch size ({self.aging_batch_size}). Aging might not function as expected."
+                    )
+                if self.aging_trigger_threshold >= self.max_stored_summary_blocks:
+                    logger.warning(
+                        f"Memory Config: Aging trigger threshold ({self.aging_trigger_threshold}) is >= max T1 blocks ({self.max_stored_summary_blocks}). Aging will likely be bypassed by T2 push."
+                    )
+            elif self.aging_trigger_threshold == 0:
+                logger.info(
+                    "Memory Config: aging_trigger_threshold is 0, Memory Aging is disabled."
+                )
+
             logger.info("Valves model_post_init validation complete.")
 
-    # === User Valves (MODIFIED) ===
+    # === User Valves (Unchanged) ===
     class UserValves(BaseModel):
         long_term_goal: str = Field(
             default="",
@@ -711,54 +792,55 @@ class Pipe:
             default="",
             description="Specify an exact block of text to remove from the system prompt.",
         )
-        # === NEW VALVE ===
         period_setting: str = Field(
             default="",
-            description="Optional historical period or setting (e.g., 'Late Medieval', 'Cyberpunk', 'Victorian Era') to guide LLM generation (Scene, Hints, Final).",
+            description="Optional historical period or setting (e.g., 'Late Medieval', 'Cyberpunk', 'Victorian Era') to guide LLM generation.",
         )
-        # === END NEW VALVE ===
 
-    # === SECTION 5.2: INITIALIZATION METHOD ===
+    # === SECTION 5.2: INITIALIZATION METHOD (MODIFIED) ===
     def __init__(self):
         self.type = "pipe"
         self.name = (
-            f"SESSION_MEMORY PIPE (v{self.version} - Period Valve)"  # Version updated
+            f"SESSION_MEMORY PIPE (v{self.version} - Memory Aging)"  # Updated name
         )
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         logging.getLogger("i4_llm_agent").setLevel(logging.DEBUG)
         if not I4_LLM_AGENT_AVAILABLE:
-            error_msg = f"i4_llm_agent library (v0.1.8+ required) failed import: {IMPORT_ERROR_DETAILS}. Pipe cannot function."
+            error_msg = f"i4_llm_agent library (v0.2.0+ required) failed import: {IMPORT_ERROR_DETAILS}. Pipe cannot function."
             self.logger.critical(error_msg)
             raise ImportError(error_msg)
         try:
             self.valves = self.Valves()
-            # Modified logging to exclude prompt valves
             init_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
-                if "api_key" not in k
-                and "prompt" not in k.lower()  # Also filter prompt keys
+                if "api_key" not in k and "prompt" not in k.lower()
             }
-            # Add feature flags
             init_log_valves["INIT_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
             init_log_valves["INIT_enable_event_hints"] = getattr(
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
-            init_log_valves["INIT_enable_scene_generation"] = getattr(
-                self.valves, "enable_scene_generation", "LOAD_FAILED"
-            )
             init_log_valves["INIT_debug_log_final_payload"] = getattr(
                 self.valves, "debug_log_final_payload", "LOAD_FAILED"
+            )
+            # <<< Add aging config to log >>>
+            init_log_valves["INIT_aging_trigger_threshold"] = getattr(
+                self.valves, "aging_trigger_threshold", "LOAD_FAILED"
+            )
+            init_log_valves["INIT_aging_batch_size"] = getattr(
+                self.valves, "aging_batch_size", "LOAD_FAILED"
             )
             self.logger.info(
                 f"Pipe.__init__: self.valves loaded (Prompts use library defaults): {init_log_valves}"
             )
-            # Warnings for missing keys remain the same
+            # Warnings for missing keys
             if not self.valves.summarizer_api_key:
-                self.logger.warning("Global Summarizer API Key MISSING.")
+                self.logger.warning(
+                    "Global Summarizer/Aging API Key MISSING."
+                )  # Updated warning text
             if not self.valves.ragq_llm_api_key:
                 self.logger.warning("Global RAG Query LLM API Key MISSING.")
             if (
@@ -792,12 +874,15 @@ class Pipe:
         except Exception as e:
             print(f"CRITICAL Logger config error: {e}")
             self.logger.critical(f"Logger config failed: {e}", exc_info=True)
-        # --- DB and Manager Initialization (Unchanged) ---
+        # --- DB and Manager Initialization ---
         self._sqlite_conn = None
         self._sqlite_cursor = None
         try:
+            # <<< USE VALVE SETTING FOR PATH >>>
             sqlite_db_path = self.valves.sqlite_db_path
-            self.logger.info(f"Init SQLite connection: {sqlite_db_path}")
+            self.logger.info(
+                f"Init SQLite connection using path from valve: {sqlite_db_path}"
+            )
             os.makedirs(os.path.dirname(sqlite_db_path), exist_ok=True)
             self._sqlite_conn = sqlite3.connect(
                 sqlite_db_path, check_same_thread=False, isolation_level=None
@@ -837,7 +922,6 @@ class Pipe:
             )
             raise RuntimeError("Failed to initialize SessionManager") from e
         try:
-            # Pass self.valves which now lacks prompt template fields
             self.orchestrator = SessionPipeOrchestrator(
                 config=self.valves,
                 session_manager=self.session_manager,
@@ -855,9 +939,8 @@ class Pipe:
         self._owi_embedding_func_cache = None
         self.logger.info(f"'{self.name}' initialization complete.")
 
-    # === SECTION 5.3: LOGGER CONFIGURATION ===
+    # === SECTION 5.3: LOGGER CONFIGURATION (Unchanged) ===
     def configure_logger(self):
-        # (No changes needed here)
         log_level_str = self.valves.log_level.upper()
         log_path = self.valves.log_file_path
         try:
@@ -901,15 +984,14 @@ class Pipe:
         self.logger.setLevel(numeric_level)
         self.logger.propagate = False
 
-    # === SECTION 5.4: LIFECYCLE METHODS ===
+    # === SECTION 5.4: LIFECYCLE METHODS (MODIFIED - Added Aged Summary Table Init) ===
     async def on_startup(self):
-        # (No changes needed here)
         self.logger.info(f"on_startup: '{self.name}' (v{self.version}) starting...")
         init_success_main = False
         if self._sqlite_cursor:
             try:
                 self.logger.info(
-                    "Attempting main SQLite table initialization (T1, Cache, Inv, WorldState, SceneState)..."
+                    "Attempting main SQLite table initialization (T1, Cache, Inv, WorldState, SceneState, Aged)..."
                 )
                 init_success_main = await asyncio.to_thread(
                     initialize_sqlite_tables, self._sqlite_cursor
@@ -928,8 +1010,7 @@ class Pipe:
                     f"Error during main SQLite table initialization: {e}", exc_info=True
                 )
                 init_success_main = False
-            # Explicit checks remain useful for debugging specific table issues
-            self.logger.info("Explicitly attempting Inventory table initialization...")
+            # --- Explicit checks (Including NEW Aged Summary Table) ---
             try:
                 from i4_llm_agent.database import _sync_initialize_inventory_table
 
@@ -942,21 +1023,14 @@ class Pipe:
                     )
                     if init_success_inv
                     else self.logger.warning(
-                        "Explicit Inventory table initialization reported failure (may already exist or error occurred)."
+                        "Explicit Inventory table initialization reported failure."
                     )
-                )
-            except ImportError:
-                self.logger.error(
-                    "Failed to import _sync_initialize_inventory_table for explicit check."
                 )
             except Exception as e_inv:
                 self.logger.error(
                     f"Error during explicit Inventory table initialization: {e_inv}",
                     exc_info=True,
                 )
-            self.logger.info(
-                "Explicitly attempting World State table initialization..."
-            )
             try:
                 from i4_llm_agent.database import _sync_initialize_world_state_table
 
@@ -969,25 +1043,16 @@ class Pipe:
                     )
                     if init_success_ws
                     else self.logger.warning(
-                        "Explicit World State table initialization reported failure (may already exist or error occurred)."
+                        "Explicit World State table initialization reported failure."
                     )
-                )
-            except ImportError:
-                self.logger.error(
-                    "Failed to import _sync_initialize_world_state_table for explicit check."
                 )
             except Exception as e_ws:
                 self.logger.error(
                     f"Error during explicit World State table initialization: {e_ws}",
                     exc_info=True,
                 )
-            self.logger.info(
-                "Explicitly attempting Scene State table initialization..."
-            )
             try:
-                from i4_llm_agent.database import (
-                    _sync_initialize_scene_state_table,
-                )
+                from i4_llm_agent.database import _sync_initialize_scene_state_table
 
                 init_success_scene = await asyncio.to_thread(
                     _sync_initialize_scene_state_table, self._sqlite_cursor
@@ -998,19 +1063,42 @@ class Pipe:
                     )
                     if init_success_scene
                     else self.logger.warning(
-                        "Explicit Scene State table initialization reported failure (may already exist or error occurred)."
+                        "Explicit Scene State table initialization reported failure."
                     )
-                )
-            except ImportError:
-                self.logger.error(
-                    "Failed to import _sync_initialize_scene_state_table for explicit check."
                 )
             except Exception as e_scene:
                 self.logger.error(
                     f"Error during explicit Scene State table initialization: {e_scene}",
                     exc_info=True,
                 )
+            # <<< NEW Check for Aged Summaries Table >>>
+            self.logger.info(
+                "Explicitly attempting Aged Summaries table initialization..."
+            )
+            try:
+                from i4_llm_agent.database import _sync_initialize_aged_summaries_table
 
+                init_success_aged = await asyncio.to_thread(
+                    _sync_initialize_aged_summaries_table, self._sqlite_cursor
+                )
+                (
+                    self.logger.info(
+                        "Explicit Aged Summaries table initialization reported success."
+                    )
+                    if init_success_aged
+                    else self.logger.warning(
+                        "Explicit Aged Summaries table initialization reported failure (may already exist or error occurred)."
+                    )
+                )
+            except ImportError:
+                self.logger.error(
+                    "Failed to import _sync_initialize_aged_summaries_table for explicit check."
+                )
+            except Exception as e_aged:
+                self.logger.error(
+                    f"Error during explicit Aged Summaries table initialization: {e_aged}",
+                    exc_info=True,
+                )
         else:
             self.logger.warning(
                 "SQLite cursor not available on startup. Cannot initialize tables."
@@ -1031,7 +1119,6 @@ class Pipe:
         self.logger.info(f"'{self.name}' startup complete.")
 
     async def on_shutdown(self):
-        # (No changes needed here)
         self.logger.info(f"on_shutdown: '{self.name}' shutting down...")
         if self._sqlite_conn:
             try:
@@ -1052,7 +1139,7 @@ class Pipe:
                 print(f"ERROR closing log handler: {handler}: {e}")
         self.logger.info(f"'{self.name}' shutdown complete.")
 
-    # === SECTION 5.6: ON VALVES UPDATED ===
+    # === SECTION 5.6: ON VALVES UPDATED (MODIFIED Log Check) ===
     async def on_valves_updated(self):
         self.logger.info(
             f"on_valves_updated: Reloading global settings for '{self.name}'..."
@@ -1063,33 +1150,40 @@ class Pipe:
         old_chromadb_path = getattr(self.valves, "chromadb_path", None)
         try:
             self.valves = self.Valves()
-            # Modified logging to exclude prompt valves
             update_log_valves = {
                 k: (v[:50] + "..." if isinstance(v, str) and len(v) > 50 else v)
                 for k, v in self.valves.model_dump().items()
-                if "api_key" not in k
-                and "prompt" not in k.lower()  # Filter prompt keys
+                if "api_key" not in k and "prompt" not in k.lower()
             }
-            # Add feature flags
             update_log_valves["UPDATE_enable_inventory"] = getattr(
                 self.valves, "enable_inventory_management", "LOAD_FAILED"
             )
             update_log_valves["UPDATE_enable_event_hints"] = getattr(
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
-            update_log_valves["UPDATE_enable_scene_generation"] = getattr(
-                self.valves, "enable_scene_generation", "LOAD_FAILED"
-            )
             update_log_valves["UPDATE_debug_log_final_payload"] = getattr(
                 self.valves, "debug_log_final_payload", "LOAD_FAILED"
+            )
+            # <<< Add aging config to log >>>
+            update_log_valves["UPDATE_aging_trigger_threshold"] = getattr(
+                self.valves, "aging_trigger_threshold", "LOAD_FAILED"
+            )
+            update_log_valves["UPDATE_aging_batch_size"] = getattr(
+                self.valves, "aging_batch_size", "LOAD_FAILED"
             )
             self.logger.info(
                 f"Pipe.on_valves_updated: self.valves RE-loaded (Prompts use library defaults): {update_log_valves}"
             )
             if hasattr(self, "orchestrator"):
-                # Pass the updated config (without prompt templates) to orchestrator
                 self.orchestrator.config = self.valves
-                self.logger.info("Orchestrator config updated.")
+                # <<< Update aging config in orchestrator instance >>>
+                self.orchestrator.aging_trigger_threshold = (
+                    self.valves.aging_trigger_threshold
+                )
+                self.orchestrator.aging_batch_size = self.valves.aging_batch_size
+                self.logger.info(
+                    "Orchestrator config updated (including aging params)."
+                )
             else:
                 self.logger.warning(
                     "Orchestrator object not found during valves update."
@@ -1108,19 +1202,27 @@ class Pipe:
             self.logger.info("Logger reconfigured successfully.")
         new_sqlite_path = getattr(self.valves, "sqlite_db_path", None)
         if old_sqlite_path != new_sqlite_path:
-            self.logger.warning(f"SQLite DB path changed. Restart might be required.")
+            self.logger.warning(
+                f"SQLite DB path changed from '{old_sqlite_path}' to '{new_sqlite_path}'. Restart might be required for changes to take effect reliably if the connection was already established."
+            )
+            # Re-establish DB connection if path changed and connection exists? Risky.
+            # Best practice is usually restart. Add note.
+            self.logger.warning(
+                "It is STRONGLY recommended to restart Open WebUI if the SQLite DB path is changed while the pipe is running."
+            )
         new_chromadb_path = getattr(self.valves, "chromadb_path", None)
         if old_chromadb_path != new_chromadb_path:
-            self.logger.warning(f"ChromaDB path changed. Restart might be required.")
+            self.logger.warning(
+                f"ChromaDB path changed from '{old_chromadb_path}' to '{new_chromadb_path}'. Restart might be required."
+            )
         self.logger.info("Clearing OWI embedding function cache.")
         self._owi_embedding_func_cache = None
         self.logger.info("on_valves_updated: Reload finished.")
 
-    # === SECTION 5.7: HELPER - OWI EMBEDDING FUNCTION RETRIEVAL ===
+    # === SECTION 5.7: HELPER - OWI EMBEDDING FUNCTION RETRIEVAL (Unchanged) ===
     def _get_owi_embedding_function(
         self, __request__: Request, __user__: Optional[Dict]
     ) -> Optional[OwiEmbeddingFunction]:
-        # (No changes needed here)
         if (
             hasattr(self, "_owi_embedding_func_cache")
             and self._owi_embedding_func_cache
@@ -1180,7 +1282,6 @@ class Pipe:
 
     # === SECTION 5.8 & 5.9: HELPER - Debug Logging (Unchanged) ===
     def _get_debug_log_path(self, suffix: str) -> Optional[str]:
-        # (No changes needed here)
         func_logger = self.logger
         func_logger.debug(f"_get_debug_log_path called with suffix: '{suffix}'")
         try:
@@ -1220,7 +1321,6 @@ class Pipe:
             return None
 
     def _log_debug_raw_input(self, session_id: str, body: Dict):
-        # (No changes needed here)
         if not getattr(self.valves, "debug_log_raw_input", False):
             return
         debug_log_path = self._get_debug_log_path(".DEBUG_INPUT")
@@ -1249,7 +1349,7 @@ class Pipe:
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD (Updated logging for UserValves) ===
+    # === SECTION 5.11: MAIN PIPE METHOD (Unchanged) ===
     async def pipe(
         self,
         body: dict,
@@ -1299,15 +1399,12 @@ class Pipe:
                 )
 
         try:
-            # --- Input Validation and Setup ---
             await emit_status("Status: Pipe validating input...")
             if not isinstance(body, dict):
                 await emit_status("ERROR: Invalid input type.", done=True)
                 return {"error": "Invalid input body type.", "status_code": 400}
             if not __request__:
                 self.logger.warning("__request__ context missing.")
-
-            # --- User Info Extraction ---
             raw_user_valves_data = None
             if __user__ and isinstance(__user__, dict):
                 user_id = __user__.get("id", "missing_id")
@@ -1324,8 +1421,6 @@ class Pipe:
                 self.logger.warning(
                     f"User info/ID missing in __user__. Using '{user_id}'. Received: {__user__}"
                 )
-
-            # --- Session ID ---
             chat_id = __chat_id__
             if not chat_id or not isinstance(chat_id, str) or len(chat_id.strip()) == 0:
                 await emit_status(
@@ -1338,14 +1433,17 @@ class Pipe:
             safe_chat_id_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", chat_id)
             session_id = f"user_{user_id}_chat_{safe_chat_id_part}"
             self.logger.info(f"Pipe Session ID: {session_id}")
-
-            # --- Orchestrator Config Update ---
             if hasattr(self, "orchestrator") and hasattr(self, "valves"):
                 self.orchestrator.config = self.valves
                 self.orchestrator.pipe_logger = self.logger
                 self.orchestrator.pipe_debug_path_getter = self._get_debug_log_path
+                # <<< Update aging config in orchestrator instance >>>
+                self.orchestrator.aging_trigger_threshold = (
+                    self.valves.aging_trigger_threshold
+                )
+                self.orchestrator.aging_batch_size = self.valves.aging_batch_size
                 self.logger.debug(
-                    f"[{session_id}] Pipe: Force-updated orchestrator config, logger, and path getter refs."
+                    f"[{session_id}] Pipe: Force-updated orchestrator config, logger, path getter, and aging refs."
                 )
             elif not hasattr(self, "orchestrator"):
                 self.logger.error(f"[{session_id}] Pipe: Orchestrator missing!")
@@ -1354,14 +1452,8 @@ class Pipe:
                     "error": "Internal Pipe Error: Orchestrator component failed.",
                     "status_code": 500,
                 }
-
-            # --- Debug Logging Raw Input ---
             self._log_debug_raw_input(session_id, body)
-
-            # --- Session State ---
             session_state = self.session_manager.get_or_create_session(session_id)
-
-            # --- User Valves Parsing (MODIFIED Logging) ---
             valves_data_from_user = (
                 __user__.get("valves") if isinstance(__user__, dict) else None
             )
@@ -1376,44 +1468,26 @@ class Pipe:
                     f"[{session_id}] Received UserValves object directly. Using it."
                 )
                 user_valves_obj = valves_data_from_user
-                parsed_text_block = getattr(
-                    user_valves_obj, "text_block_to_remove", "ATTR_MISSING"
+                log_text_block = (
+                    getattr(user_valves_obj, "text_block_to_remove", "ATTR_MISSING")[
+                        :100
+                    ]
+                    + "..."
                 )
-                parsed_process_rag = getattr(
+                log_process_rag = getattr(
                     user_valves_obj, "process_owi_rag", "ATTR_MISSING"
                 )
-                parsed_long_term = getattr(
-                    user_valves_obj, "long_term_goal", "ATTR_MISSING"
+                log_long_term = (
+                    getattr(user_valves_obj, "long_term_goal", "ATTR_MISSING")[:100]
+                    + "..."
                 )
-                # --- ADDED Logging for new valve ---
-                parsed_period_setting = getattr(
-                    user_valves_obj, "period_setting", "ATTR_MISSING"
+                log_period_setting = (
+                    getattr(user_valves_obj, "period_setting", "ATTR_MISSING")[:100]
+                    + "..."
                 )
-                # --- END ADDED ---
-                log_text_block = parsed_text_block[:100] + (
-                    "..." if len(parsed_text_block) > 100 else ""
-                )
-                log_long_term = parsed_long_term[:100] + (
-                    "..." if len(parsed_long_term) > 100 else ""
-                )
-                log_period_setting = parsed_period_setting[:100] + (
-                    "..." if len(parsed_period_setting) > 100 else ""
-                )
-                # --- UPDATED Logging ---
                 self.logger.debug(
-                    f"[{session_id}] Values from received UserValves object: text_block_to_remove='{log_text_block}', process_owi_rag={parsed_process_rag}, long_term_goal='{log_long_term}', period_setting='{log_period_setting}'"
+                    f"[{session_id}] Values from received UserValves object: text_block='{log_text_block}', rag={log_process_rag}, goal='{log_long_term}', period='{log_period_setting}'"
                 )
-                # --- END UPDATED ---
-                if (
-                    user_valves_obj.long_term_goal == ""
-                    and user_valves_obj.process_owi_rag is True
-                    and user_valves_obj.text_block_to_remove == ""
-                    and user_valves_obj.period_setting
-                    == ""  # Also check new valve default
-                ):
-                    self.logger.warning(
-                        f"[{session_id}] Received UserValves object matches defaults. Original string input might have failed OWI pre-parsing."
-                    )
             elif isinstance(valves_data_from_user, dict):
                 self.logger.info(
                     f"[{session_id}] Received valves data as dict. Initializing UserValves model."
@@ -1445,8 +1519,6 @@ class Pipe:
             self.logger.debug(
                 f"[{session_id}] Stored final UserValves object in session state."
             )
-
-            # --- History & Regen Check ---
             await emit_status("Status: Pipe handling history...")
             incoming_messages = body.get("messages", [])
             previous_input = self.session_manager.get_previous_input_messages(
@@ -1466,8 +1538,6 @@ class Pipe:
             self.session_manager.set_previous_input_messages(
                 session_id, incoming_messages.copy()
             )
-
-            # --- Embedding Setup ---
             await emit_status("Status: Pipe resolving embeddings...")
             owi_embed_func = None
             chroma_embed_wrapper = None
@@ -1498,16 +1568,13 @@ class Pipe:
                 self.logger.debug(
                     f"[{session_id}] Skipping embedding setup: OWI Request context missing."
                 )
-
-            # --- Call Orchestrator ---
             await emit_status("Status: Pipe delegating to orchestrator...")
             self.logger.info(f"[{session_id}] Calling orchestrator.process_turn...")
-            # Orchestrator will use its internally referenced config (updated above)
             orchestrator_result = await self.orchestrator.process_turn(
                 session_id=session_id,
                 user_id=user_id,
                 body=body,
-                user_valves=user_valves_obj,  # Pass the parsed UserValves object
+                user_valves=user_valves_obj,
                 event_emitter=self._current_event_emitter,
                 embedding_func=owi_embed_func,
                 chroma_embed_wrapper=chroma_embed_wrapper,
@@ -1516,17 +1583,14 @@ class Pipe:
             self.logger.info(
                 f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
             )
-
-            # --- Final Cleanup & Return ---
             pipe_end_time_iso = datetime.now(timezone.utc).isoformat()
             self.logger.info(
                 f"Pipe.pipe v{self.version} [{session_id}]: Finished at {pipe_end_time_iso}"
             )
             return orchestrator_result
-
         except asyncio.CancelledError:
             self.logger.info(
-                f"Pipe.pipe [{session_id}]: Processing cancelled by external signal."
+                f"Pipe.pipe [{session_id if 'session_id' in locals() else 'unknown'}]: Processing cancelled by external signal."
             )
             await emit_status("Status: Processing stopped by user.", done=True)
             raise
@@ -1541,5 +1605,5 @@ class Pipe:
             return f"Apologies, a critical error occurred in the Session Memory Pipe: {type(e_pipe_global).__name__}."
 
 
-# === SECTION 6: END OF SCRIPT ===
+# [[END MODIFIED script.txt - Revert DB Name & Add Memory Aging Valves]]
 # === END OF FILE script.txt ===
