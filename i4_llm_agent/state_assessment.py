@@ -1,4 +1,5 @@
 # === START OF FILE i4_llm_agent/state_assessment.py ===
+# [[START MODIFIED state_assessment.py - Remove Prompt Log]]
 # i4_llm_agent/state_assessment.py
 
 import logging
@@ -24,10 +25,8 @@ PREVIOUS_STATE_PLACEHOLDER = "{previous_state_json}"
 CURRENT_QUERY_PLACEHOLDER = "{current_user_query}"
 ASSISTANT_RESPONSE_PLACEHOLDER = "{current_assistant_response}"
 HISTORY_CONTEXT_PLACEHOLDER = "{recent_history_str}"
-# === NEW PLACEHOLDER ===
 WEATHER_PROPOSAL_PLACEHOLDER = "{weather_proposal_text}"
 
-# === MODIFIED PROMPT (v2 - Includes Weather Proposal Input) ===
 DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = f"""
 [[SYSTEM ROLE: Unified World & Scene State Assessor]]
 
@@ -94,11 +93,9 @@ DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = f"""
 
 **JSON Output Only:**
 """
-# === END MODIFIED PROMPT ===
 
 # --- Helper Function ---
 
-# === MODIFIED HELPER (v2 - Accepts and formats weather_proposal) ===
 def _format_unified_state_assessment_prompt(
     template: str,
     previous_world_state: Dict[str, Any],
@@ -106,14 +103,13 @@ def _format_unified_state_assessment_prompt(
     current_user_query: str,
     current_assistant_response: str,
     recent_history_str: str,
-    weather_proposal: Optional[Dict[str, Optional[str]]] = None # <<< NEW PARAMETER
+    weather_proposal: Optional[Dict[str, Optional[str]]] = None
 ) -> str:
     """Formats the prompt for the Unified State Assessment LLM."""
     func_logger = logging.getLogger(__name__ + '._format_unified_state_assessment_prompt')
     if not template or not isinstance(template, str):
         return "[Error: Invalid Template for Unified State Assessment]"
 
-    # Combine previous state into a single dict for JSON conversion
     previous_state_combined = {
         "previous_day": previous_world_state.get("day", 1),
         "previous_time_of_day": previous_world_state.get("time_of_day", "Morning"),
@@ -129,37 +125,32 @@ def _format_unified_state_assessment_prompt(
     except Exception as e_ser:
         func_logger.error(f"Failed to serialize previous state to JSON: {e_ser}")
 
-    # Format Weather Proposal for prompt
     proposal_text = "[No Proposal Provided]"
     if isinstance(weather_proposal, dict) and \
        "previous_weather" in weather_proposal and \
        "new_weather" in weather_proposal:
         prev_w = weather_proposal.get("previous_weather") or "Unknown"
         new_w = weather_proposal.get("new_weather") or "Unknown"
-        if new_w != prev_w: # Only format if there's a proposed change
+        if new_w != prev_w:
             proposal_text = f"Proposal: From '{prev_w}' to '{new_w}'"
         else:
             proposal_text = f"Proposal: No change suggested (Remain '{prev_w}')"
 
-    # Basic safety for other inputs
     safe_user_query = str(current_user_query)
     safe_assistant_response = str(current_assistant_response)
     safe_history = str(recent_history_str)
 
     try:
-        # Perform replacements
         formatted_prompt = template.replace(PREVIOUS_STATE_PLACEHOLDER, previous_state_json_str)
         formatted_prompt = formatted_prompt.replace(CURRENT_QUERY_PLACEHOLDER, safe_user_query)
         formatted_prompt = formatted_prompt.replace(ASSISTANT_RESPONSE_PLACEHOLDER, safe_assistant_response)
         formatted_prompt = formatted_prompt.replace(HISTORY_CONTEXT_PLACEHOLDER, safe_history)
-        # === NEW REPLACEMENT ===
         formatted_prompt = formatted_prompt.replace(WEATHER_PROPOSAL_PLACEHOLDER, proposal_text)
 
-        # Check if any placeholders might still exist (simple check)
         if any(ph in formatted_prompt for ph in [
             PREVIOUS_STATE_PLACEHOLDER, CURRENT_QUERY_PLACEHOLDER,
             ASSISTANT_RESPONSE_PLACEHOLDER, HISTORY_CONTEXT_PLACEHOLDER,
-            WEATHER_PROPOSAL_PLACEHOLDER # Check new one too
+            WEATHER_PROPOSAL_PLACEHOLDER
         ]):
             func_logger.warning(f"Potential placeholder missed during .replace() formatting for unified state prompt.")
 
@@ -167,11 +158,9 @@ def _format_unified_state_assessment_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting unified state assessment prompt: {e}", exc_info=True)
         return f"[Error formatting unified state assessment prompt: {type(e).__name__}]"
-# === END MODIFIED HELPER ===
 
 # --- Core Logic ---
 
-# === MODIFIED CORE FUNCTION (v2 - Accepts weather_proposal) ===
 async def update_state_via_full_turn_assessment(
     session_id: str,
     previous_world_state: Dict[str, Any],
@@ -183,8 +172,7 @@ async def update_state_via_full_turn_assessment(
     state_assessment_llm_config: Dict[str, Any], # Needs URL, Key, Temp etc.
     logger_instance: Optional[logging.Logger] = None,
     event_emitter: Optional[Callable] = None, # For potential status updates
-    weather_proposal: Optional[Dict[str, Optional[str]]] = None # <<< NEW PARAMETER
-    # Add debug_path_getter if needed for LLM call logging
+    weather_proposal: Optional[Dict[str, Optional[str]]] = None
 ) -> Dict[str, Any]:
     """
     Uses a single LLM call to assess the full turn context (previous state,
@@ -215,7 +203,6 @@ async def update_state_via_full_turn_assessment(
     func_logger = logger_instance or logger
     caller_info = f"UnifiedStateAssess_{session_id}"
 
-    # Define the fallback return structure using previous state
     fallback_state = {
         "new_day": previous_world_state.get("day", 1),
         "new_time_of_day": previous_world_state.get("time_of_day", "Morning"),
@@ -228,7 +215,6 @@ async def update_state_via_full_turn_assessment(
 
     # --- Prepare Inputs ---
     if not isinstance(history_messages, list): history_messages = []; func_logger.warning(f"[{caller_info}] history_messages not list.")
-    # History is only needed for formatting the context section of the prompt
     history_context_turns = get_recent_turns(history_messages, 4, DIALOGUE_ROLES, exclude_last=False)
     recent_history_str = format_history_for_llm(history_context_turns)
 
@@ -237,7 +223,6 @@ async def update_state_via_full_turn_assessment(
          prompt_template = DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT
          func_logger.warning(f"[{caller_info}] Invalid prompt template in config, using default unified assessment prompt (v2 with weather proposal).")
 
-    # === MODIFIED: Pass weather_proposal to formatter ===
     prompt_text = _format_unified_state_assessment_prompt(
         template=prompt_template,
         previous_world_state=previous_world_state,
@@ -245,7 +230,7 @@ async def update_state_via_full_turn_assessment(
         current_user_query=current_user_query,
         current_assistant_response=assistant_response_text,
         recent_history_str=recent_history_str,
-        weather_proposal=weather_proposal # Pass the proposal here
+        weather_proposal=weather_proposal
     )
 
     if not prompt_text or prompt_text.startswith("[Error:"):
@@ -255,7 +240,7 @@ async def update_state_via_full_turn_assessment(
     # --- Get LLM Config ---
     llm_url = state_assessment_llm_config.get('url')
     llm_key = state_assessment_llm_config.get('key')
-    llm_temp = state_assessment_llm_config.get('temp', 0.3) # Default temp if not specified
+    llm_temp = state_assessment_llm_config.get('temp', 0.3)
 
     if not llm_url or not llm_key:
         func_logger.error(f"[{caller_info}] State Assessment LLM URL/Key missing in config. Returning previous state.")
@@ -268,9 +253,9 @@ async def update_state_via_full_turn_assessment(
     # --- LLM Call ---
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     func_logger.info(f"[{caller_info}] Calling Unified State Assessment LLM (v2 prompt with weather proposal)...")
-    # Optional: Add debug logging for the prompt here if needed
-    func_logger.debug(f"[{caller_info}] State Assessment Prompt (first 500 chars):\n-------\n{prompt_text[:500]}\n-------")
-
+    # <<< START MODIFICATION (Prompt Log Removed) >>>
+    # func_logger.debug(f"[{caller_info}] State Assessment Prompt (first 500 chars):\n-------\n{prompt_text[:500]}...\n-------")
+    # <<< END MODIFICATION >>>
 
     success = False
     response_or_error = "LLM Call Not Attempted"
@@ -291,12 +276,9 @@ async def update_state_via_full_turn_assessment(
     # --- Process Response ---
     if success and isinstance(response_or_error, str):
         llm_output_text = response_or_error.strip()
-        # Optional: Add debug logging for the raw response here
-        func_logger.debug(f"[{caller_info}] State Assessment Raw Output:\n{llm_output_text}")
-
+        func_logger.debug(f"[{caller_info}] State Assessment Raw Output (first 500 chars):\n{llm_output_text[:500]}...")
 
         try:
-            # Basic cleanup - remove potential markdown fences
             if llm_output_text.startswith("```json"): llm_output_text = llm_output_text[7:]
             if llm_output_text.endswith("```"): llm_output_text = llm_output_text[:-3]
             llm_output_text = llm_output_text.strip()
@@ -327,16 +309,13 @@ async def update_state_via_full_turn_assessment(
                         func_logger.warning(f"[{caller_info}] Parsed JSON missing required key: '{key}'. Output: {llm_output_text[:200]}...")
                         valid = False
                         break
-                    # Allow None values temporarily during parsing if LLM outputs null, but expect specific types
                     current_value = parsed_json[key]
                     if current_value is None:
-                        # Allow None for description/keywords temporarily if LLM fails, handle later? No, prompt requires values.
-                        func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' has None value, expected {expected_type.__name__}. Output: {llm_output_text[:200]}...")
-                        valid = False
-                        break
+                         func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' has None value, expected {expected_type.__name__}. Output: {llm_output_text[:200]}...")
+                         valid = False
+                         break
 
                     if not isinstance(current_value, expected_type):
-                         # Special case for keywords list - check elements
                         if key == "new_scene_keywords" and expected_type == list:
                             if not all(isinstance(item, str) for item in current_value):
                                 func_logger.warning(f"[{caller_info}] Parsed JSON key '{key}' contains non-string elements. Value: {current_value}. Output: {llm_output_text[:200]}...")
@@ -349,8 +328,7 @@ async def update_state_via_full_turn_assessment(
 
             if valid:
                 func_logger.info(f"[{caller_info}] Unified state LLM returned valid JSON structure.")
-                # Return the validated data from the LLM
-                return parsed_json # Return the validated structure directly
+                return parsed_json
             else:
                 func_logger.warning(f"[{caller_info}] Unified state LLM output failed structure/type validation. Returning previous state.")
                 return fallback_state
@@ -362,9 +340,9 @@ async def update_state_via_full_turn_assessment(
             func_logger.error(f"[{caller_info}] Error processing parsed JSON: {e_parse}. Output: {llm_output_text[:200]}... Returning previous state.", exc_info=True)
             return fallback_state
     else:
-        # LLM call failed or returned non-string
         error_details = str(response_or_error)
         func_logger.warning(f"[{caller_info}] Unified state LLM call failed or returned invalid type. Error: '{error_details}'. Returning previous state.")
         return fallback_state
 
+# [[END MODIFIED state_assessment.py - Remove Prompt Log]]
 # === END OF FILE i4_llm_agent/state_assessment.py ===
