@@ -124,9 +124,13 @@ async def process_context_and_prepare_payload(
     # --- 1. Select T0 History Slice ---
     await _emit_status("Status: Selecting dialogue history...")
     t0_active_history_token_limit = getattr(config, 't0_active_history_token_limit', 4000)
-    # Call should now work after history.py fix
+    # <<< MODIFIED CALL: Use keyword arguments for clarity and correctness >>>
     t0_history_slice, t0_dialogue_tokens, _ = select_turns_for_t0(
-        history_for_processing, t0_active_history_token_limit, tokenizer, dialogue_roles
+        history_for_processing,                  # Keep first arg positional
+        target_tokens=t0_active_history_token_limit, # Use keyword args for clarity
+        tokenizer=tokenizer,                     # Use keyword args for clarity
+        dialogue_only_roles=dialogue_roles       # Explicitly map to the correct parameter
+        # Let max_overflow_ratio and fallback_turns use their defaults
     )
     context_status_info["t0_dialogue_tokens"] = t0_dialogue_tokens
     func_logger.info(f"[{session_id}] T0 History: Selected {len(t0_history_slice)} turns ({t0_dialogue_tokens} tokens).")
@@ -170,9 +174,6 @@ async def process_context_and_prepare_payload(
     refiner_temp = getattr(config, 'refiner_llm_temperature', 0.3)
     refiner_history_count = getattr(config, 'refiner_history_count', 6)
     stateless_skip_threshold = getattr(config, 'stateless_refiner_skip_threshold', 500)
-    # RAG Cache specific config (now used by update_rag_cache directly)
-    # cache_update_skip_owi_threshold = getattr(config, 'CACHE_UPDATE_SKIP_OWI_THRESHOLD', 50)
-    # cache_update_similarity_threshold = getattr(config, 'CACHE_UPDATE_SIMILARITY_THRESHOLD', 0.9)
 
     refiner_llm_config = { "url": refiner_url, "key": refiner_key, "temp": refiner_temp, "prompt_template": DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE }
     cache_update_llm_config = { "url": refiner_url, "key": refiner_key, "temp": refiner_temp, "prompt_template": DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT }
@@ -183,8 +184,7 @@ async def process_context_and_prepare_payload(
         func_logger.info(f"[{session_id}] Applying RAG Cache (Two-Step Refinement)...")
         await _emit_status("Status: Applying RAG cache...")
         try:
-            # Step 1: Update Cache
-            # <<< MODIFIED CALL: Removed previous_cache argument >>>
+            # Step 1: Update Cache (Call previously fixed)
             updated_cache_text = await update_rag_cache(
                 session_id=session_id,
                 current_owi_context=processed_owi_rag_context,
@@ -293,7 +293,7 @@ async def process_context_and_prepare_payload(
     await _emit_status("Status: Checking long-term memory...")
     t2_rag_results: Optional[List[str]] = None # Expecting list of strings now
     ragq_llm_url = getattr(config, 'ragq_llm_api_url', None); ragq_llm_key = getattr(config, 'ragq_llm_api_key', None)
-    # <<< MODIFIED can_rag check: Needs chroma_client, chroma_embed_wrapper (for collection), embedding_func (for query) >>>
+    # can_rag check previously fixed
     can_rag = all([ database.CHROMADB_AVAILABLE, chroma_client, chroma_embed_wrapper, embedding_func, ragq_llm_url, ragq_llm_key, latest_user_query_str ])
     if can_rag:
         func_logger.info(f"[{session_id}] T2 RAG: Performing query...")
@@ -310,7 +310,7 @@ async def process_context_and_prepare_payload(
             if not rag_query or rag_query.startswith("[Error"):
                 func_logger.warning(f"[{session_id}] T2 RAG: Query generation failed: {rag_query}")
             else:
-                # <<< MODIFIED T2 RAG Block START >>>
+                # T2 RAG Block previously fixed
                 rag_results_count = getattr(config, 'rag_summary_results_count', 3)
                 base_prefix = getattr(config, 'summary_collection_prefix', 'sm_t2_')
                 safe_session_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", session_id)[:50]
@@ -347,17 +347,21 @@ async def process_context_and_prepare_payload(
                         )
 
                         if chroma_results_dict and isinstance(chroma_results_dict.get('documents'), list):
-                            t2_rag_results = chroma_results_dict['documents'][0] # Documents is list of lists
-                            if isinstance(t2_rag_results, list): # Ensure it's a list of strings
-                                context_status_info["t2_retrieved_count"] = len(t2_rag_results)
-                                func_logger.info(f"[{session_id}] T2 RAG: Retrieved {len(t2_rag_results)} results.")
+                            # Documents is list of lists, e.g., [[doc1, doc2]] for single query embedding
+                            if len(chroma_results_dict['documents']) > 0 and isinstance(chroma_results_dict['documents'][0], list):
+                                t2_rag_results = chroma_results_dict['documents'][0] # Get the inner list of doc strings
+                                if all(isinstance(doc, str) for doc in t2_rag_results): # Check if it's list of strings
+                                    context_status_info["t2_retrieved_count"] = len(t2_rag_results)
+                                    func_logger.info(f"[{session_id}] T2 RAG: Retrieved {len(t2_rag_results)} results.")
+                                else:
+                                    func_logger.error(f"[{session_id}] T2 RAG: Expected list of document strings, got list containing non-strings. Resetting results.")
+                                    t2_rag_results = None
                             else:
-                                func_logger.error(f"[{session_id}] T2 RAG: Expected list of documents, got {type(t2_rag_results)}. Resetting results.")
+                                func_logger.warning(f"[{session_id}] T2 RAG: 'documents' key found but not in expected format (list of lists). Resetting results.")
                                 t2_rag_results = None
                         else:
                             func_logger.info(f"[{session_id}] T2 RAG: No results found or invalid format from query for '{rag_query}'.")
                             t2_rag_results = None
-                # <<< MODIFIED T2 RAG Block END >>>
 
         except Exception as e_rag:
             func_logger.error(f"[{session_id}] T2 RAG: Error during query/retrieval: {e_rag}", exc_info=True)
@@ -375,7 +379,7 @@ async def process_context_and_prepare_payload(
         try:
             # Try importing formatting/DB functions specific to this step
             from .inventory import format_inventory_for_prompt as format_inv_func
-            # from .database import get_all_inventories_for_session # Use database. prefix now
+            # Use database. prefix now
             all_inventories = await database.get_all_inventories_for_session(sqlite_cursor, session_id)
             inventory_context_str = format_inv_func(all_inventories)
             func_logger.info(f"[{session_id}] Inventory context formatted (Length: {len(inventory_context_str or '')}).")
@@ -439,5 +443,4 @@ async def process_context_and_prepare_payload(
         context_status_info["error"] = "Payload construction returned unexpected format."
         func_logger.error(f"[{session_id}] Payload construction failed: Unexpected format {type(final_llm_payload)}.")
         return None, context_status_info
-
 # === END MODIFIED FILE: i4_llm_agent/context_processor.py ===
