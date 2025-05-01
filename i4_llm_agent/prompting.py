@@ -287,16 +287,16 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 **OUTPUT (Updated Session Cache Text - Structured, or [NO_CACHE_UPDATE], or [No relevant background context found]):**
 """
 
+# Final Context Selector Prompt Template (v1.1)
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
-# [[START MODIFIED PROMPT]]
-# Default prompt template for Step 2: Final Context Selection
+
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Context Selector for Roleplay Response
-**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and select details **relevant and helpful** for generating the *next* narrative response based on the LATEST USER QUERY and RECENT HISTORY.
+**Role:** Context Selector for Roleplay Response  
+**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and select details **relevant and helpful** for generating the *next* narrative response based on the LATEST USER QUERY and RECENT HISTORY.  
 **Objective:** Provide **sufficient background context** from the Cache and OWI Retrieval to enable a coherent, nuanced, and contextually grounded response, without overwhelming the final LLM with irrelevant data.
 
 **Sources:**
@@ -307,15 +307,28 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 
 **Instructions:**
 
-1.  **Analyze Query & History:** Determine the core subject, actions, and **characters actively involved** in the LATEST USER QUERY and the last 1-2 turns of RECENT CHAT HISTORY. Use this understanding to gauge relevance.
-2.  **Select Helpful Cache/OWI Context:** Examine the CACHE and the OWI RETRIEVAL. Extract sentences/passages that:
-    *   Help explain the **current situation** or **immediate environment**.
-    *   Provide insight into the **motivations, relationships, or relevant core traits** of the **characters actively involved** in the current interaction.
-    *   Offer **relevant lore or background** about the current location, mentioned objects, or pertinent past events from the cache that inform the *current* interaction.
-3.  **Prioritize Cache:** Give higher priority to relevant information found in the UPDATED SESSION CACHE, as it represents established continuity. Use the CURRENT OWI RETRIEVAL primarily for immediate situational context or details not present in the cache.
-4.  **Filter Irrelevant Information:** Exclude information from both Cache and OWI that is *clearly* unrelated to the ongoing interaction or the characters involved. Avoid including lengthy profiles or lore sections if only a small part is relevant *now*. **Focus on helpfulness for the next response.**
-5.  **Combine Snippets:** Assemble the selected Cache/OWI context snippets into a single, coherent text block. Use headings or clear separation if combining distinct topics (e.g., `=== Relevant Character Note ===`, `=== Location Details ===`).
-6.  **Output Content:** The output **must** contain ONLY the selected relevant background snippets. DO NOT add commentary or summaries of the history. If no relevant Cache/OWI context is found, state clearly: "[No relevant background context found for the current query]".
+1.  **Analyze Query & History:** Determine the core subject, actions, **locations**, and **characters actively or passively present** in the LATEST USER QUERY and the last 2–3 turns of RECENT CHAT HISTORY. Include unresolved threads referenced implicitly (e.g., emotional fallout, mentioned past decisions).
+
+2.  **Select Helpful Cache/OWI Context:** Examine the CACHE and OWI RETRIEVAL. Extract only sentences/passages that:
+    * Explain the **current situation** or **immediate environment**.
+    * Provide insight into the **motivations, relationships, or core traits** of involved or emotionally connected characters.
+    * Offer relevant **background lore** about current locations, objects, or unresolved past events that inform the *current* moment.
+
+3.  **Relational Awareness Rule:** If a character is not directly mentioned but is **strongly emotionally tied** to a currently involved character (e.g., a sister, parent, lost companion), include minimal relevant memory snippets for continuity.  
+    *Example: If Emily is active, and her sister Julia is emotionally tied to her current mood or goal, include brief but relevant Julia context—even if Julia is not present or named.*
+
+4.  **Emotional Theme Continuity (Optional):** If the query implies a recurring emotional thread (fear, guilt, protection), select context that reinforces that tone, even if the source isn't directly mentioned.
+
+5.  **Prioritize CACHE Over OWI:** CACHE represents canonical memory and character development. Use OWI RETRIEVAL to fill in situational details not found in cache, or provide short reminders about location and setting.
+
+6.  **Filter Irrelevant Content:** Exclude long lore blocks, full profiles, or unrelated past facts. Favor **compressed, emotionally relevant facts** that reinforce the present turn.
+
+7.  **Assemble Output:** Combine the selected Cache/OWI context snippets into a short, clean block. Use optional headings (e.g., `=== Character Note: Julia ===`, `=== Location Memory ===`) to group content.  
+    - Avoid excessive length.  
+    - Use only what’s helpful for this turn.
+
+8.  **Empty Fallback:** If no relevant Cache/OWI content is found, respond with:  
+    `[No relevant background context found for the current query]`
 
 **INPUTS:**
 
@@ -339,6 +352,7 @@ DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Selected Relevant Cache/OWI Snippets):**
 """
+
 # [[END MODIFIED PROMPT]]
 
 # Placeholders for Inventory Update LLM (Existing)
