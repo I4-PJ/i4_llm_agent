@@ -200,15 +200,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - OpenWebUI community for the integration framework
 - ChromaDB for vector storage capabilities
 - Contributors to the LLM agent architecture
+- Google Gemini 2.5 
 
-## Roadmap
 
-- [ ] Improved inventory item merging
-- [ ] Enhanced memory decay simulation
-- [ ] Multi-character relationship tracking
-- [ ] Expanded period settings library
-- [ ] Performance optimizations for large session histories
-
----
 
 *Version 0.20.1 - Memory Aging, Reverted DB Name*
