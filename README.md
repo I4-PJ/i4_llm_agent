@@ -138,29 +138,30 @@ User-specific settings that can be configured per session:
 - `text_block_to_remove`: Specific text to remove from system prompt
 - `period_setting`: Historical period or setting (e.g., "Victorian Era")
 
-## Usage as OpenWebUI Pipe
+## OpenWebUI Integration
 
-To use as an OpenWebUI pipe:
+### PIPE Script Configuration
 
-1. Install the package in your OpenWebUI environment
-2. Configure the pipe in OpenWebUI settings
-3. Enable the pipe for your chat sessions
+The package includes a special script file for OpenWebUI integration:
 
-Example pipe configuration:
+1. Upload the `OpenWebUI_MemorySession_SCRIPT.py` file through the OpenWebUI Functions interface
+2. Configure it as a PIPE function
+3. Enable the PIPE for your chat sessions
 
-```json
-{
-  "type": "pipe",
-  "name": "SESSION_MEMORY PIPE (v0.20.1 - Memory Aging)",
-  "valves": {
-    "log_level": "INFO",
-    "aging_trigger_threshold": 15,
-    "aging_batch_size": 5,
-    "enable_inventory_management": true,
-    "enable_event_hints": true
-  }
-}
+The script contains the necessary metadata and configuration for OpenWebUI:
+
+```python
+# --- REQUIRED METADATA HEADER ---
+"""
+title: SESSION_MEMORY PIPE (v0.20.1 - Memory Aging)
+author: Petr Jilek & Assistant Gemini
+version: 0.20.1
+description: Adds Memory Aging feature. Condenses oldest T1 summaries into Aged Summaries when count exceeds threshold. Reverted default DB name. Requires i4_llm_agent>=0.2.0.
+requirements: pydantic, chromadb, i4_llm_agent>=0.2.0, tiktoken, httpx, open_webui (internal utils)
+"""
 ```
+
+This script serves as the entry point for the memory management system in OpenWebUI, initializing the Pipe class and handling all communication between the UI and the memory management system.
 
 ## Memory Aging Process
 
