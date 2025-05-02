@@ -213,7 +213,7 @@ async def process_context_and_prepare_payload(
         try:
             updated_cache_text = await update_rag_cache(
                 session_id=session_id,
-                current_owi_context=processed_owi_rag_context, # Use potentially nullified context
+                current_owi_context=processed_owi_rag_context,
                 history_messages=history_for_processing,
                 latest_user_query=latest_user_query_str,
                 llm_call_func=llm_call_func,
@@ -221,11 +221,12 @@ async def process_context_and_prepare_payload(
                 cache_update_llm_config=cache_update_llm_config,
                 history_count=refiner_history_count,
                 dialogue_only_roles=dialogue_roles,
-                caller_info=f"CtxProc_CacheUpdate_{session_id}"
+                caller_info=f"CtxProc_CacheUpdate_{session_id}",
+                debug_log_path_getter=orchestrator_debug_path_getter
             )
             final_selected_context = await select_final_context(
                 updated_cache_text=updated_cache_text,
-                current_owi_context=processed_owi_rag_context, # Use potentially nullified context
+                current_owi_context=processed_owi_rag_context,
                 history_messages=history_for_processing,
                 latest_user_query=latest_user_query_str,
                 llm_call_func=llm_call_func,
@@ -233,7 +234,7 @@ async def process_context_and_prepare_payload(
                 history_count=refiner_history_count,
                 dialogue_only_roles=dialogue_roles,
                 caller_info=f"CtxProc_CtxSelect_{session_id}",
-                debug_log_path_getter=orchestrator_debug_path_getter
+                debug_log_path_getter=orchestrator_debug_path_getter # This was already correct
             )
             context_status_info["final_context_selection_performed"] = True
             refined_context_tokens = _count_tokens_safe(final_selected_context)
