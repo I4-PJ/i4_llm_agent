@@ -20,7 +20,12 @@ PREVIOUS_KEYWORDS_PLACEHOLDER = "{previous_keywords_json}"
 PREVIOUS_DESCRIPTION_PLACEHOLDER = "{previous_description}"
 
 # [[START MODIFIED PROMPT]]
-# Default prompt template for Scene Assessment/Generation LLM
+# Placeholders for the Scene Assessment/Generation prompt
+PREVIOUS_RESPONSE_PLACEHOLDER = "{llm_response_N_minus_1}"
+CURRENT_QUERY_PLACEHOLDER = "{user_query_N}"
+PREVIOUS_KEYWORDS_PLACEHOLDER = "{previous_keywords_json}"
+PREVIOUS_DESCRIPTION_PLACEHOLDER = "{previous_description}"
+
 DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
 [[SYSTEM ROLE: Background Scene Descriptor]]
 
@@ -46,41 +51,44 @@ DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
 
 **Instructions:**
 
-1.  **Assess Scene Change:** Compare the 'Last LLM Response' and 'Current User Query' against the 'Previous Scene Keywords' and 'Previous Scene Description'. Has the effective location, core environmental features, or fundamental atmosphere described in the *narrative* significantly changed compared to the *previous static description*?
-    *   Examples of **Change:** Explicitly moving to a new distinct location (inn -> stables, forest -> cave), environment drastically altering (calm -> battlefield), time shifting significantly causing major atmospheric change (bright day -> stormy night).
-    *   Examples of **No Change:** Interaction within the same described location, dialogue continuation, minor actions that don't alter the core setting (e.g., drawing a weapon in the described tavern).
+1.  **Assess Scene Change:** Compare the 'Last LLM Response' and 'Current User Query' against the 'Previous Scene Keywords' and 'Previous Scene Description'. Determine if the location, major environmental features, or atmosphere have **significantly changed**.
+    *   Examples of **Change:** Location shift (inn ? stable), time shift (day ? night), weather impact (sunny ? storm), or new setting focus (forest edge ? cave interior).
+    *   Examples of **No Change:** Continued dialogue or movement within the same place, interaction with objects in the already-described scene.
 
-2.  **Generate Output (If Scene Changed):**
-    *   Generate a list of 3-5 new keywords capturing the essence of the **new** scene (e.g., ["stable", "dim", "hay", "lantern light", "quiet"]). Format as a JSON array of strings.
-    *   Generate a **new**, brief (1-3 sentences) **static description** of the new scene's environment. Focus **only** on:
-        *   Location type (e.g., "A dimly lit stable interior.")
-        *   Key features/objects (e.g., "Wooden stalls line the walls, filled with straw. A single lantern hangs from a beam.")
-        *   Static sensory details (e.g., "The air smells of hay and horses.")
-        *   Atmosphere/Mood (e.g., "It is quiet and relatively warm.")
-        *   Impact of time/weather (e.g., "Rain drums softly on the roof outside.")
-    *   **Crucially, DO NOT describe character actions, dialogue, intentions, or how they arrived in the description.** It should be a snapshot of the setting itself.
-    *   Your output **MUST** be a *new* JSON object containing the *new* keywords and *new* static description.
+2.  **If Scene Changed — Generate New Output:**
+    *   First, generate 3–5 new **scene keywords** (e.g., ["stable", "hay", "dim", "lantern", "rain"])
+    *   Then generate a new **static scene description** (1–3 sentences) that includes:
+        *   Location type and layout
+        *   Specific environmental **features or objects** (e.g., crates, lanterns, firepit, bucket)
+        *   **Passive affordances** — items or structures that characters may notice or use, without describing actions
+        *   Sensory detail (smells, lighting, temperature, sound)
+        *   Scene mood or atmosphere
+    *   Do **not** include any movement, dialogue, or character intent.
+    *   Embed the interactable elements (e.g., "a bedroll near the fire", "a worn pack against the wall") naturally in the prose.
+    *   Format your output as a **single valid JSON object**:
         ```json
         {{
-          "keywords": ["new_keyword_1", "new_keyword_2", ...],
-          "description": "Your newly generated 1-3 sentence static description of the new scene's environment."
+          "keywords": ["keyword1", "keyword2", ...],
+          "description": "A static snapshot of the new scene, with sensory and object detail, but no actions."
         }}
         ```
 
-3.  **Generate Output (If No Scene Change):**
-    *   If no significant scene change is detected based on the narrative interaction, your output **MUST** be the *exact* JSON object structure containing the *unchanged* previous keywords and description.
+3.  **If No Scene Change — Return Previous Scene JSON:**
+    *   If no major change occurred, return the original input as a valid JSON block:
         ```json
         {{
           "keywords": {PREVIOUS_KEYWORDS_PLACEHOLDER},
           "description": "{PREVIOUS_DESCRIPTION_PLACEHOLDER}"
         }}
         ```
-        *(Ensure the description string within the JSON is properly escaped if it contains quotes)*
+    *   Make sure any embedded quotes are escaped properly.
 
-4.  **Output Format:** Respond ONLY with a single, valid JSON object matching one of the two structures described above. Do not include any other text, markdown formatting, or explanations outside the JSON object.
+4.  **Output Format Required:**  
+    Respond with one **and only one** valid JSON object as shown above. Do not include any notes, explanations, or non-JSON formatting.
 
 **JSON Output:**
 """
+
 # [[END MODIFIED PROMPT]]
 
 # --- Helper Functions ---
