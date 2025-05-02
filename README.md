@@ -1,7 +1,6 @@
 # i4_llm_agent - Advanced Memory Management for LLM Roleplay
 
 ![Version](https://img.shields.io/badge/version-0.20.1-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ## Overview
 
