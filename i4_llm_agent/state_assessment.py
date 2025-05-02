@@ -73,10 +73,23 @@ DEFAULT_UNIFIED_STATE_ASSESSMENT_PROMPT_TEXT = f"""
         *   If the response is consistent with `previous_weather` and no proposal/command contradicts, keep `previous_weather`.
         *   If no weather is mentioned anywhere and no proposal exists, generally keep `previous_weather`.
     *   **`new_season`**: Keep `previous_season` unless explicitly changed by command or long narrative time jump.
+
+# === START MODIFIED INSTRUCTION 4 ===
 4.  **Determine New Scene State:**
-    *   **Assess Change:** Compare `Current User Input` / `Current Assistant Response` against `previous_scene_description` / `previous_scene_keywords`. Has the location/environment fundamentally changed?
-    *   **If Scene Changed:** Generate new `new_scene_description` (1-3 static sentences, no actions) and new `new_scene_keywords` (3-5 keywords). Set `scene_changed_flag: true`.
-    *   **If No Scene Change:** Return exact `previous_scene_description` and `previous_scene_keywords`. Set `scene_changed_flag: false`.
+    *   **Analyze Narrative Context:** Review `Current User Input` (especially `STORY:` commands) and `Current Assistant Response` for explicit indications of a fundamental location change (e.g., traveling, entering a new distinct area).
+    *   **Assess Location Change:** Did the narrative context clearly indicate a move to a *different location* compared to the `previous_scene_description`?
+    *   **If Location Changed:**
+        *   Generate a **new `new_scene_description`** based primarily on the static environmental details described for the *new* location in the `Current Assistant Response`. Aim for a concise description (typically 2-4 static sentences, no actions/dialogue).
+        *   Generate **new `new_scene_keywords`** (3-5 keywords) reflecting this *new* description.
+        *   Set `scene_changed_flag: true`.
+    *   **If Location Is The Same (or unclear change):**
+        *   Take the `previous_scene_description` as the base text.
+        *   Identify **specific, persistent environmental changes** described in the `Current Assistant Response` that affect this location (e.g., "the northern wall now lies in rubble," "rain streaks the windows," "a permanent magical ward glows on the door," "the campfire has died out"). Ignore transient actions or dialogue.
+        *   **Modify the base description** to accurately incorporate *only* these persistent environmental changes. Retain the rest of the base description that remains accurate. Ensure the final `new_scene_description` is static and concise.
+        *   Generate `new_scene_keywords` (3-5 keywords) reflecting the *final modified* description.
+        *   Set `scene_changed_flag: false` (because the core location remains the same, even if altered).
+# === END MODIFIED INSTRUCTION 4 ===
+
 5.  **Output Format:** Respond ONLY with a single, valid JSON object containing the complete new state. Ensure all keys listed below are present.
 
     ```json

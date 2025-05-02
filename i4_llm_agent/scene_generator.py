@@ -55,12 +55,12 @@ DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
     *   Examples of **Change:** Location shift (inn ? stable), time shift (day ? night), weather impact (sunny ? storm), or new setting focus (forest edge ? cave interior).
     *   Examples of **No Change:** Continued dialogue or movement within the same place, interaction with objects in the already-described scene.
 
-2.  **If Scene Changed — Generate New Output:**
-    *   First, generate 3–5 new **scene keywords** (e.g., ["stable", "hay", "dim", "lantern", "rain"])
-    *   Then generate a new **static scene description** (1–3 sentences) that includes:
+2.  **If Scene Changed - Generate New Output:**
+    *   First, generate 3-5 new **scene keywords** (e.g., ["stable", "hay", "dim", "lantern", "rain"])
+    *   Then generate a new **static scene description** (1-3 sentences) that includes:
         *   Location type and layout
         *   Specific environmental **features or objects** (e.g., crates, lanterns, firepit, bucket)
-        *   **Passive affordances** — items or structures that characters may notice or use, without describing actions
+        *   **Passive affordances** - items or structures that characters may notice or use, without describing actions
         *   Sensory detail (smells, lighting, temperature, sound)
         *   Scene mood or atmosphere
     *   Do **not** include any movement, dialogue, or character intent.
@@ -73,7 +73,7 @@ DEFAULT_SCENE_ASSESSMENT_TEMPLATE_TEXT = f"""
         }}
         ```
 
-3.  **If No Scene Change — Return Previous Scene JSON:**
+3.  **If No Scene Change - Return Previous Scene JSON:**
     *   If no major change occurred, return the original input as a valid JSON block:
         ```json
         {{
