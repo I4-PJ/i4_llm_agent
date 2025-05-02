@@ -1,274 +1,207 @@
+# i4_llm_agent - Advanced Memory Management for LLM Roleplay
 
-# Session Memory Pipe for Open WebUI (v0.18.6+)
+![Version](https://img.shields.io/badge/version-0.20.1-blue.svg)
 
-**Purpose**: Enhances long-form, character-driven roleplay sessions in Open WebUI by providing persistent memory, context management, and flexible LLM integration using the `i4_llm_agent` library. It intelligently summarizes conversations, retrieves relevant memories and lore, refines context, and constructs optimized prompts for the final AI model, while managing context length and API costs.
+## Overview
 
-**Version**: Aligns with Pipe Script v0.18.6+ and `i4_llm_agent` library v0.1.4+
+`i4_llm_agent` is a sophisticated memory management system designed for roleplay sessions in OpenWebUI. It implements a multi-tiered memory architecture that allows LLMs to maintain coherent, persistent context beyond standard context window limitations. The system manages various aspects of roleplay state including dialogue history, scene descriptions, character inventories, world state, and environmental elements.
 
----
+## Features
 
-## Core Components
+### Tiered Memory Architecture
 
-This system consists of two main parts:
+- **T0 Memory**: Immediate dialogue history maintained in context window
+- **T1 Memory**: Summarized chunks of dialogue stored in SQLite
+- **Aged Memory**: Condensed older T1 summaries for efficient long-term retention (New in v0.20.1)
+- **T2 Memory**: Vector-stored memories in ChromaDB for semantic retrieval
 
-1.  **`OpenWebUI_MemorySession_SCRIPT` (The Pipe Script):**
-    *   The script file loaded into Open WebUI's `pipe` function.
-    *   Handles integration with Open WebUI (receiving requests, user info, chat ID, embedding functions).
-    *   Manages global configuration via environment variables (`SM_*`) mapped to `Pipe.Valves`.
-    *   Sets up database connections (SQLite, ChromaDB) and the tokenizer.
-    *   Instantiates and coordinates with the `SessionPipeOrchestrator`.
-    *   Handles session identification (`__chat_id__`) and user-specific settings (`__user__['valves']`).
-    *   Determines regeneration heuristics.
-    *   Manages the final output (either passing a modified payload downstream or returning a direct string response).
+### Memory Aging System
 
-2.  **`i4_llm_agent` (The Python Library):**
-    *   Contains the core logic for memory management, RAG, prompting, API calls, session state, etc.
-    *   Provides the `SessionPipeOrchestrator` class, which encapsulates the main processing flow invoked by `script.txt`.
-    *   Includes modules for: `api_client`, `cache`, `database`, `history`, `memory`, `orchestration`, `prompting`, `session`, `utils`.
-    *   Designed to be potentially reusable outside the specific OWI pipe context.
+The Memory Aging feature condenses batches of older T1 summaries into single "aged summaries" when a threshold is reached:
 
----
+- Configurable trigger threshold for when aging should occur
+- Adjustable batch size for condensing summaries
+- Preserves narrative continuity while optimizing storage
+- Maintains sequential memory flow with clear chronology
 
-## 🧠 Memory Management (T0 → T1 → T2)
+### World and Scene Management
 
-### 🔹 TIER 0 (Active Dialogue Window)
+- Tracks day, time of day, weather, and season
+- Maintains scene descriptions and keywords
+- Provides dynamic weather progression with intelligent transitions
+- Generates environmental event hints for immersion
+- Two-stage state assessment for coherent world progression
 
-*   The portion of the **recent dialogue history** (user/assistant turns) considered active for the immediate context.
-*   Starts *after* the last message included in a T1 summary.
-*   Its size implicitly influences the T1 summarization trigger (`T0_TOKEN_LIMIT` + `T1_CHUNK_TARGET`).
+### Character Inventory Tracking
 
-### 🔸 TIER 1 (Short-Term Summarized Memory)
+- Monitors item acquisitions, removals, and modifications
+- Supports command-based and natural language inventory changes
+- Recognizes narrative-based inventory modifications
+- Stores persistent inventory state per character
 
-*   **Trigger:** When the unsummarized dialogue exceeds a threshold (`T0_TOKEN_LIMIT` + `T1_CHUNK_TARGET`).
-*   **Process:** The oldest chunk of unsummarized dialogue (target size `T1_CHUNK_TARGET`) is summarized by an LLM (e.g., Gemini Flash).
-*   **Storage:** Summaries are saved in a **SQLite database** (`tier1_text_summaries` table) with metadata (turn indices, timestamps).
-*   **Regen Check:** Avoids creating duplicate summaries for the exact same turn indices during regeneration.
-*   **Limit:** Stores up to `SM_MAX_STORED_SUMMARY_BLOCKS`. Oldest is migrated to T2 when the limit is exceeded.
+### Context Processing
 
-### 🟣 TIER 2 (Long-Term Embedded Memory/Lore)
+- Refines background context for relevance to current query
+- Selects appropriate memory summaries based on context
+- Structures content in XML format for clear delineation
+- Prepends usage guidelines to ensure proper context interpretation
+- RAG-based retrieval for semantically relevant memories
 
-*   **Source:** T1 summaries migrated due to storage limits. (Can potentially be extended to ingest external lore documents).
-*   **Process:** Text is embedded using OWI's configured embedding model.
-*   **Storage:** Embeddings and text stored in a session-specific **ChromaDB collection**.
-*   **Retrieval:** Queried using semantic search based on an LLM-generated query derived from the current dialogue context (`generate_rag_query`).
+## Technical Components
 
----
+### Core Modules
 
-## ✨ Context Refinement & RAG
+- **SessionPipeOrchestrator**: Main coordinator managing the processing flow
+- **SessionManager**: In-memory session state handler
+- **Pipe**: Interface with OpenWebUI
+- **Database Integration**: SQLite for structured data, ChromaDB for vector storage
+- **LLM Integration**: Supports multiple LLM APIs through adapter patterns
 
-This system offers two primary modes for processing external context (like that provided by OWI's RAG):
+### Directory Structure
 
-### 1. RAG Cache (Two-Step)
+```
+i4_llm_agent/
+├── __init__.py               # Package exports and version info
+├── api_client.py             # LLM API integration (LiteLLM support)
+├── cache.py                  # RAG cache functionality
+├── context_processor.py      # Context selection and formatting
+├── database.py               # SQLite and ChromaDB operations
+├── event_hints.py            # Environmental detail generation
+├── history.py                # Dialogue history management
+├── inventory.py              # Character inventory tracking
+├── memory.py                 # T1 summarization and management
+├── orchestration.py          # Main processing coordination
+├── prompting.py              # Prompt templates and formatting
+├── session.py                # Session state management
+├── state_assessment.py       # World and scene state tracking
+└── utils.py                  # Utility functions (token counting, etc.)
+```
 
-*   **Enabled via:** `SM_ENABLE_RAG_CACHE=true` (Global Valve)
-*   **Requires:** `SM_REFINER_API_URL/KEY`, `SM_CACHE_UPDATE_PROMPT_TEMPLATE`, `SM_FINAL_SELECT_PROMPT_TEMPLATE`.
-*   **Step 1 (Update Cache):** Merges previous cache content (SQLite `session_rag_cache` table), current OWI context (if `process_owi_rag` user valve is true), and recent history using an LLM call. Skips LLM call if OWI context is too short (`SM_CACHE_UPDATE_SKIP_OWI_THRESHOLD`) or too similar to the previous cache (`SM_CACHE_UPDATE_SIMILARITY_THRESHOLD`). Updates the SQLite cache table.
-*   **Step 2 (Select Final Context):** Takes the updated cache (and optionally current OWI context again) and uses another LLM call to extract only the snippets most relevant to the current user query and history. This selected context is then used in the final prompt.
-*   **Goal:** Maintain a persistent, refined cache of background info per session, minimizing redundant processing and selecting only hyper-relevant details for the final prompt.
+## Installation
 
-### 2. Stateless Refinement
+This package is currently used as an internal component for OpenWebUI. To install:
 
-*   **Enabled via:** `SM_ENABLE_STATELESS_REFINEMENT=true` (Global Valve, ignored if RAG Cache is enabled).
-*   **Requires:** `SM_REFINER_API_URL/KEY`, `SM_STATELESS_REFINER_PROMPT_TEMPLATE`.
-*   **Process:** Takes the current OWI context (if `process_owi_rag` user valve is true) and uses a single LLM call to extract/rephrase the parts most relevant to the current query and history. Skips if OWI context is below `SM_STATELESS_REFINER_SKIP_THRESHOLD`.
-*   **Goal:** Quickly filter the current OWI context for relevance without maintaining a persistent cache.
+1. Clone the repository or download the source code
+2. Navigate to the project root directory
+3. Install the package in development mode:
 
-### T2 RAG (Independent Lookup)
+```bash
+pip install .
+```
 
-*   Happens regardless of the refinement mode chosen above.
-*   Generates a query using `generate_rag_query` (needs `SM_RAGQ_LLM_API_URL/KEY/PROMPT`).
-*   Searches the T2 ChromaDB collection for relevant long-term summaries/lore.
-*   Results are included in the `combined_context_string` alongside T1 and refined/raw OWI context.
+This will install the package and its dependencies in your Python environment.
 
----
+For development work, you can install in editable mode:
 
-## 🚀 Key Features & Concepts
+```bash
+pip install -e .
+```
 
-*   **Modular Design:** Core logic separated into the `i4_llm_agent` library, orchestrated by `OpenWebUI_MemorySession_SCRIPT`.
-*   **Tiered Memory:** Efficiently manages short-term and long-term context (T0 -> T1 -> T2).
-*   **Configurable Context Refinement:** Choose between stateless filtering or a two-step persistent cache.
-*   **Integrated T2 RAG:** Retrieves relevant long-term memories via semantic search.
-*   **Session Isolation:** Uses `__chat_id__` and user ID to separate memory and state.
-*   **Regeneration Handling:** Prevents duplicate T1 summary generation for identical history blocks.
-*   **User-Configurable Session Valves:** Allows per-chat overrides (`long_term_goal`, `process_owi_rag`, `text_block_to_remove`).
-*   **Optional Final LLM Call:** Pipe can either pass the constructed payload downstream OR make a final non-streaming call itself and return the response string.
-*   **Flexible LLM Configuration:** Separate API settings for Summarizer, RAG Query Gen, Refiner, and Final LLM.
-*   **Status Updates:** Provides feedback to the UI via `__event_emitter__`.
-*   **Debug Logging:** Optional detailed logging of inputs and final payloads.
+## Dependencies
 
----
+- Python 3.8+
+- OpenWebUI environment
+- LLM API access (configurable)
+- Required packages:
+  - pydantic
+  - chromadb
+  - tiktoken
+  - httpx
 
-## How it Works (Processing Flow)
+## Configuration
 
-When the pipe receives a request from Open WebUI:
+### Environment Variables
 
-1.  **Initialization & Session Setup:**
-    *   `OpenWebUI_MemorySession_SCRIPT` validates input and identifies the session using `__chat_id__` and user ID.
-    *   Retrieves or creates an in-memory session state using `SessionManager`.
-    *   Parses `UserValves` from `__user__['valves']` (session-specific settings like `long_term_goal`, `process_owi_rag`).
-    *   Calculates a `is_regeneration_heuristic` flag based on comparing current and previous input messages.
+Key configuration parameters can be set via environment variables:
 
-2.  **Orchestration Begins (`SessionPipeOrchestrator.process_turn`):**
-    *   **History Sync:** Ensures the orchestrator's view of active history matches the incoming request.
-    *   **Effective Query Determination:** Identifies the actual user query to process (handling regeneration).
-    *   **T1 Summarization Check:** Calls `manage_tier1_summarization` to check if enough new dialogue exists to warrant summarization. **Includes a check to skip LLM call if regenerating an identical block.**
-    *   **T1 -> T2 Transition Check:** If T1 summarization occurred and T1 storage limits are exceeded, moves the oldest T1 summary to the T2 ChromaDB vector store.
-    *   **Context Preparation:**
-        *   Retrieves recent T1 summaries (SQLite).
-        *   Generates a RAG query based on recent dialogue and searches T2 (ChromaDB) for relevant older summaries/lore.
-    *   **Context Refinement:** Based on global valves (`SM_ENABLE_RAG_CACHE`, `SM_ENABLE_STATELESS_REFINEMENT`):
-        *   **RAG Cache (Two-Step):** If enabled, updates a session-specific cache (SQLite) by merging previous cache, current OWI context (if `process_owi_rag` user valve is true), and history, then selects the most relevant parts for the current query using LLM calls. Includes similarity/length skip logic for the update step.
-        *   **Stateless Refinement:** If enabled (and RAG Cache disabled), uses an LLM call to refine the current OWI context based on the query and history.
-        *   **None:** If neither is enabled, uses raw OWI context (if `process_owi_rag` is true) or potentially no external context.
-    *   **Combine Background:** Merges the refined/raw context, T1 summaries, and T2 RAG results into a single `combined_context_string`.
-    *   **T0 History Selection:** Selects the relevant recent dialogue turns (after the last T1 summary, before the effective query) for the final prompt.
-    *   **Final Payload Construction:** Builds the `contents` list for the final LLM using the processed system prompt, T0 history, combined context, user query, and **injecting the `long_term_goal` user valve**.
-    *   **Final Status Calculation:** Assembles a status string with key metrics (memory counts, token counts, refinement status).
-    *   **Execute/Prepare Output:**
-        *   If `SM_FINAL_LLM_API_URL/KEY` are set, makes a **non-streaming** call to the specified final LLM using the constructed payload. Returns the LLM's response string or an error string.
-        *   If not triggered, returns the modified payload dictionary (containing the constructed `messages`) for OWI to handle downstream.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SM_LOG_FILE_PATH` | Path to log file | `C:\Utils\OpenWebUI\session_memory_v20_1_pipe_log.log` |
+| `SM_LOG_LEVEL` | Logging level (DEBUG, INFO, etc.) | `DEBUG` |
+| `SM_TOKENIZER_ENCODING` | Tokenizer encoding name | `cl100k_base` |
+| `SM_T0_ACTIVE_HISTORY_TOKEN_LIMIT` | Token limit for T0 active window | `4000` |
+| `SM_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET` | Target token size for T1 chunks | `2000` |
+| `SM_MAX_STORED_SUMMARY_BLOCKS` | Maximum T1 summaries before T2 push | `20` |
+| `SM_AGING_TRIGGER_THRESHOLD` | Threshold to trigger memory aging | `15` |
+| `SM_AGING_BATCH_SIZE` | Number of T1 summaries to condense | `5` |
+| `SM_CHROMADB_PATH` | Path to ChromaDB | `C:\Utils\OpenWebUI\session_summary_t2_db` |
+| `SM_SQLITE_DB_PATH` | Path to SQLite database | `C:\Utils\OpenWebUI\session_memory_tier1_cache_inventory.db` |
 
-3.  **Return Result:** `script.txt` receives the `Dict` or `str` from the orchestrator and returns it to Open WebUI.
+Additional configuration options are available for LLM API endpoints, temperatures, RAG parameters, and feature toggles.
 
----
+### User Valves
 
-## ⚙️ Configuration (Valves & Environment Variables)
+User-specific settings that can be configured per session:
 
-When setting openrouter API, use path like that https://openrouter.ai/api/v1/chat/completions#google/gemini-2.5-pro   so, API path separated by '#' from model name. Google API (prefered) is set as e.g. https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-preview-03-25:generateContent. To be refactored in future.
+- `long_term_goal`: A persistent objective guiding the session
+- `process_owi_rag`: Enable/disable processing of RAG context
+- `text_block_to_remove`: Specific text to remove from system prompt
+- `period_setting`: Historical period or setting (e.g., "Victorian Era")
 
-Set these environment variables before starting Open WebUI to configure the pipe globally.
+## OpenWebUI Integration
 
-| Env Var                                | Default Value (or Description)                      | Purpose                                                                 |
-| :------------------------------------- | :-------------------------------------------------- | :---------------------------------------------------------------------- |
-| `SM_LOG_FILE_PATH`                     | `...\OpenWebUI\session_memory_v18_6_pipe.log` | Path for the main log file.                                             |
-| `SM_LOG_LEVEL`                         | `DEBUG`                                             | Logging level (DEBUG, INFO, WARNING, ERROR).                            |
-| `SM_SQLITE_DB_PATH`                    | `...\session_memory_tier1_and_cache.db`             | Path for SQLite DB (T1 Summaries & RAG Cache).                          |
-| `SM_CHROMADB_PATH`                     | `...\session_summary_t2_db`                         | Path for ChromaDB persistent storage (T2 Embeddings).                   |
-| `SM_SUMMARY_COLLECTION_PREFIX`         | `sm_t2_`                                            | Prefix for ChromaDB collection names (followed by session ID).          |
-| `SM_TOKENIZER_ENCODING`                | `cl100k_base`                                       | tiktoken encoding name for token counting.                              |
-| `SM_INCLUDE_ACK_TURNS`                 | `true`                                              | Include 'Understood.' turns in constructed prompts.                     |
-| `SM_EMIT_STATUS_UPDATES`               | `true`                                              | Send processing status updates to the UI.                               |
-| **T1 Summarizer**                      |                                                     |                                                                         |
-| `SM_SUMMARIZER_API_URL`                | Gemini Flash Endpoint                               | URL for the T1 summarization LLM.                                       |
-| `SM_SUMMARIZER_API_KEY`                | `""` (REQUIRED)                                     | API Key for the T1 summarizer LLM.                                      |
-| `SM_SUMMARIZER_TEMPERATURE`            | `0.5`                                               | Temperature for T1 summarization (0.0-2.0).                             |
-| `SM_SUMMARIZER_SYSTEM_PROMPT`          | (See Constants)                                     | System prompt for the T1 summarizer.                                    |
-| `SM_T1_SUMMARIZATION_CHUNK_TOKEN_TARGET` | `2000`                                              | Target token size for dialogue chunks sent to T1 summarizer.            |
-| `SM_MAX_STORED_SUMMARY_BLOCKS`         | `10`                                                | Max T1 summaries in SQLite before migrating oldest to T2.                 |
-| `SM_T0_ACTIVE_HISTORY_TOKEN_LIMIT`     | `4000`                                              | Approx. token limit that triggers T1 summarization check.               |
-| **T2 RAG Query Generation**            |                                                     |                                                                         |
-| `SM_RAGQ_LLM_API_URL`                  | Gemini Flash Endpoint                               | URL for the RAG query generation LLM.                                   |
-| `SM_RAGQ_LLM_API_KEY`                  | `""` (REQUIRED)                                     | API Key for the RAG query generation LLM.                               |
-| `SM_RAGQ_LLM_TEMPERATURE`              | `0.3`                                               | Temperature for RAG query generation.                                   |
-| `SM_RAGQ_LLM_PROMPT`                   | (See Constants)                                     | Prompt template for RAG query generation.                               |
-| `SM_RAG_SUMMARY_RESULTS_COUNT`         | `3`                                                 | Number of T2 results to retrieve from ChromaDB.                         |
-| **Context Refinement**                 |                                                     |                                                                         |
-| `SM_ENABLE_RAG_CACHE`                  | `false`                                             | Enable the Two-Step RAG Cache refinement feature.                       |
-| `SM_ENABLE_STATELESS_REFINEMENT`       | `false`                                             | Enable Stateless Refinement (if RAG Cache is false).                    |
-| `SM_REFINER_API_URL`                   | Gemini Flash Endpoint                               | URL for the Refinement LLM (used by both RAG Cache & Stateless).        |
-| `SM_REFINER_API_KEY`                   | `""` (REQUIRED if refinement enabled)               | API Key for the Refinement LLM.                                         |
-| `SM_REFINER_TEMPERATURE`               | `0.3`                                               | Temperature for Refinement LLM calls.                                   |
-| `SM_REFINER_HISTORY_COUNT`             | `6`                                                 | Number of recent history turns used in refinement prompts.              |
-| `SM_CACHE_UPDATE_PROMPT_TEMPLATE`      | (Library Default)                                   | Env var to override the Step 1 (Cache Update) prompt template.          |
-| `SM_FINAL_SELECT_PROMPT_TEMPLATE`      | (Library Default)                                   | Env var to override the Step 2 (Final Select) prompt template.          |
-| `SM_CACHE_UPDATE_SKIP_OWI_THRESHOLD`   | `50`                                                | Skip Cache Step 1 if OWI context char length < this.                    |
-| `SM_CACHE_UPDATE_SIMILARITY_THRESHOLD` | `0.9`                                               | Skip Cache Step 1 if OWI context similarity to cache > this (0.0-1.0).  |
-| `SM_STATELESS_REFINER_PROMPT_TEMPLATE` | (Library Default)                                   | Env var to override the Stateless Refinement prompt template.           |
-| `SM_STATELESS_REFINER_SKIP_THRESHOLD`  | `500`                                               | Skip Stateless Refinement if OWI context char length < this.            |
-| **Optional Final LLM Call**            |                                                     |                                                                         |
-| `SM_FINAL_LLM_API_URL`                 | `""` (DISABLED by default)                          | URL for the final LLM call (if enabled, pipe returns string response).  |
-| `SM_FINAL_LLM_API_KEY`                 | `""` (DISABLED by default)                          | API Key for the final LLM call.                                         |
-| `SM_FINAL_LLM_TEMPERATURE`             | `0.7`                                               | Temperature for the final LLM call.                                     |
-| `SM_FINAL_LLM_TIMEOUT`                 | `120`                                               | Timeout in seconds for the final LLM call.                              |
-| **Debugging**                          |                                                     |                                                                         |
-| `SM_DEBUG_LOG_RAW_INPUT`               | `false`                                             | Log the full raw input `body` to a `.DEBUG_INPUT.log` file.           |
-| `SM_DEBUG_LOG_FINAL_PAYLOAD`           | `false`                                             | Log the final constructed payload to a `.DEBUG_PAYLOAD.log` file.       |
+### PIPE Script Configuration
 
----
+The package includes a special script file for OpenWebUI integration:
 
-## 👤 User Session Valves
+1. Upload the `OpenWebUI_MemorySession_SCRIPT.py` file through the OpenWebUI Functions interface
+2. Configure it as a PIPE function
+3. Enable the PIPE for your chat sessions
 
-These settings can be configured **per chat** within the Open WebUI "Chat Settings" -> "Valves" section for the pipe.
+The script contains the necessary metadata and configuration for OpenWebUI:
 
-| Parameter               | Type    | Default | Description                                                                                                                               |
-| :---------------------- | :------ | :------ | :---------------------------------------------------------------------------------------------------------------------------------------- |
-| `long_term_goal`        | `string`| `""`    | Persistent session goal/instruction injected into the system prompt. Remains until changed in chat settings.                                |
-| `process_owi_rag`       | `bool`  | `true`  | If `true`, processes context from OWI's RAG. If `false`, ignores OWI context and skips RAG Cache Step 1 (cache update based on OWI input). |
-| `text_block_to_remove`  | `string`| `""`    | Exact text block to remove from the system prompt (e.g., conflicting default instructions). Leave empty to disable.                           |
+```python
+# --- REQUIRED METADATA HEADER ---
+"""
+title: SESSION_MEMORY PIPE (v0.20.1 - Memory Aging)
+author: Petr Jilek & Assistant Gemini
+version: 0.20.1
+description: Adds Memory Aging feature. Condenses oldest T1 summaries into Aged Summaries when count exceeds threshold. Reverted default DB name. Requires i4_llm_agent>=0.2.0.
+requirements: pydantic, chromadb, i4_llm_agent>=0.2.0, tiktoken, httpx, open_webui (internal utils)
+"""
+```
 
----
+This script serves as the entry point for the memory management system in OpenWebUI, initializing the Pipe class and handling all communication between the UI and the memory management system.
 
-## 🚀 Setup & Usage
+## Memory Aging Process
 
-1.  **Install Library:** Ensure the `i4_llm_agent` library (v0.1.4+) and its dependencies (`tiktoken`, `httpx`, `chromadb`) are installed in your Open WebUI Python environment. You might need a `requirements.txt`:
-    ```txt
-    # requirements.txt (example)
-    tiktoken
-    chromadb
-    i4_llm_agent>=0.1.4
-    httpx
-    # Add other dependencies if needed by OWI or your setup
+The memory aging system follows this process:
 
-   Library istelf can be installed after downloading the folder with using `pip install .` executed from within a project `i4_llm_agent` folder.
+1. Monitor T1 summary count against threshold
+2. When threshold is reached, select oldest batch of T1 summaries
+3. Condense batch into a single, coherent "aged summary"
+4. Store the new aged summary and delete original T1 summaries
+5. Make aged summaries available for future context
 
-    Install dependencies (shouldn't be needed if using open webui) using `pip install -r requirements.txt`.
-1.  **Place Script:** Copy the latest `OpenWebUI_MemorySession_SCRIP` content into your Open WebUI functions.
-2.  **Configure Environment:** Set the `SM_*` environment variables (especially API keys and desired paths) before launching Open WebUI or via Valves.
-3.  **Restart Open WebUI:** Ensure the changes are picked up.
-4.  **Select Pipe:** In Open WebUI, select the "SESSION\_MEMORY PIPE" in the chat settings or set it as a base model.
-5.  **Configure User Valves:** Adjust the session-specific User Valves (`long_term_goal`, etc.) in the Chat Settings -> Valves section as needed.
+This creates a progressively compressed memory hierarchy that mimics human memory abstraction over time.
 
-for in case of issue with SQLLite database (to be executed manualy towards the database to create tables accordingly.):
-Cache table create query: CREATE TABLE session_rag_cache (
-                session_id TEXT PRIMARY KEY,
-                cached_context TEXT NOT NULL,
-                last_updated_utc REAL NOT NULL,
-                last_updated_iso TEXT
-            )
-TIER 1 memory table create query:
-CREATE TABLE tier1_text_summaries (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    user_id TEXT,
-                    summary_text TEXT NOT NULL,
-                    timestamp_utc REAL NOT NULL,
-                    timestamp_iso TEXT,
-                    turn_start_index INTEGER,
-                    turn_end_index INTEGER,
-                    char_length INTEGER,
-                    config_t0_token_limit INTEGER,
-                    config_t1_chunk_target INTEGER,
-                    calculated_prompt_tokens INTEGER,
-                    t0_end_index_at_summary INTEGER
+## Status and Debugging
 
----
+The system provides detailed status updates about memory operations:
 
-## 💾 Storage
+- T1 summarization metrics
+- Aging operations tracking
+- T2 transitions
+- Context selection information
+- Token usage across different memory tiers
 
-*   **SQLite Database (`SM_SQLITE_DB_PATH`):** Stores Tier 1 summaries and the RAG Cache table (`session_rag_cache`).
-*   **ChromaDB (`SM_CHROMADB_PATH`):** Stores Tier 2 embedded summaries/lore vector data persistently.
-*   **Log Files (`SM_LOG_FILE_PATH` directory):** Contains the main `.log` file and optional `.DEBUG_INPUT.log` and `.DEBUG_PAYLOAD.log` files.
+Debug logs can be enabled for detailed analysis of memory operations.
 
----
+## Contribution
 
-## 📈 Roadmap & Enhancements
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-*   ✅ **Tiered Memory (T0/T1/T2):** Implemented.
-*   ✅ **Context Refinement Options:** RAG Cache (Two-Step) and Stateless Refinement implemented.
-*   ✅ **T2 RAG Lookup:** Implemented.
-*   ✅ **Session Isolation & User Valves:** Implemented (`long_term_goal`, `process_owi_rag`, `text_block_to_remove`).
-*   ✅ **Regeneration Handling:** Duplicate T1 check implemented.
-*   ✅ **Non-Streaming Final LLM Option:** Implemented.
-*   🔄 **Investigate:** History synchronization robustness, especially around OWI stop/regen actions causing empty history lists.
-*   💡 **Planned:** Time-aware memory retrieval, selective character-scoped embeddings, direct lore document ingestion into T2.
-*   💡 **Optional:** Integrate local LLMs for summarization/refinement steps.
+## License
 
----
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-## ✍️ Author & Credits
+## Acknowledgements
 
-*   Primarily designed and developed by Petr Jílek & AI Assistant (Gemini Pro).
-*   Leverages the `i4_llm_agent` library.
-*   Integrates with Open WebUI, ChromaDB, and various LLM APIs.
+- OpenWebUI community for the integration framework
+- ChromaDB for vector storage capabilities
+- Contributors to the LLM agent architecture
+- Google Gemini 2.5 
 
----
+
+
+*Version 0.20.1 - Memory Aging, Reverted DB Name*
