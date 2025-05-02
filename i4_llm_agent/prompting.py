@@ -221,45 +221,51 @@ CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 # Default prompt template for Step 1: Cache Update
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Session Background Cache Maintainer
-**Task:** Intelligently update the SESSION CACHE using relevant information from the CURRENT OWI RETRIEVAL. Prioritize maintaining accurate core character profiles and lore while integrating **new facts, significant details, clarifications, or elaborations**.
-**Objective:** Maintain an accurate and structured cache for long-term context, balancing stability with incorporating meaningful updates from OWI.
+**Role:** Session Background Cache Change Detector
+**Task:** Analyze the CURRENT OWI RETRIEVAL and compare it against the PREVIOUSLY REFINED CACHE. Identify **only the necessary changes** (additions, modifications, deletions) required to update the cache based on new or corrected information in the OWI retrieval. Output these changes as a structured JSON object.
+**Objective:** Generate a precise delta of changes, enabling deterministic application to the cache. Focus on factual updates, character profile additions/corrections, and new lore sections.
 
 **Inputs:**
-- LATEST USER QUERY (for context)
-- CURRENT OWI RETRIEVAL (source of potential new info, details, profiles)
-- PREVIOUSLY REFINED CACHE (base for update)
+- LATEST USER QUERY (for context on relevance)
+- CURRENT OWI RETRIEVAL (source of potential new/updated info)
+- PREVIOUSLY REFINED CACHE (the state to be updated)
 - RECENT CHAT HISTORY (for context only)
 
 **Core Instructions:**
 
-1.  **Identify & Update/Preserve Character Profiles:**
-    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents or significant descriptive passages about characters.
-    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (e.g., under `# Character: Name` headings).
-    *   **Action:** If a character profile exists in PREVIOUS CACHE:
-        *   **KEEP** the core identity and established traits.
-        *   **MERGE/ADD** concise, relevant new details, clarifications, or significant trait elaborations found in CURRENT OWI RETRIEVAL into the existing profile summary. Do not drastically alter core traits based only on RECENT CHAT HISTORY.
-        *   Only *replace* major parts of a profile if CURRENT OWI provides clearly contradictory or superseding *factual* information (not just nuanced descriptions).
-    *   **Action:** If a NEW profile is found in CURRENT OWI for a character NOT in PREVIOUS CACHE, summarize its essential details (Identity, Traits, Role) and ADD it to the output under a new heading.
-
-2.  **Integrate NEW or Elaborated Factual Lore:**
-    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for background facts (lore, world details, established events, locations).
-    *   **Action:** Compare these facts against the PREVIOUSLY REFINED CACHE.
-        *   If a fact is genuinely **NEW** and relevant, ADD it.
-        *   If a fact **ELABORATES significantly** on, **CLARIFIES**, or provides important **new DETAILS** for an existing topic in the cache, integrate these details concisely into the relevant section.
-        *   If a fact provides a clear **CORRECTION/UPDATE** to existing lore, MODIFY the cache accordingly.
-        *   Do NOT add minor rephrasing or clearly redundant facts.
-
-3.  **Minimal Pruning:**
-    *   **Action:** Only remove sections from the PREVIOUS CACHE if they are *explicitly contradicted* by newer info in CURRENT OWI or are clearly no longer relevant (e.g., a character definitively removed from the story). **Default to keeping existing information unless strong evidence dictates removal.**
-
-4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what information* from OWI to add/update/elaborate on. **DO NOT summarize the history itself in the cache.**
-
-5.  **Output Format:**
-    *   Produce the complete, updated SESSION CACHE text.
-    *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
-    *   **No Change:** If analysis shows no significant additions/updates/removals/elaborations are needed based on the OWI input, output ONLY the exact text: `[NO_CACHE_UPDATE]`
-    *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
+1.  **Compare OWI to Cache:** Systematically compare content under corresponding headings (e.g., `# Character: Name`, `# Lore: Topic`) between CURRENT OWI RETRIEVAL and PREVIOUSLY REFINED CACHE. Also look for entirely new headings/sections in OWI.
+2.  **Identify Changes:** Determine if action is needed for each piece of information:
+    *   **`add`**: A new character profile, lore topic, or section heading is present in OWI but *completely missing* from the Cache.
+    *   **`modify`**: An existing section/heading in the Cache needs updating because OWI provides *significant corrections, factual updates, or crucial new details* for that specific topic. Minor rephrasing or slightly different descriptions in OWI do *not* warrant a `modify`. The change should be substantial. Provide the *complete new content* for the section.
+    *   **`delete`**: An existing section/heading in the Cache is *explicitly contradicted* by OWI or clearly represents obsolete information (e.g., a character confirmed dead/removed).
+3.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to gauge the *relevance* of potential changes found in OWI. **DO NOT extract changes directly from the history.**
+4.  **Structure Output as JSON Delta:** Output ONLY a single, valid JSON object adhering strictly to the following format:
+    ```json
+    {{  //
+      "changes": [
+        // Array of change objects. Empty if no changes detected.
+        {{ //
+          "action": "add",
+          "heading": "# Heading Name", // The full heading line for the new section
+          "content": "Full content for the new section..."
+        }}, //
+        {{ //
+          "action": "modify",
+          "heading": "# Existing Heading Name", // The exact heading of the section to change
+          "content": "Complete new content for the modified section..." // Provide the full replacement content
+        }}, //
+        {{ //
+          "action": "delete",
+          "heading": "# Heading To Remove" // The exact heading of the section to delete
+          // "content" field is ignored for delete actions
+        }} //
+        // ... more change objects if needed
+      ]
+    }}  // 
+    ```
+    *   **Headings:** Use the exact heading text (e.g., starting with `#` or `===`) as found in the Cache or OWI.
+    *   **Content:** For `add` and `modify`, provide the *complete* text content that should exist under that heading after the update.
+5.  **No Changes:** If your analysis determines that NO additions, modifications, or deletions are warranted based on the OWI input compared to the Cache, output `{{"changes": []}}`. // <<< SINGLE BRACES HERE TOO
 
 **INPUTS:**
 
@@ -281,7 +287,7 @@ DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 {CACHE_UPDATE_HISTORY_PLACEHOLDER}
 ---
 
-**OUTPUT (Updated Session Cache Text - Structured, or [NO_CACHE_UPDATE], or [No relevant background context found]):**
+**OUTPUT (JSON Delta Object):**
 """
 
 # Final Context Selector Prompt Template (v1.1 - RESTORED)
@@ -596,22 +602,49 @@ def format_cache_update_prompt(
 ) -> str:
     func_logger = logging.getLogger(__name__ + '.format_cache_update_prompt')
     if not template or not isinstance(template, str): return "[Error: Invalid Template for Cache Update]"
-    safe_prev_cache = previous_cache.replace("{", "{{").replace("}", "}}") if isinstance(previous_cache, str) else ""
-    safe_current_owi = current_owi_rag.replace("{", "{{").replace("}", "}}") if isinstance(current_owi_rag, str) else ""
-    safe_history = recent_history_str.replace("{", "{{").replace("}", "}}") if isinstance(recent_history_str, str) else ""
-    safe_query = query.replace("{", "{{").replace("}", "}}") if isinstance(query, str) else ""
+
+    # NOTE: We do NOT need to escape braces in the input data here,
+    # because we are using simple string replacement, not .format()
+    safe_prev_cache = str(previous_cache) if previous_cache is not None else ""
+    safe_current_owi = str(current_owi_rag) if current_owi_rag is not None else ""
+    safe_history = str(recent_history_str) if recent_history_str is not None else ""
+    safe_query = str(query) if query is not None else ""
+
     try:
-        formatted_prompt = template.format(
-             **{
-                 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER.strip('{}'): safe_prev_cache,
-                 CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER.strip('{}'): safe_current_owi,
-                 CACHE_UPDATE_HISTORY_PLACEHOLDER.strip('{}'): safe_history,
-                 CACHE_UPDATE_QUERY_PLACEHOLDER.strip('{}'): safe_query
-             }
-        )
+        # Manual replacement - less prone to complex format string parsing errors
+        # Assumes the `template` string already contains the literal placeholder strings
+        # (e.g., "{query}", "{previous_cache}") because the constant was defined using an f-string.
+        formatted_prompt = template.replace(CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER, safe_prev_cache)
+        formatted_prompt = formatted_prompt.replace(CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER, safe_current_owi)
+        formatted_prompt = formatted_prompt.replace(CACHE_UPDATE_HISTORY_PLACEHOLDER, safe_history)
+        formatted_prompt = formatted_prompt.replace(CACHE_UPDATE_QUERY_PLACEHOLDER, safe_query)
+
+        # Optional: Check if any placeholders remain unreplaced (indicates an issue)
+        # This check assumes the placeholder constants themselves don't appear literally elsewhere in the prompt.
+        placeholders = [
+            CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER,
+            CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER,
+            CACHE_UPDATE_HISTORY_PLACEHOLDER,
+            CACHE_UPDATE_QUERY_PLACEHOLDER
+        ]
+        # Ensure we check against the actual placeholder *values* if they are defined elsewhere,
+        # or use the literal strings if the constants hold them directly.
+        # Assuming constants hold strings like "{query}":
+        if any(ph in formatted_prompt for ph in placeholders):
+             # Log the specific placeholder(s) found
+             found_placeholders = [ph for ph in placeholders if ph in formatted_prompt]
+             func_logger.warning(f"Potential placeholder(s) missed during manual .replace() formatting for cache update prompt: {found_placeholders}")
+             # Decide if this should be a hard error or just a warning
+             # return f"[Error: Unreplaced placeholders detected: {found_placeholders}]"
+
+
+        # Since we use .replace(), we don't need to worry about escaping braces
+        # in the template string itself (like {{ or }}).
+
         return formatted_prompt
-    except KeyError as e: func_logger.error(f"Missing placeholder in cache update prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
-    except Exception as e: func_logger.error(f"Error formatting cache update prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
+    except Exception as e:
+        func_logger.error(f"Error formatting cache update prompt using manual replacement: {e}", exc_info=True)
+        return f"[Error formatting: {type(e).__name__}]"
 
 # --- Function: Format Final Context Selection Prompt (Existing - Unchanged from latest) ---
 def format_final_context_selection_prompt(
