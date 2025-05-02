@@ -1,6 +1,7 @@
+# === START MODIFIED FILE: i4_llm_agent/history.py ===
 # i4_llm_agent/history.py
 import logging
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple # Added Tuple to typing imports
 import json # For pretty printing debug output
 
 logger = logging.getLogger(__name__) # Gets logger named 'i4_llm_agent.history'
@@ -134,10 +135,10 @@ def select_turns_for_t0(
     full_history: List[Dict],
     target_tokens: int,
     tokenizer: Any, # Expects .encode() method
-    max_overflow_ratio: float = 1.15,
+    max_overflow_ratio: float = 1.15, # Default is float
     fallback_turns: int = 10,
     dialogue_only_roles: List[str] = DIALOGUE_ROLES # Roles to consider for T0
-) -> List[Dict]:
+) -> Tuple[List[Dict], int, None]: # Return Type Annotation fixed previously
     """
     Selects recent messages for T0 context from dialogue roles ('user'/'assistant'),
     aiming for a token limit, and prioritizing turn completion within an overflow ratio.
@@ -152,14 +153,28 @@ def select_turns_for_t0(
         dialogue_only_roles: List of message roles to consider part of the dialogue.
 
     Returns:
-        A list of selected message dictionaries, containing only dialogue roles.
+        Tuple[List[Dict], int, None]:
+            - List of selected message dictionaries (dialogue roles only).
+            - Integer count of tokens in the selected slice.
+            - None (placeholder for the third expected value by the caller).
     """
     func_logger = logging.getLogger(__name__ + '.select_turns_for_t0')
     is_debug_enabled = func_logger.isEnabledFor(logging.DEBUG)
 
+    # <<< START NEW FIX >>>
+    # Defensively ensure max_overflow_ratio is a float
+    if not isinstance(max_overflow_ratio, (float, int)):
+        func_logger.warning(f"[T0 Select Init] Parameter 'max_overflow_ratio' received as unexpected type {type(max_overflow_ratio)}. Value: {max_overflow_ratio}. Resetting to default 1.15.")
+        max_overflow_ratio = 1.15 # Reset to default float
+    elif isinstance(max_overflow_ratio, int):
+         # Convert int to float if passed as int
+        max_overflow_ratio = float(max_overflow_ratio)
+    # <<< END NEW FIX >>>
+
     if not full_history:
         func_logger.debug("[T0 Select] Input history is empty, returning empty T0 slice.")
-        return []
+        # Return value fixed previously
+        return [], 0, None
 
     # --- Filter for Dialogue Roles FIRST ---
     dialogue_history = [
@@ -168,7 +183,8 @@ def select_turns_for_t0(
     ]
     if not dialogue_history:
         func_logger.debug(f"[T0 Select] Input history contains no messages with roles in {dialogue_only_roles}. Returning empty T0 slice.")
-        return []
+        # Return value fixed previously
+        return [], 0, None
 
     if is_debug_enabled:
         func_logger.debug(f"[T0 Select Init] Filtered for dialogue roles ({dialogue_only_roles}). Kept {len(dialogue_history)} out of {len(full_history)} messages.")
@@ -179,12 +195,14 @@ def select_turns_for_t0(
             f"[T0 Select] Tokenizer unavailable. Falling back to last {fallback_turns} turns from dialogue history."
         )
         start_idx = max(0, len(dialogue_history) - fallback_turns)
-        return dialogue_history[start_idx:]
+        # Return value fixed previously
+        return dialogue_history[start_idx:], -1, None # Indicate unknown tokens with -1
 
     # --- Log Initial Parameters (after filtering) ---
     if is_debug_enabled:
         func_logger.debug(f"[T0 Select Init] Target tokens: {target_tokens}")
-        func_logger.debug(f"[T0 Select Init] Max overflow ratio: {max_overflow_ratio}")
+        # Now max_overflow_ratio is guaranteed to be a float here
+        func_logger.debug(f"[T0 Select Init] Max overflow ratio: {max_overflow_ratio:.2f}")
         if dialogue_history:
             last_msg_snippet = str(dialogue_history[-1].get('content', ''))[:50]
             func_logger.debug(f"[T0 Select Init] Dialogue History Last Msg Snippet: '{last_msg_snippet}...'")
@@ -234,7 +252,8 @@ def select_turns_for_t0(
     # --- Post-Loop Logging & Checks ---
     if not selected_history:
          func_logger.warning("[T0 Select PostLoop] Initial selection resulted in an empty slice (from dialogue history).")
-         return []
+         # Return value fixed previously
+         return [], 0, None
 
     if is_debug_enabled:
         func_logger.debug(f"[T0 Select PostLoop] Initial selection finished.")
@@ -270,23 +289,23 @@ def select_turns_for_t0(
                     preceding_tokens = -1 # Indicate error
 
             if preceding_tokens >= 0:
-                # === START MODIFICATION ===
                 # Explicitly recalculate overflow limit here for clarity and certainty
+                # max_overflow_ratio is now guaranteed to be a float
                 calculated_overflow_limit = target_tokens * max_overflow_ratio
                 projected_tokens = current_tokens + preceding_tokens
 
                 if is_debug_enabled:
+                    # Logging line that previously failed - no longer needs casting
                     func_logger.debug(
                         f"[T0 Turn Check] Preceding user tokens: {preceding_tokens}. "
                         f"Current slice tokens: {current_tokens}. "
                         f"Projected total: {projected_tokens}. "
                         f"Target: {target_tokens}. Ratio: {max_overflow_ratio:.2f}. "
-                        f"Calculated Overflow limit: {calculated_overflow_limit:.0f}" # Use calculated limit in log
+                        f"Calculated Overflow limit: {calculated_overflow_limit:.0f}"
                     )
 
                 # Check if adding the preceding user turn fits within the explicitly calculated overflow budget
                 if projected_tokens <= calculated_overflow_limit:
-                # === END MODIFICATION ===
                     func_logger.info( # Changed to INFO to ensure visibility if added
                         f"[T0 Turn Check] Including preceding 'user' turn (dialogue index {preceding_dialogue_index}) "
                         f"as projected tokens ({projected_tokens}) <= overflow limit ({calculated_overflow_limit:.0f})."
@@ -323,5 +342,7 @@ def select_turns_for_t0(
          # Optionally log full content if needed
          # func_logger.debug(f"[T0 Select Return] Final slice content:\n{json.dumps(selected_history, indent=2)}")
 
-    # Return the list containing only selected dialogue messages
-    return selected_history
+    # Return value fixed previously
+    # Return the list containing only selected dialogue messages, the token count, and None
+    return selected_history, current_tokens, None
+# === END MODIFIED FILE: i4_llm_agent/history.py ===

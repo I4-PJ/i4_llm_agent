@@ -1,6 +1,4 @@
-# === START MODIFIED SECTION: i4_llm_agent/database.py ===
-
-# [[START MODIFIED database.py - Add Scene State Table Initialization]]
+# === START MODIFIED FILE: i4_llm_agent/database.py ===
 # i4_llm_agent/database.py
 
 import logging
@@ -8,8 +6,8 @@ import sqlite3
 import asyncio
 import re
 import os
-import json # Added for world state and scene state
-from datetime import datetime, timezone # Added for inventory/world/scene timestamp
+import json # Added for world state, scene state, and aged summary metadata
+from datetime import datetime, timezone # Added for inventory/world/scene/aged timestamp
 from typing import (
     Optional, Dict, List, Tuple, Union, Any, Callable, Coroutine, Sequence
 )
@@ -37,7 +35,9 @@ T1_SUMMARY_TABLE_NAME = "tier1_text_summaries"
 RAG_CACHE_TABLE_NAME = "session_rag_cache"
 INVENTORY_TABLE_NAME = "character_inventory"
 WORLD_STATE_TABLE_NAME = "session_world_state"
-SCENE_STATE_TABLE_NAME = "session_scene_state" # <<< NEW: Scene State Table Name
+SCENE_STATE_TABLE_NAME = "session_scene_state"
+# <<< NEW: Aged Summary Table Name >>>
+AGED_SUMMARY_TABLE_NAME = "aged_summaries"
 
 # ==============================================================================
 # === 1. SQLite Initialization (Modified)                                    ===
@@ -113,7 +113,7 @@ async def initialize_world_state_table(cursor: sqlite3.Cursor) -> bool:
     return await asyncio.to_thread(_sync_initialize_world_state_table, cursor)
 
 
-# --- 1.2.3: Sync - Initialize Scene State Table (NEW) ---
+# --- 1.2.3: Sync - Initialize Scene State Table (Existing - Unchanged) ---
 def _sync_initialize_scene_state_table(cursor: sqlite3.Cursor) -> bool:
     """
     Synchronously initializes the session_scene_state table.
@@ -139,17 +139,60 @@ def _sync_initialize_scene_state_table(cursor: sqlite3.Cursor) -> bool:
         func_logger.error(f"Unexpected error initializing table '{SCENE_STATE_TABLE_NAME}': {e}")
         return False
 
-# --- 1.2.4: Async - Initialize Scene State Table (NEW) ---
+# --- 1.2.4: Async - Initialize Scene State Table (Existing - Unchanged) ---
 async def initialize_scene_state_table(cursor: sqlite3.Cursor) -> bool:
     """Async wrapper to initialize the session_scene_state table."""
     return await asyncio.to_thread(_sync_initialize_scene_state_table, cursor)
 
 
+# --- 1.2.5: Sync - Initialize Aged Summaries Table (NEW) ---
+def _sync_initialize_aged_summaries_table(cursor: sqlite3.Cursor) -> bool:
+    """
+    Synchronously initializes the aged_summaries table.
+    Stores condensed summaries representing batches of older T1 summaries.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_initialize_aged_summaries_table')
+    if not cursor:
+        func_logger.error("SQLite cursor is not available for aged summaries table init.")
+        return False
+    try:
+        cursor.execute(f"""CREATE TABLE IF NOT EXISTS {AGED_SUMMARY_TABLE_NAME} (
+                id TEXT PRIMARY KEY,              -- Unique ID for the aged summary
+                session_id TEXT NOT NULL,         -- Session this belongs to
+                aged_summary_text TEXT NOT NULL,  -- The condensed summary text
+                creation_timestamp_utc REAL NOT NULL, -- When this aged summary was created
+                original_batch_start_index INTEGER, -- Turn start index of the first T1 in the batch
+                original_batch_end_index INTEGER,   -- Turn end index of the last T1 in the batch
+                original_t1_count INTEGER,          -- How many T1 summaries were condensed
+                original_t1_ids_json TEXT           -- Optional: JSON list of original T1 IDs
+            )""")
+        # Index for efficient retrieval by session and time/batch end index
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_aged_session_ts ON {AGED_SUMMARY_TABLE_NAME} (session_id, creation_timestamp_utc)"
+        )
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_aged_session_end_idx ON {AGED_SUMMARY_TABLE_NAME} (session_id, original_batch_end_index)"
+        )
+        func_logger.debug(f"Table '{AGED_SUMMARY_TABLE_NAME}' initialized successfully.")
+        return True
+    except sqlite3.Error as e:
+        func_logger.error(f"SQLite error initializing table '{AGED_SUMMARY_TABLE_NAME}': {e}")
+        return False
+    except Exception as e:
+        func_logger.error(f"Unexpected error initializing table '{AGED_SUMMARY_TABLE_NAME}': {e}")
+        return False
+
+# --- 1.2.6: Async - Initialize Aged Summaries Table (NEW) ---
+async def initialize_aged_summaries_table(cursor: sqlite3.Cursor) -> bool:
+    """Async wrapper to initialize the aged_summaries table."""
+    return await asyncio.to_thread(_sync_initialize_aged_summaries_table, cursor)
+
+
 # --- 1.3: Sync - Initialize ALL Tables (MODIFIED) ---
 def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
     """
-    Initializes all necessary SQLite tables (T1, RAG Cache, Inventory, World State, Scene State).
-    MODIFIED to include scene state table initialization.
+    Initializes all necessary SQLite tables (T1, RAG Cache, Inventory, World State, Scene State, Aged Summaries).
+    MODIFIED to include aged summary table initialization.
     """
     func_logger = logging.getLogger(__name__ + '._sync_initialize_sqlite_tables')
     if not cursor:
@@ -196,10 +239,16 @@ def _sync_initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
              func_logger.error("Failed to initialize world state table during main init.")
              all_success = False # Mark failure
 
-        # --- Initialize Scene State Table (NEW CALL) ---
+        # --- Initialize Scene State Table (Existing Call) ---
         scene_state_init_success = _sync_initialize_scene_state_table(cursor)
         if not scene_state_init_success:
              func_logger.error("Failed to initialize scene state table during main init.")
+             all_success = False # Mark failure
+
+        # --- Initialize Aged Summaries Table (NEW CALL) ---
+        aged_summaries_init_success = _sync_initialize_aged_summaries_table(cursor)
+        if not aged_summaries_init_success:
+             func_logger.error("Failed to initialize aged summaries table during main init.")
              all_success = False # Mark failure
 
         # --- Return True only if all initializations were okay ---
@@ -223,9 +272,9 @@ async def initialize_sqlite_tables(cursor: sqlite3.Cursor) -> bool:
 
 
 # ==============================================================================
-# === 2. SQLite Tier 1 Summary Operations (Unchanged)                        ===
+# === 2. SQLite Tier 1 Summary Operations (MODIFIED get_recent)              ===
 # ==============================================================================
-# --- 2.1: Sync - Add T1 Summary ---
+# --- 2.1: Sync - Add T1 Summary (Unchanged) ---
 def _sync_add_tier1_summary(
     cursor: sqlite3.Cursor,
     summary_id: str, session_id: str, user_id: str, summary_text: str, metadata: Dict
@@ -249,7 +298,7 @@ def _sync_add_tier1_summary(
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error adding T1 {summary_id}: {e}"); return False
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error adding T1 {summary_id}: {e}"); return False
 
-# --- 2.2: Async - Add T1 Summary ---
+# --- 2.2: Async - Add T1 Summary (Unchanged) ---
 async def add_tier1_summary(
     cursor: sqlite3.Cursor,
     summary_id: str, session_id: str, user_id: str, summary_text: str, metadata: Dict
@@ -257,28 +306,46 @@ async def add_tier1_summary(
     """Async wrapper to add a Tier 1 summary."""
     return await asyncio.to_thread(_sync_add_tier1_summary, cursor, summary_id, session_id, user_id, summary_text, metadata)
 
-# --- 2.3: Sync - Get Recent T1 Summaries ---
-def _sync_get_recent_tier1_summaries(cursor: sqlite3.Cursor, session_id: str, limit: int) -> List[str]:
+# --- 2.3: Sync - Get Recent T1 Summaries (MODIFIED Return Type) ---
+def _sync_get_recent_tier1_summaries(
+    cursor: sqlite3.Cursor, session_id: str, limit: int
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Retrieves recent T1 summaries with metadata for sorting.
+    Returns list of (summary_text, metadata_dict) tuples, ordered chronologically (oldest first).
+    """
     func_logger = logging.getLogger(__name__ + '._sync_get_recent_tier1_summaries')
-    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return []
-    if limit <= 0: return []
+    results: List[Tuple[str, Dict[str, Any]]] = []
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return results
+    if limit <= 0: return results
     try:
+        # Fetch needed columns: summary_text and turn_end_index for sorting
         cursor.execute(
-            f"SELECT summary_text FROM {T1_SUMMARY_TABLE_NAME} WHERE session_id = ? ORDER BY timestamp_utc DESC LIMIT ?",
+            f"SELECT summary_text, turn_end_index FROM {T1_SUMMARY_TABLE_NAME} WHERE session_id = ? ORDER BY timestamp_utc DESC LIMIT ?",
             (session_id, limit)
         )
-        summaries = [row[0] for row in cursor.fetchall()]
-        summaries.reverse() # Return in chronological order
-        return summaries
+        rows = cursor.fetchall()
+        for row in rows:
+            summary_text, turn_end_index = row
+            metadata = {"turn_end_index": turn_end_index}
+            results.append((summary_text, metadata))
+
+        results.reverse() # Return in chronological order (oldest first in list)
+        return results
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error getting recent T1: {e}"); return []
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error getting recent T1: {e}"); return []
 
-# --- 2.4: Async - Get Recent T1 Summaries ---
-async def get_recent_tier1_summaries(cursor: sqlite3.Cursor, session_id: str, limit: int) -> List[str]:
-    """Async wrapper to get recent Tier 1 summaries."""
+# --- 2.4: Async - Get Recent T1 Summaries (MODIFIED Return Type) ---
+async def get_recent_tier1_summaries(
+    cursor: sqlite3.Cursor, session_id: str, limit: int
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Async wrapper to get recent Tier 1 summaries with metadata.
+    Returns list of (summary_text, metadata_dict) tuples, ordered chronologically.
+    """
     return await asyncio.to_thread(_sync_get_recent_tier1_summaries, cursor, session_id, limit)
 
-# --- 2.5: Sync - Get T1 Summary Count ---
+# --- 2.5: Sync - Get T1 Summary Count (Unchanged) ---
 def _sync_get_tier1_summary_count(cursor: sqlite3.Cursor, session_id: str) -> int:
     func_logger = logging.getLogger(__name__ + '._sync_get_tier1_summary_count')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return -1
@@ -289,12 +356,12 @@ def _sync_get_tier1_summary_count(cursor: sqlite3.Cursor, session_id: str) -> in
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error counting T1: {e}"); return -1
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error counting T1: {e}"); return -1
 
-# --- 2.6: Async - Get T1 Summary Count ---
+# --- 2.6: Async - Get T1 Summary Count (Unchanged) ---
 async def get_tier1_summary_count(cursor: sqlite3.Cursor, session_id: str) -> int:
     """Async wrapper to count Tier 1 summaries."""
     return await asyncio.to_thread(_sync_get_tier1_summary_count, cursor, session_id)
 
-# --- 2.7: Sync - Get Oldest T1 Summary ---
+# --- 2.7: Sync - Get Oldest T1 Summary (Unchanged - used by T2 Push) ---
 def _sync_get_oldest_tier1_summary(cursor: sqlite3.Cursor, session_id: str) -> Optional[Tuple[str, str, Dict]]:
     func_logger = logging.getLogger(__name__ + '._sync_get_oldest_tier1_summary')
     if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return None
@@ -319,12 +386,12 @@ def _sync_get_oldest_tier1_summary(cursor: sqlite3.Cursor, session_id: str) -> O
     except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error getting oldest T1: {e}"); return None
     except Exception as e: func_logger.error(f"[{session_id}] Unexpected error getting oldest T1: {e}"); return None
 
-# --- 2.8: Async - Get Oldest T1 Summary ---
+# --- 2.8: Async - Get Oldest T1 Summary (Unchanged) ---
 async def get_oldest_tier1_summary(cursor: sqlite3.Cursor, session_id: str) -> Optional[Tuple[str, str, Dict]]:
     """Async wrapper to get the oldest Tier 1 summary."""
     return await asyncio.to_thread(_sync_get_oldest_tier1_summary, cursor, session_id)
 
-# --- 2.9: Sync - Delete T1 Summary ---
+# --- 2.9: Sync - Delete T1 Summary (Unchanged - used by T2 Push) ---
 def _sync_delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_delete_tier1_summary')
     if not cursor: func_logger.error(f"Cursor unavailable for deleting T1 {summary_id}."); return False
@@ -334,12 +401,12 @@ def _sync_delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     except sqlite3.Error as e: func_logger.error(f"SQLite error deleting T1 {summary_id}: {e}"); return False
     except Exception as e: func_logger.error(f"Unexpected error deleting T1 {summary_id}: {e}"); return False
 
-# --- 2.10: Async - Delete T1 Summary ---
+# --- 2.10: Async - Delete T1 Summary (Unchanged) ---
 async def delete_tier1_summary(cursor: sqlite3.Cursor, summary_id: str) -> bool:
     """Async wrapper to delete a Tier 1 summary."""
     return await asyncio.to_thread(_sync_delete_tier1_summary, cursor, summary_id)
 
-# --- 2.11: Sync - Get Max T1 End Index ---
+# --- 2.11: Sync - Get Max T1 End Index (Unchanged) ---
 def _sync_get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
     """
     Synchronously retrieves the maximum turn_end_index for a given session_id
@@ -373,7 +440,7 @@ def _sync_get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optio
         func_logger.error(f"[{session_id}] Unexpected error getting max T1 end index: {e}")
         return None
 
-# --- 2.12: Async - Get Max T1 End Index ---
+# --- 2.12: Async - Get Max T1 End Index (Unchanged) ---
 async def get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optional[int]:
     """
     Async wrapper to retrieve the maximum turn_end_index for a given session_id
@@ -381,7 +448,7 @@ async def get_max_t1_end_index(cursor: sqlite3.Cursor, session_id: str) -> Optio
     """
     return await asyncio.to_thread(_sync_get_max_t1_end_index, cursor, session_id)
 
-# --- 2.13: Sync - Check T1 Summary Exists ---
+# --- 2.13: Sync - Check T1 Summary Exists (Unchanged) ---
 def _sync_check_t1_summary_exists(
     cursor: sqlite3.Cursor, session_id: str, start_index: int, end_index: int
 ) -> bool:
@@ -422,7 +489,7 @@ def _sync_check_t1_summary_exists(
         func_logger.error(f"[{session_id}] Unexpected error checking for T1 summary ({start_index}-{end_index}): {e}")
         return False # Assume doesn't exist on error
 
-# --- 2.14: Async - Check T1 Summary Exists ---
+# --- 2.14: Async - Check T1 Summary Exists (Unchanged) ---
 async def check_t1_summary_exists(
     cursor: sqlite3.Cursor, session_id: str, start_index: int, end_index: int
 ) -> bool:
@@ -432,6 +499,87 @@ async def check_t1_summary_exists(
     return await asyncio.to_thread(
         _sync_check_t1_summary_exists, cursor, session_id, start_index, end_index
     )
+
+# --- 2.15: Sync - Get Oldest T1 Batch (NEW) ---
+def _sync_get_oldest_t1_batch(
+    cursor: sqlite3.Cursor, session_id: str, batch_size: int
+) -> List[Dict[str, Any]]:
+    """
+    Synchronously retrieves the `batch_size` oldest T1 summaries for aging.
+    Returns a list of dictionaries, each containing id, summary_text,
+    turn_start_index, and turn_end_index. Ordered oldest first.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_get_oldest_t1_batch')
+    results: List[Dict[str, Any]] = []
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return results
+    if batch_size <= 0: return results
+    try:
+        # Fetch needed columns: id, summary_text, turn_start_index, turn_end_index
+        cursor.execute(
+            f"""SELECT id, summary_text, turn_start_index, turn_end_index
+                FROM {T1_SUMMARY_TABLE_NAME}
+                WHERE session_id = ?
+                ORDER BY timestamp_utc ASC
+                LIMIT ?""",
+            (session_id, batch_size)
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            t1_id, summary_text, start_idx, end_idx = row
+            results.append({
+                "id": t1_id,
+                "summary_text": summary_text,
+                "turn_start_index": start_idx,
+                "turn_end_index": end_idx
+            })
+        func_logger.debug(f"[{session_id}] Fetched {len(results)} oldest T1 summaries for aging batch.")
+        return results # Already ordered oldest first by SQL query
+    except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error getting oldest T1 batch: {e}"); return []
+    except Exception as e: func_logger.error(f"[{session_id}] Unexpected error getting oldest T1 batch: {e}"); return []
+
+# --- 2.16: Async - Get Oldest T1 Batch (NEW) ---
+async def get_oldest_t1_batch(
+    cursor: sqlite3.Cursor, session_id: str, batch_size: int
+) -> List[Dict[str, Any]]:
+    """
+    Async wrapper to retrieve the `batch_size` oldest T1 summaries for aging.
+    Returns list of dicts: [{'id': str, 'summary_text': str, 'turn_start_index': int, 'turn_end_index': int}]
+    """
+    return await asyncio.to_thread(_sync_get_oldest_t1_batch, cursor, session_id, batch_size)
+
+# --- 2.17: Sync - Delete T1 Batch (NEW) ---
+def _sync_delete_t1_batch(cursor: sqlite3.Cursor, session_id: str, t1_ids: List[str]) -> bool:
+    """
+    Synchronously deletes multiple T1 summaries by their IDs.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_delete_t1_batch')
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return False
+    if not t1_ids: func_logger.warning(f"[{session_id}] No T1 IDs provided for deletion batch."); return True # No work needed
+
+    try:
+        # Use parameterized query to avoid SQL injection with IN clause
+        placeholders = ','.join('?' for _ in t1_ids)
+        sql = f"DELETE FROM {T1_SUMMARY_TABLE_NAME} WHERE session_id = ? AND id IN ({placeholders})"
+        params = [session_id] + t1_ids
+
+        cursor.execute(sql, params)
+        rows_deleted = cursor.rowcount
+        func_logger.info(f"[{session_id}] Deleted {rows_deleted} T1 summaries from batch (requested {len(t1_ids)}).")
+        # It's successful even if rows_deleted < len(t1_ids), as some might have been deleted already.
+        return True
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error deleting T1 batch: {e}")
+        return False
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error deleting T1 batch: {e}")
+        return False
+
+# --- 2.18: Async - Delete T1 Batch (NEW) ---
+async def delete_t1_batch(cursor: sqlite3.Cursor, session_id: str, t1_ids: List[str]) -> bool:
+    """
+    Async wrapper to delete multiple T1 summaries by ID.
+    """
+    return await asyncio.to_thread(_sync_delete_t1_batch, cursor, session_id, t1_ids)
 
 
 # ==============================================================================
@@ -593,9 +741,9 @@ async def get_all_inventories_for_session(cursor: sqlite3.Cursor, session_id: st
 
 
 # ==============================================================================
-# === 4.5: SQLite World State Operations (Existing - Unchanged)              ===
+# === 5. SQLite World State Operations (Existing - Unchanged)              ===
 # ==============================================================================
-# --- 4.5.1: Sync - Get World State ---
+# --- 5.1: Sync - Get World State ---
 def _sync_get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Any]]:
     """
     Synchronously retrieves the world state (season, weather, day, time) for a specific session.
@@ -626,7 +774,7 @@ def _sync_get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[D
         func_logger.error(f"[{session_id}] Unexpected error retrieving world state: {e}")
         return None
 
-# --- 4.5.2: Async - Get World State ---
+# --- 5.2: Async - Get World State ---
 async def get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Any]]:
     """
     Async wrapper to retrieve the world state (season, weather, day, time) for a specific session.
@@ -634,7 +782,7 @@ async def get_world_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[D
     """
     return await asyncio.to_thread(_sync_get_world_state, cursor, session_id)
 
-# --- 4.5.3: Sync - Set World State ---
+# --- 5.3: Sync - Set World State ---
 def _sync_set_world_state(
     cursor: sqlite3.Cursor,
     session_id: str,
@@ -675,7 +823,7 @@ def _sync_set_world_state(
         func_logger.error(f"[{session_id}] Unexpected error setting/updating world state: {e}")
         return False
 
-# --- 4.5.4: Async - Set World State ---
+# --- 5.4: Async - Set World State ---
 async def set_world_state(
     cursor: sqlite3.Cursor,
     session_id: str,
@@ -691,10 +839,9 @@ async def set_world_state(
 
 
 # ==============================================================================
-# === 5. SQLite Scene State Operations (NEW SECTION)                         ===
+# === 6. SQLite Scene State Operations (Existing - Unchanged)                ===
 # ==============================================================================
-
-# --- 5.1: Sync - Get Scene State (NEW) ---
+# --- 6.1: Sync - Get Scene State ---
 def _sync_get_scene_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Optional[str]]]:
     """
     Synchronously retrieves the scene state (keywords JSON, description) for a specific session.
@@ -728,7 +875,7 @@ def _sync_get_scene_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[D
         func_logger.error(f"[{session_id}] Unexpected error retrieving scene state: {e}")
         return None
 
-# --- 5.2: Async - Get Scene State (NEW) ---
+# --- 6.2: Async - Get Scene State ---
 async def get_scene_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[Dict[str, Optional[str]]]:
     """
     Async wrapper to retrieve the scene state (keywords JSON, description) for a session.
@@ -736,7 +883,7 @@ async def get_scene_state(cursor: sqlite3.Cursor, session_id: str) -> Optional[D
     """
     return await asyncio.to_thread(_sync_get_scene_state, cursor, session_id)
 
-# --- 5.3: Sync - Set Scene State (NEW) ---
+# --- 6.3: Sync - Set Scene State ---
 def _sync_set_scene_state(
     cursor: sqlite3.Cursor,
     session_id: str,
@@ -774,7 +921,7 @@ def _sync_set_scene_state(
         func_logger.error(f"[{session_id}] Unexpected error setting/updating scene state: {e}")
         return False
 
-# --- 5.4: Async - Set Scene State (NEW) ---
+# --- 6.4: Async - Set Scene State ---
 async def set_scene_state(
     cursor: sqlite3.Cursor,
     session_id: str,
@@ -788,10 +935,138 @@ async def set_scene_state(
 
 
 # ==============================================================================
-# === 6. ChromaDB Tier 2 Operations (Unchanged - Renumbered Section)         ===
+# === 7. SQLite Aged Summary Operations (NEW SECTION)                        ===
+# ==============================================================================
+
+# --- 7.1: Sync - Add Aged Summary (NEW) ---
+def _sync_add_aged_summary(
+    cursor: sqlite3.Cursor,
+    aged_summary_id: str,
+    session_id: str,
+    aged_summary_text: str,
+    original_batch_start_index: Optional[int],
+    original_batch_end_index: Optional[int],
+    original_t1_count: Optional[int],
+    original_t1_ids: Optional[List[str]] = None # Made optional
+) -> bool:
+    """
+    Synchronously adds a new aged summary record to the aged_summaries table.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_add_aged_summary')
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return False
+    if not aged_summary_id or not session_id or not aged_summary_text:
+        func_logger.error(f"[{session_id}] Missing required fields for adding aged summary.")
+        return False
+
+    creation_timestamp_utc = datetime.now(timezone.utc).timestamp()
+    # Convert list of T1 IDs to JSON string if provided, otherwise store NULL
+    original_t1_ids_json_str: Optional[str] = None
+    if original_t1_ids and isinstance(original_t1_ids, list):
+        try:
+            original_t1_ids_json_str = json.dumps(original_t1_ids)
+        except (TypeError, ValueError) as e_json:
+             func_logger.warning(f"[{session_id}] Could not serialize original T1 IDs to JSON for aged summary {aged_summary_id}: {e_json}. Storing NULL.")
+
+    try:
+        cursor.execute(
+            f"""INSERT INTO {AGED_SUMMARY_TABLE_NAME} (
+                    id, session_id, aged_summary_text, creation_timestamp_utc,
+                    original_batch_start_index, original_batch_end_index,
+                    original_t1_count, original_t1_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                aged_summary_id, session_id, aged_summary_text, creation_timestamp_utc,
+                original_batch_start_index, original_batch_end_index,
+                original_t1_count, original_t1_ids_json_str
+            )
+        )
+        func_logger.info(f"[{session_id}] Added aged summary {aged_summary_id} (condensing {original_t1_count} T1s, turns {original_batch_start_index}-{original_batch_end_index}).")
+        return True
+    except sqlite3.IntegrityError as e:
+        # This likely means the aged_summary_id was reused, which shouldn't happen with UUIDs
+        func_logger.error(f"[{session_id}] IntegrityError adding aged summary {aged_summary_id} (duplicate ID?): {e}")
+        return False
+    except sqlite3.Error as e:
+        func_logger.error(f"[{session_id}] SQLite error adding aged summary {aged_summary_id}: {e}")
+        return False
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Unexpected error adding aged summary {aged_summary_id}: {e}")
+        return False
+
+# --- 7.2: Async - Add Aged Summary (NEW) ---
+async def add_aged_summary(
+    cursor: sqlite3.Cursor,
+    aged_summary_id: str,
+    session_id: str,
+    aged_summary_text: str,
+    original_batch_start_index: Optional[int],
+    original_batch_end_index: Optional[int],
+    original_t1_count: Optional[int],
+    original_t1_ids: Optional[List[str]] = None
+) -> bool:
+    """
+    Async wrapper to add a new aged summary record.
+    """
+    return await asyncio.to_thread(
+        _sync_add_aged_summary, cursor, aged_summary_id, session_id, aged_summary_text,
+        original_batch_start_index, original_batch_end_index, original_t1_count, original_t1_ids
+    )
+
+# --- 7.3: Sync - Get Recent Aged Summaries (NEW) ---
+def _sync_get_recent_aged_summaries(
+    cursor: sqlite3.Cursor, session_id: str, limit: int
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Synchronously retrieves the `limit` most recent aged summaries based on
+    creation time, returning text and metadata for sorting.
+    Returns list of (aged_summary_text, metadata_dict) tuples, ordered most recent first.
+    """
+    func_logger = logging.getLogger(__name__ + '._sync_get_recent_aged_summaries')
+    results: List[Tuple[str, Dict[str, Any]]] = []
+    if not cursor: func_logger.error(f"[{session_id}] Cursor unavailable."); return results
+    if limit <= 0: return results
+    try:
+        # Fetch needed columns: text, timestamp, and batch end index for potential sorting
+        cursor.execute(
+            f"""SELECT aged_summary_text, creation_timestamp_utc, original_batch_end_index
+                FROM {AGED_SUMMARY_TABLE_NAME}
+                WHERE session_id = ?
+                ORDER BY creation_timestamp_utc DESC
+                LIMIT ?""",
+            (session_id, limit)
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            aged_text, created_ts, batch_end_idx = row
+            metadata = {
+                "creation_timestamp_utc": created_ts,
+                "original_batch_end_index": batch_end_idx
+                # Add other metadata fields if needed for context display/logic later
+            }
+            results.append((aged_text, metadata))
+
+        func_logger.debug(f"[{session_id}] Retrieved {len(results)} recent aged summaries.")
+        # Results are already ordered most recent first by SQL query
+        return results
+    except sqlite3.Error as e: func_logger.error(f"[{session_id}] SQLite error getting recent aged summaries: {e}"); return []
+    except Exception as e: func_logger.error(f"[{session_id}] Unexpected error getting recent aged summaries: {e}"); return []
+
+# --- 7.4: Async - Get Recent Aged Summaries (NEW) ---
+async def get_recent_aged_summaries(
+    cursor: sqlite3.Cursor, session_id: str, limit: int
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Async wrapper to retrieve recent aged summaries with metadata.
+    Returns list of (aged_summary_text, metadata_dict) tuples, ordered most recent first.
+    """
+    return await asyncio.to_thread(_sync_get_recent_aged_summaries, cursor, session_id, limit)
+
+
+# ==============================================================================
+# === 8. ChromaDB Tier 2 Operations (Unchanged - Renumbered Section)         ===
 # ==============================================================================
 # (Functions remain unchanged, only section number updated)
-# --- 6.1: Sync - Get/Create Chroma Collection ---
+# --- 8.1: Sync - Get/Create Chroma Collection ---
 def _sync_get_or_create_chroma_collection(
     chroma_client: Any, # Expects chromadb.ClientAPI but use Any for optional import
     collection_name: str,
@@ -816,11 +1091,11 @@ def _sync_get_or_create_chroma_collection(
     except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Exception for collection '{collection_name}': {ide}. Check embedding function consistency.", exc_info=True); return None
     except Exception as e: func_logger.error(f"Unexpected error accessing/creating ChromaDB collection '{collection_name}': {e}", exc_info=True); return None
 
-# --- 6.2: Async - Get/Create Chroma Collection ---
+# --- 8.2: Async - Get/Create Chroma Collection ---
 async def get_or_create_chroma_collection(chroma_client: Any, collection_name: str, embedding_function: Optional[ChromaEmbeddingFunction] = None, metadata_config: Optional[Dict] = None,) -> Optional[Any]:
     return await asyncio.to_thread(_sync_get_or_create_chroma_collection, chroma_client, collection_name, embedding_function, metadata_config)
 
-# --- 6.3: Sync - Add to Chroma Collection ---
+# --- 8.3: Sync - Add to Chroma Collection ---
 def _sync_add_to_chroma_collection(collection: Any, ids: List[str], embeddings: List[List[float]], metadatas: List[Dict], documents: List[str]) -> bool:
     func_logger = logging.getLogger(__name__ + '._sync_add_to_chroma_collection')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return False
@@ -832,11 +1107,11 @@ def _sync_add_to_chroma_collection(collection: Any, ids: List[str], embeddings: 
     except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Error adding to collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True); return False
     except Exception as e: func_logger.error(f"Error adding to ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return False
 
-# --- 6.4: Async - Add to Chroma Collection ---
+# --- 8.4: Async - Add to Chroma Collection ---
 async def add_to_chroma_collection(collection: Any, ids: List[str], embeddings: List[List[float]], metadatas: List[Dict], documents: List[str]) -> bool:
     return await asyncio.to_thread(_sync_add_to_chroma_collection, collection, ids, embeddings, metadatas, documents)
 
-# --- 6.5: Sync - Query Chroma Collection ---
+# --- 8.5: Sync - Query Chroma Collection ---
 def _sync_query_chroma_collection(collection: Any, query_embeddings: List[List[float]], n_results: int, include: List[str] = ["documents", "distances", "metadatas"]) -> Optional[Dict[str, Any]]:
     func_logger = logging.getLogger(__name__ + '._sync_query_chroma_collection')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return None
@@ -849,11 +1124,11 @@ def _sync_query_chroma_collection(collection: Any, query_embeddings: List[List[f
     except InvalidDimensionException as ide: func_logger.error(f"ChromaDB Dimension Error querying collection '{getattr(collection, 'name', 'unknown')}': {ide}.", exc_info=True); return None
     except Exception as e: func_logger.error(f"Error querying ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return None
 
-# --- 6.6: Async - Query Chroma Collection ---
+# --- 8.6: Async - Query Chroma Collection ---
 async def query_chroma_collection(collection: Any, query_embeddings: List[List[float]], n_results: int, include: List[str] = ["documents", "distances", "metadatas"]) -> Optional[Dict[str, Any]]:
     return await asyncio.to_thread(_sync_query_chroma_collection, collection, query_embeddings, n_results, include)
 
-# --- 6.7: Sync - Get Chroma Collection Count ---
+# --- 8.7: Sync - Get Chroma Collection Count ---
 def _sync_get_chroma_collection_count(collection: Any) -> int:
     func_logger = logging.getLogger(__name__ + '._sync_get_chroma_collection_count')
     if not collection: func_logger.error("ChromaDB collection object not provided."); return -1
@@ -861,10 +1136,8 @@ def _sync_get_chroma_collection_count(collection: Any) -> int:
     try: count = collection.count(); return count
     except Exception as e: func_logger.error(f"Error getting count for ChromaDB collection '{getattr(collection, 'name', 'unknown')}': {e}", exc_info=True); return -1
 
-# --- 6.8: Async - Get Chroma Collection Count ---
+# --- 8.8: Async - Get Chroma Collection Count ---
 async def get_chroma_collection_count(collection: Any) -> int:
     return await asyncio.to_thread(_sync_get_chroma_collection_count, collection)
 
-# [[END MODIFIED database.py - Add Scene State Table Initialization]]
-
-# === END MODIFIED SECTION: i4_llm_agent/database.py ===
+# === END MODIFIED FILE: i4_llm_agent/database.py ===
