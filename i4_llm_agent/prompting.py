@@ -1,4 +1,4 @@
-# === START MODIFIED FILE: i4_llm_agent/prompting.py ===
+# === START CORRECTED FILE: i4_llm_agent/prompting.py ===
 # i4_llm_agent/prompting.py
 
 import logging
@@ -39,25 +39,136 @@ TAG_LABELS = {} # No longer used by combine_background_context
 EMPTY_CONTEXT_PLACEHOLDER = "<Context type='Empty'>[No Background Information Available]</Context>"
 
 
-# === NEW: Summarizer Prompt Constants (Moved from script.txt - Unchanged) ===
+# === NEW: Summarizer Prompt Constants (Moved from script.txt - RESTORED) ===
 SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER = "{dialogue_chunk}"
 DEFAULT_SUMMARIZER_SYSTEM_PROMPT = f"""
 [[SYSTEM DIRECTIVE]]
-# ... (Summarizer prompt content remains the same) ...
+
+**Role:** Roleplay Dialogue Chunk Summarizer & Memory Extractor
+
+**Objective:**
+Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produce a **high-fidelity memory summary** to preserve emotional, practical, relationship, and world realism *expressed within this specific chunk* for future roleplay continuation.
+
+**Primary Goals:**
+
+1.  **Scene Context (from Chunk):**
+    *   Capture the basic physical situation: location, time of day, environmental effects *as described EXPLICITLY in the DIALOGUE CHUNK*.
+2.  **Emotional State Changes (from Chunk):**
+    *   Track emotional shifts expressed *in the DIALOGUE CHUNK*: fear, hope, anger, guilt, trust, resentment, affection. Mention which character expressed them.
+3.  **Relationship Developments (from Chunk):**
+    *   Describe how trust, distance, dependence, or emotional connections evolved *during this DIALOGUE CHUNK*.
+4.  **Practical Developments (from Chunk):**
+    *   Capture important practical events *mentioned in the DIALOGUE CHUNK*: travel hardships, fatigue, injury, hunger, gear changes, environmental obstacles.
+5.  **World-State Changes (from Chunk):**
+    *   Record important plot/world events *stated in the DIALOGUE CHUNK*: route changes, enemy movements, political developments, survival risks.
+6.  **Critical Dialogue Fragments (from Chunk):**
+    *   Identify and preserve 1–3 **critical quotes** or **key emotional exchanges** *from the DIALOGUE CHUNK*.
+    *   These must reflect major emotional turning points, confessions, confrontations, or promises *within this chunk*.
+    *   Use near-verbatim phrasing when possible.
+7.  **Continuity Anchors (from Chunk):**
+    *   Identify important facts, feelings, or decisions *from this DIALOGUE CHUNK* that must be remembered for emotional and logical continuity in future roleplay.
+
+**Compression and Length Policy:**
+*   **Do NOT prioritize token-saving compression over realism.** Length is flexible depending on the density of the DIALOGUE CHUNK.
+*   Allow **longer outputs naturally** for chunks rich in emotional conflict or tactical discussion.
+*   Aggressively compress only if the chunk is mostly trivial small-talk.
+
+**Accuracy Policy:**
+*   Only extract facts, emotions, or quotes that are explicitly present or strongly implied *within the provided DIALOGUE CHUNK*.
+*   **Do NOT invent or assume information.** Do not refer to context outside the chunk.
+
+**Tone Handling:**
+*   Preserve emotional nuance and character complexity expressed *in the DIALOGUE CHUNK*.
+
+---
+
+[[INPUT]]
+
+**DIALOGUE CHUNK TO SUMMARIZE:**
+---
+{SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER}
+---
+
+---
+
+[[OUTPUT STRUCTURE]]
+
+**Scene Location and Context:**
+(description based *only* on dialogue chunk)
+
+**Emotional State Changes (per character):**
+- (Character Name): emotional shifts *expressed in chunk*.
+
+**Relationship Developments:**
+- (short descriptions *from chunk*)
+
+**Practical Developments:**
+- (details about survival, fatigue, injuries, supplies *mentioned in chunk*)
+
+**World-State Changes:**
+- (plot changes, movement of threats, discoveries *stated in chunk*)
+
+**Critical Dialogue Fragments:**
+- (List 1–3 key quotes *from this chunk* that define emotional turning points)
+
+**Important Continuity Anchors:**
+- (Facts, feelings, or decisions *from this chunk* that must persist.)
+
+---
+
+[[NOTES]]
+- Focus **exclusively** on the provided DIALOGUE CHUNK.
+- Base the summary *only* on the text within the chunk.
+- Prioritize emotional realism and narrative continuity over brevity based on the chunk's content.
+
 """
 # === END NEW Summarizer Constants ===
 
 
-# === NEW: Memory Aging Prompt Constants (Unchanged) ===
+# === NEW: Memory Aging Prompt Constants (RESTORED) ===
 MEMORY_AGING_BATCH_PLACEHOLDER = "{t1_batch_text}"
 DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE = f"""
 [[SYSTEM DIRECTIVE]]
-# ... (Memory Aging prompt content remains the same) ...
+
+**Role:** Roleplay Memory Condenser
+
+**Objective:** Analyze the provided CONSOLIDATED TEXT (representing a sequence of older dialogue summaries) and produce a **single, concise narrative recap** that preserves the essential plot progression, key emotional shifts, critical relationship developments, and crucial continuity anchors from that period.
+
+**Input:** A block of text containing multiple sequential T1 summaries concatenated together.
+
+**Output:** A single paragraph of text summarizing the input block.
+
+**Instructions:**
+
+1.  **Identify Core Narrative Arc:** Read the CONSOLIDATED TEXT to understand the main events, character interactions, and emotional flow across the summarized period. What was the overall journey or change during this time?
+2.  **Extract Key Developments:** Identify the most important plot points, decisions, discoveries, relationship changes (positive or negative), and significant emotional moments described in the input text.
+3.  **Synthesize, Don't Just List:** Combine the extracted developments into a flowing narrative recap. Focus on cause and effect, character motivations (as described), and the *outcome* of the events in the batch.
+4.  **Prioritize Continuity:** Ensure the recap includes details necessary to understand *why* the current situation (following this batch) is the way it is. What information *must* be retained for the story to make sense going forward?
+5.  **Condense Ruthlessly:** While preserving essential information, omit minor details, repetitive descriptions, and less critical dialogue snippets found in the original summaries. Aim for significant token reduction compared to the input text.
+6.  **Maintain Tone:** Reflect the general emotional tone of the period summarized (e.g., hopeful, tense, tragic).
+7.  **Single Paragraph Output:** The final output must be a single block of text (one paragraph).
+
+**Accuracy Note:** Base the recap *only* on the information present in the CONSOLIDATED TEXT. Do not infer or add external knowledge.
+
+---
+
+[[INPUT]]
+
+**CONSOLIDATED TEXT (Sequential T1 Summaries):**
+---
+{MEMORY_AGING_BATCH_PLACEHOLDER}
+---
+
+---
+
+[[OUTPUT]]
+
+**(Single Paragraph Narrative Recap):**
 """
 # === END NEW Memory Aging Constants ===
 
 
-# === NEW: RAG Query Prompt Constant (Unchanged) ===
+# === NEW: RAG Query Prompt Constant (RESTORED - Although unchanged) ===
 DEFAULT_RAGQ_LLM_PROMPT = """Based on the latest user message and recent dialogue context, generate a concise search query focusing on the key entities, topics, or questions raised.
 
 Latest Message: {latest_message}
@@ -69,42 +180,244 @@ Search Query:"""
 # === END NEW RAG Query Constant ===
 
 
-# --- Constants for Stateless Refiner (Existing - Unchanged) ---
+# --- Constants for Stateless Refiner (RESTORED) ---
 STATELESS_REFINER_QUERY_PLACEHOLDER = "{query}"
 STATELESS_REFINER_CONTEXT_PLACEHOLDER = "{external_context}"
 STATELESS_REFINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
 DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE = f"""
 [[SYSTEM DIRECTIVE]]
-# ... (Stateless Refiner prompt content remains the same) ...
+**Role:** Roleplay Context Extractor
+**Task:** Analyze the provided CONTEXT DOCUMENTS (character backstories, relationship histories, past events, lore) and the RECENT CHAT HISTORY (dialogue, actions, emotional expressions).
+**Objective:** Based ONLY on this information, extract and describe the specific details, memories, relationship dynamics, stated feelings, significant past events, or relevant character traits that are **essential for understanding the full context** of and accurately answering the LATEST USER QUERY from a roleplaying perspective.
+**Instructions:**
+1.  Identify the core subject of the LATEST USER QUERY and any immediately related contextual elements.
+2.  Extract Key Information: Prioritize extracting verbatim sentences or short passages that **directly address** the core subject and related elements.
+3.  Describe Key Dynamics: ...extract specific details or events... that illustrate *why* it's complex...
+4.  Include Foundational Context: Extract specific details... that **directly led to or fundamentally define** the current situation...
+5.  Incorporate Recent Developments: Include details from the RECENT CHAT HISTORY...
+6.  Be Descriptive but Focused: Capture the nuance... Avoid overly generic summaries...
+7.  Prioritize Relevance over Extreme Brevity: ...ensure that key descriptive details... are included...
+8.  Ensure Accuracy: Do not infer, assume, or add information not explicitly present...
+9.  Output: Present the extracted points clearly. If no relevant information is found, state clearly: \"No specific details relevant to the query were found in the provided context.\"
+
+**LATEST USER QUERY:** {STATELESS_REFINER_QUERY_PLACEHOLDER}
+**CONTEXT DOCUMENTS:**
+---
+{STATELESS_REFINER_CONTEXT_PLACEHOLDER}
+---
+**RECENT CHAT HISTORY:**
+---
+{STATELESS_REFINER_HISTORY_PLACEHOLDER}
+---
+
+Concise Relevant Information (for final answer generation):
 """
 
-# --- Constants for Two-Step RAG Cache Refinement (Existing - Unchanged) ---
+# --- Constants for Two-Step RAG Cache Refinement (RESTORED) ---
 CACHE_UPDATE_QUERY_PLACEHOLDER = "{query}"
 CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache}"
 CACHE_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+# Default prompt template for Step 1: Cache Update
 DEFAULT_CACHE_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-# ... (Cache Update prompt content remains the same) ...
+**Role:** Session Background Cache Maintainer
+**Task:** Intelligently update the SESSION CACHE using relevant information from the CURRENT OWI RETRIEVAL. Prioritize maintaining accurate core character profiles and lore while integrating **new facts, significant details, clarifications, or elaborations**.
+**Objective:** Maintain an accurate and structured cache for long-term context, balancing stability with incorporating meaningful updates from OWI.
+
+**Inputs:**
+- LATEST USER QUERY (for context)
+- CURRENT OWI RETRIEVAL (source of potential new info, details, profiles)
+- PREVIOUSLY REFINED CACHE (base for update)
+- RECENT CHAT HISTORY (for context only)
+
+**Core Instructions:**
+
+1.  **Identify & Update/Preserve Character Profiles:**
+    *   Scan CURRENT OWI RETRIEVAL for `character_profile` documents or significant descriptive passages about characters.
+    *   Scan PREVIOUSLY REFINED CACHE for existing character profile summaries (e.g., under `# Character: Name` headings).
+    *   **Action:** If a character profile exists in PREVIOUS CACHE:
+        *   **KEEP** the core identity and established traits.
+        *   **MERGE/ADD** concise, relevant new details, clarifications, or significant trait elaborations found in CURRENT OWI RETRIEVAL into the existing profile summary. Do not drastically alter core traits based only on RECENT CHAT HISTORY.
+        *   Only *replace* major parts of a profile if CURRENT OWI provides clearly contradictory or superseding *factual* information (not just nuanced descriptions).
+    *   **Action:** If a NEW profile is found in CURRENT OWI for a character NOT in PREVIOUS CACHE, summarize its essential details (Identity, Traits, Role) and ADD it to the output under a new heading.
+
+2.  **Integrate NEW or Elaborated Factual Lore:**
+    *   Scan CURRENT OWI RETRIEVAL (excluding profiles processed above) for background facts (lore, world details, established events, locations).
+    *   **Action:** Compare these facts against the PREVIOUSLY REFINED CACHE.
+        *   If a fact is genuinely **NEW** and relevant, ADD it.
+        *   If a fact **ELABORATES significantly** on, **CLARIFIES**, or provides important **new DETAILS** for an existing topic in the cache, integrate these details concisely into the relevant section.
+        *   If a fact provides a clear **CORRECTION/UPDATE** to existing lore, MODIFY the cache accordingly.
+        *   Do NOT add minor rephrasing or clearly redundant facts.
+
+3.  **Minimal Pruning:**
+    *   **Action:** Only remove sections from the PREVIOUS CACHE if they are *explicitly contradicted* by newer info in CURRENT OWI or are clearly no longer relevant (e.g., a character definitively removed from the story). **Default to keeping existing information unless strong evidence dictates removal.**
+
+4.  **Use Query/History for CONTEXT ONLY:** Use LATEST USER QUERY and RECENT CHAT HISTORY primarily to understand focus and relevance when deciding *what information* from OWI to add/update/elaborate on. **DO NOT summarize the history itself in the cache.**
+
+5.  **Output Format:**
+    *   Produce the complete, updated SESSION CACHE text.
+    *   **Maintain Structure:** Use clear headings (e.g., `# Character: Name`, `# Lore: Topic`). Preserve existing headings/structure where possible.
+    *   **No Change:** If analysis shows no significant additions/updates/removals/elaborations are needed based on the OWI input, output ONLY the exact text: `[NO_CACHE_UPDATE]`
+    *   **Empty/Irrelevant:** If PREVIOUS CACHE was empty and CURRENT OWI contains no relevant profiles or facts, output: `[No relevant background context found]`
+
+**INPUTS:**
+
+**LATEST USER QUERY:**
+{CACHE_UPDATE_QUERY_PLACEHOLDER}
+
+**CURRENT OWI RETRIEVAL:**
+---
+{CACHE_UPDATE_CURRENT_OWI_PLACEHOLDER}
+---
+
+**PREVIOUSLY REFINED CACHE:**
+---
+{CACHE_UPDATE_PREVIOUS_CACHE_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY:**
+---
+{CACHE_UPDATE_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (Updated Session Cache Text - Structured, or [NO_CACHE_UPDATE], or [No relevant background context found]):**
 """
 
-# Final Context Selector Prompt Template (v1.1 - Unchanged)
+# Final Context Selector Prompt Template (v1.1 - RESTORED)
 FINAL_SELECT_QUERY_PLACEHOLDER = "{query}"
 FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER = "{updated_cache}"
 FINAL_SELECT_CURRENT_OWI_PLACEHOLDER = "{current_owi_rag}"
 FINAL_SELECT_HISTORY_PLACEHOLDER = "{recent_history_str}"
+
 DEFAULT_FINAL_CONTEXT_SELECTION_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-# ... (Final Context Selection prompt content remains the same) ...
+**Role:** Context Selector for Roleplay Response
+**Task:** Analyze available background sources (CACHE, OWI, HISTORY) and select details **relevant and helpful** for generating the *next* narrative response based on the LATEST USER QUERY and RECENT HISTORY.
+**Objective:** Provide **sufficient background context** from the Cache and OWI Retrieval to enable a coherent, nuanced, and contextually grounded response, without overwhelming the final LLM with irrelevant data.
+
+**Sources:**
+1.  **UPDATED SESSION CACHE:** Long-term facts, character profiles, established lore. (Primary Source)
+2.  **CURRENT OWI RETRIEVAL:** General contextual information provided for the current turn. (Secondary Source)
+3.  **RECENT CHAT HISTORY:** Immediate conversational context (dialogue, actions, involved characters).
+4.  **LATEST USER QUERY:** The user's specific input for this turn.
+
+**Instructions:**
+
+1.  **Analyze Query & History:** Determine the core subject, actions, **locations**, and **characters actively or passively present** in the LATEST USER QUERY and the last 2–3 turns of RECENT CHAT HISTORY. Include unresolved threads referenced implicitly (e.g., emotional fallout, mentioned past decisions).
+
+2.  **Select Helpful Cache/OWI Context:** Examine the CACHE and OWI RETRIEVAL. Extract only sentences/passages that:
+    * Explain the **current situation** or **immediate environment**.
+    * Provide insight into the **motivations, relationships, or core traits** of involved or emotionally connected characters.
+    * Offer relevant **background lore** about current locations, objects, or unresolved past events that inform the *current* moment.
+
+3.  **Relational Awareness Rule:** If a character is not directly mentioned but is **strongly emotionally tied** to a currently involved character (e.g., a sister, parent, lost companion), include minimal relevant memory snippets for continuity.
+    *Example: If Emily is active, and her sister Julia is emotionally tied to her current mood or goal, include brief but relevant Julia context—even if Julia is not present or named.*
+
+4.  **Emotional Theme Continuity (Optional):** If the query implies a recurring emotional thread (fear, guilt, protection), select context that reinforces that tone, even if the source isn't directly mentioned.
+
+5.  **Prioritize CACHE Over OWI:** CACHE represents canonical memory and character development. Use OWI RETRIEVAL to fill in situational details not found in cache, or provide short reminders about location and setting.
+
+6.  **Filter Irrelevant Content:** Exclude long lore blocks, full profiles, or unrelated past facts. Favor **compressed, emotionally relevant facts** that reinforce the present turn.
+
+7.  **Assemble Output:** Combine the selected Cache/OWI context snippets into a short, clean block. Use optional headings (e.g., `=== Character Note: Julia ===`, `=== Location Memory ===`) to group content.
+    - Avoid excessive length.
+    - Use only what’s helpful for this turn.
+
+8.  **Empty Fallback:** If no relevant Cache/OWI content is found, respond with:
+    `[No relevant background context found for the current query]`
+
+**INPUTS:**
+
+**LATEST USER QUERY:**
+{FINAL_SELECT_QUERY_PLACEHOLDER}
+
+**UPDATED SESSION CACHE (Primary Source - Long-Term Facts/Profiles):**
+---
+{FINAL_SELECT_UPDATED_CACHE_PLACEHOLDER}
+---
+
+**CURRENT OWI RETRIEVAL (Secondary Source - General Context):**
+---
+{FINAL_SELECT_CURRENT_OWI_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY (for relevance & involved characters):**
+---
+{FINAL_SELECT_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (Selected Relevant Cache/OWI Snippets):**
 """
 
-# Placeholders for Inventory Update LLM (Existing - Unchanged)
+# Placeholders for Inventory Update LLM (RESTORED)
 INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-# ... (Inventory Update prompt content remains the same) ...
+**Role:** Inventory Log Keeper
+**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
+**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
+
+**Supported Direct Command Formats (Priority 1):**
+*   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+*   `INVENTORY: CLEAR CharacterName`
+*(Note: Use `__USER__` for the player character if their specific name isn't provided)*
+
+**Instructions (Follow in Order):**
+
+1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 2.
+
+2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+    *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
+    *   If NO: Proceed to Instruction 3.
+
+3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
+    *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
+    *   Generate JSON `updates` based *only* on these dialogue events.
+
+4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+    ```json
+    {{
+      "updates": [
+        // One entry for each detected change (from command OR dialogue)
+        {{
+          "character_name": "Name or __USER__",
+          "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
+          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
+          "quantity": <integer>,
+          "description": "<optional string>" // Typically only for 'add' from dialogue
+        }}
+        // ... more updates if needed
+      ]
+    }}
+    ```
+    *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
+
+5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
+6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
+
+**INPUTS:**
+
+**USER QUERY (Check for commands first):**
+{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
+
+**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
+---
+{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
+---
+
+**RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
+---
+{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
+---
+
+**OUTPUT (JSON object with detected inventory updates):**
 """
 
 # <<< NEW/MOVED CONSTANTS FOR GUIDELINES >>>
@@ -136,7 +449,7 @@ The background information may contain a "Proposed Weather Change: From X to Y".
 
 # --- Function Implementations ---
 
-# --- Function: Clean Context Tags (Existing - Unchanged) ---
+# --- Function: Clean Context Tags (Existing - Unchanged from latest) ---
 def clean_context_tags(system_content: str) -> str:
     # This function might need adjustment if old formats with <context> tags are still possible
     # For now, keep it as is to handle potential legacy formats in the base prompt.
@@ -150,7 +463,7 @@ def clean_context_tags(system_content: str) -> str:
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
 
-# --- Function: Process System Prompt (Modified - Enhanced Cleaning) ---
+# --- Function: Process System Prompt (Modified - Enhanced Cleaning from latest) ---
 def process_system_prompt(messages: List[Dict]) -> Tuple[str, Optional[str]]:
     """
     Extracts the base system prompt text and any OWI context block.
@@ -195,9 +508,8 @@ def process_system_prompt(messages: List[Dict]) -> Tuple[str, Optional[str]]:
 
     return base_system_prompt_text, extracted_owi_context
 
-# --- Function: Format Stateless Refiner Prompt (Existing - Unchanged) ---
+# --- Function: Format Stateless Refiner Prompt (Existing - Unchanged from latest) ---
 def format_stateless_refiner_prompt(external_context: str, recent_history_str: str, query: str, template: Optional[str] = None) -> str:
-    # ... (Function content remains the same) ...
     func_logger = logging.getLogger(__name__ + '.format_stateless_refiner_prompt')
     prompt_template = template if template is not None else DEFAULT_STATELESS_REFINER_PROMPT_TEMPLATE
     safe_context = external_context.replace("{", "{{").replace("}", "}}") if isinstance(external_context, str) else ""
@@ -219,9 +531,8 @@ def format_stateless_refiner_prompt(external_context: str, recent_history_str: s
         func_logger.error(f"Error formatting stateless refiner prompt: {e}", exc_info=True)
         return f"[Error formatting: {type(e).__name__}]"
 
-# --- Function: Refine External Context (Stateless - Existing - Unchanged) ---
+# --- Function: Refine External Context (Stateless - Existing - Unchanged from latest) ---
 async def refine_external_context(external_context: str, history_messages: List[Dict], latest_user_query: str, llm_call_func: Callable, refiner_llm_config: Dict, skip_threshold: int, history_count: int, dialogue_only_roles: List[str] = DIALOGUE_ROLES, caller_info: str = "StatelessRefiner") -> str:
-    # ... (Function content remains the same) ...
     func_logger = logging.getLogger(__name__ + '.refine_external_context')
     func_logger.debug(f"[{caller_info}] Entered refine_external_context (stateless).")
     if not external_context or not external_context.strip():
@@ -275,7 +586,7 @@ async def refine_external_context(external_context: str, history_messages: List[
         func_logger.warning(f"[{caller_info}] Stateless refinement failed. Error: '{error_details}'. Returning original context.")
         return external_context
 
-# --- Function: Format Cache Update Prompt (Existing - Unchanged) ---
+# --- Function: Format Cache Update Prompt (Existing - Unchanged from latest) ---
 def format_cache_update_prompt(
     previous_cache: str,
     current_owi_rag: str,
@@ -283,7 +594,6 @@ def format_cache_update_prompt(
     query: str,
     template: str # Expecting the specific template for this step
 ) -> str:
-    # ... (Function content remains the same) ...
     func_logger = logging.getLogger(__name__ + '.format_cache_update_prompt')
     if not template or not isinstance(template, str): return "[Error: Invalid Template for Cache Update]"
     safe_prev_cache = previous_cache.replace("{", "{{").replace("}", "}}") if isinstance(previous_cache, str) else ""
@@ -303,7 +613,7 @@ def format_cache_update_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in cache update prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting cache update prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# --- Function: Format Final Context Selection Prompt (Existing - Unchanged) ---
+# --- Function: Format Final Context Selection Prompt (Existing - Unchanged from latest) ---
 def format_final_context_selection_prompt(
     updated_cache: str,
     current_owi_rag: str, # Include current OWI for secondary check
@@ -311,7 +621,6 @@ def format_final_context_selection_prompt(
     query: str,
     template: str # Expecting the specific template for this step
 ) -> str:
-    # ... (Function content remains the same) ...
     func_logger = logging.getLogger(__name__ + '.format_final_context_selection_prompt')
     if not template or not isinstance(template, str): return "[Error: Invalid Template for Context Selection]"
     safe_updated_cache = updated_cache.replace("{", "{{").replace("}", "}}") if isinstance(updated_cache, str) else ""
@@ -331,7 +640,7 @@ def format_final_context_selection_prompt(
     except KeyError as e: func_logger.error(f"Missing placeholder in final selection prompt: {e}"); return f"[Error: Missing placeholder '{e}']"
     except Exception as e: func_logger.error(f"Error formatting final selection prompt: {e}", exc_info=True); return f"[Error formatting: {type(e).__name__}]"
 
-# === Function: Generate RAG Query (Existing - Unchanged structure) ===
+# === Function: Generate RAG Query (Existing - Unchanged structure from latest) ===
 async def generate_rag_query(
     latest_message_str: str,
     dialogue_context_str: str,
@@ -341,7 +650,6 @@ async def generate_rag_query(
     temperature: float,
     caller_info: str = "i4_llm_agent_RAGQueryGen",
 ) -> Optional[str]:
-    # ... (Function content remains the same) ...
     logger.debug(f"[{caller_info}] Generating RAG query using library default prompt...")
     if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func):
         logger.error(f"[{caller_info}] Invalid llm_call_func.")
@@ -384,7 +692,7 @@ async def generate_rag_query(
         if isinstance(response_or_error, dict): err_type = response_or_error.get('error_type', 'RAGQ Err'); err_msg_detail = response_or_error.get('message', 'Unknown'); return f"[Error: {err_type} - {err_msg_detail}]"
         else: return f"[Error: RAGQ Failed - {error_msg[:50]}]"
 
-# --- Function: Construct Final LLM Payload (MODIFIED - New Structure & Moved Guidelines) ---
+# --- Function: Construct Final LLM Payload (MODIFIED - New Structure & Moved Guidelines from latest) ---
 def construct_final_llm_payload(
     system_prompt: str, # Base system prompt text (already cleaned)
     history: List[Dict], # Dialogue history turns (user/model)
@@ -519,9 +827,8 @@ def construct_final_llm_payload(
     func_logger.info(f"Final payload constructed with {len(gemini_contents)} turns using NEW structure.")
     return final_payload
 
-# --- Function: Format Memory Aging Prompt (Existing - Unchanged) ---
+# --- Function: Format Memory Aging Prompt (Existing - Unchanged from latest) ---
 def format_memory_aging_prompt(t1_batch_text: str, template: Optional[str] = None) -> str:
-    # ... (Function content remains the same) ...
     func_logger = logging.getLogger(__name__ + '.format_memory_aging_prompt')
     prompt_template = template if template is not None else DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE
     if not prompt_template or prompt_template == "[Default Memory Aging Prompt Load Failed]":
@@ -540,7 +847,7 @@ def format_memory_aging_prompt(t1_batch_text: str, template: Optional[str] = Non
         return f"[Error formatting memory aging prompt: {type(e).__name__}]"
 
 
-# --- Function: Combine Background Context (MODIFIED - XML Tags & Prepend Guidelines) ---
+# --- Function: Combine Background Context (MODIFIED - XML Tags & Prepend Guidelines from latest) ---
 def combine_background_context(
     final_selected_context: Optional[str],
     t1_summaries: Optional[List[Tuple[str, Dict[str, Any]]]],
@@ -692,6 +999,8 @@ def combine_background_context(
         return EMPTY_CONTEXT_PLACEHOLDER
     elif len(context_parts) > 0:
         full_context_string = "\n".join(context_parts) # Use newline as separator for readability in logs
+        # Basic XML escaping for the final combined string might be needed if passing directly to XML parser elsewhere,
+        # but for LLM injection, internal escaping of content is usually sufficient. Review if issues arise.
         func_logger.info(f"Combined context created (Total len: {len(full_context_string)}).")
         return full_context_string
     else:
@@ -700,17 +1009,17 @@ def combine_background_context(
         return EMPTY_CONTEXT_PLACEHOLDER
 
 
-# --- Function: Format Inventory Update Prompt (Existing - Unchanged) ---
+# --- Function: Format Inventory Update Prompt (Existing - Unchanged from latest) ---
 def format_inventory_update_prompt(
     main_llm_response: str,
     user_query: str,
     recent_history_str: str,
     template: str # Expecting the specific template for this step
 ) -> str:
-    # ... (Function content remains the same) ...
     func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
     if not template or not isinstance(template, str): return "[Error: Invalid Template for Inventory Update]"
     try:
+        # Use replace for simpler substitution here
         formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
         formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
         formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
@@ -719,14 +1028,12 @@ def format_inventory_update_prompt(
         func_logger.error(f"Error formatting inventory update prompt: {e}", exc_info=True)
         return f"[Error formatting inventory update prompt: {type(e).__name__}]"
 
-# --- Less Relevant Functions (Stubs - Unchanged) ---
+# --- Less Relevant Functions (Stubs - Unchanged from latest) ---
 def assemble_tagged_context(base_prompt: str, contexts: Dict[str, Union[str, List[str]]]) -> str:
-    # ... (Function content remains the same) ...
     logger.warning("assemble_tagged_context is a simplified stub and may not function as originally intended.")
     return base_prompt
 
 def extract_tagged_context(system_content: str) -> Dict[str, str]:
-    # ... (Function content remains the same) ...
     logger.warning("extract_tagged_context is a simplified stub and may not function as originally intended.")
     extracted = {}
     if not system_content or not isinstance(system_content, str): return extracted
@@ -736,4 +1043,4 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         if match: extracted[key] = match.group(1).strip()
     return extracted
 
-# === END MODIFIED FILE: i4_llm_agent/prompting.py ===
+# === END CORRECTED FILE: i4_llm_agent/prompting.py ===
