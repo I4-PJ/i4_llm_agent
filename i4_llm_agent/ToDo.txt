@@ -9,3 +9,4 @@
 - Implement T1 memory decaying and compression (even still within T1 memory)
 - Cache Update Skip Owi Threshold valve to be removed
 - Cache Update Similarity Threshold valve to be removed
+- History changes, specificaly deleted messages, should be reflected in the memory, world state, inventory and scene
