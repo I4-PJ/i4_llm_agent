@@ -274,58 +274,76 @@ CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER = "{current_owi_context}"
 # Flag indicating no update is needed
 NO_CACHE_UPDATE_FLAG = "[NO_CACHE_UPDATE]"
 
+# <<< NEW DETAILED TEMPLATE >>>
 DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Roleplay Session Cache Maintainer
-**Task:** Analyze the CURRENT OWI CONTEXT and compare it against the PREVIOUS CACHE TEXT in light of the LATEST USER QUERY and RECENT HISTORY. Decide if the cache needs updating.
-**Objective:** Maintain a concise, relevant, and persistent cache of key background information (character states, relationships, critical facts, environment details) for the ongoing roleplay session. The cache should provide stable context unless significant new information relevant to the query/history appears in the CURRENT OWI CONTEXT.
+**Role:** Session Background Cache Maintainer
 
-**Sources:**
-1.  **PREVIOUS CACHE TEXT:** The established background context from the last turn. This is the baseline.
-2.  **CURRENT OWI CONTEXT:** New contextual information provided for *this* turn (potentially inconsistent or redundant).
-3.  **LATEST USER QUERY:** The user's input driving the current interaction.
-4.  **RECENT HISTORY:** The immediate dialogue leading up to the query.
+**Task:** Critically evaluate the CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE, considering the context provided by the LATEST USER QUERY and RECENT CHAT HISTORY. Decide if a cache update is warranted, and if so, perform an intelligent merge/update.
 
-**Decision Logic:**
+**Objective:** Maintain an accurate, concise, and consistently structured SESSION CACHE containing essential background information (character profiles, lore, key facts). The cache should provide stable context unless CURRENT OWI RETRIEVAL offers **significant**, **relevant**, and **non-redundant** updates or additions compared to the PREVIOUSLY REFINED CACHE.
 
-1.  **Compare OWI to Cache:** Does the CURRENT OWI CONTEXT contain **significant new information** (facts, character status changes, major environmental shifts) that is **relevant** to the LATEST USER QUERY or RECENT HISTORY and is **missing or outdated** in the PREVIOUS CACHE TEXT?
-    *   *Minor details, redundant info, or irrelevant OWI context should NOT trigger an update.*
-    *   *Focus on information crucial for understanding the current turn or maintaining continuity.*
+**Inputs:**
+- **LATEST USER QUERY:** Provides immediate context for relevance checking.
+- **RECENT CHAT HISTORY:** Provides recent dialogue context.
+- **PREVIOUSLY REFINED CACHE:** The baseline state of the background context.
+- **CURRENT OWI RETRIEVAL:** The source of potential new information, details, clarifications, or corrections.
 
-2.  **If NO Significant New Relevant Information:** Output the exact string:
-    `{NO_CACHE_UPDATE_FLAG}`
+**Core Logic & Instructions:**
 
-3.  **If YES, Significant New Relevant Information Exists:** Synthesize a **complete, updated cache text**.
-    *   **Start with the PREVIOUS CACHE TEXT.**
-    *   **Integrate ONLY the *new, relevant* information** from the CURRENT OWI CONTEXT into the appropriate sections of the cache.
-    *   **Correct or replace** outdated information in the cache with the new details from OWI.
-    *   **Maintain the existing structure** (headings, sections) of the PREVIOUS CACHE TEXT as much as possible.
-    *   **Ensure conciseness.** Do not simply append the entire OWI context. Filter and integrate judiciously.
-    *   The output should be the **full, new cache text**, ready to replace the old one.
+1.  **Analyze for Significance & Relevance:**
+    *   Compare the information within CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE.
+    *   Use LATEST USER QUERY and RECENT CHAT HISTORY to determine if any differences found in OWI are **relevant** to the current interaction or ongoing narrative threads.
+    *   Identify if OWI contains **significant** new facts, major status changes, important clarifications/elaborations, or corrections that are missing, outdated, or less detailed in the PREVIOUS CACHE.
+    *   **Ignore** minor rephrasing, redundant information already present in the cache, or OWI details clearly irrelevant to the established context and current interaction.
+
+2.  **Decision Point:**
+    *   **If NO significant, relevant, and non-redundant updates are found** in CURRENT OWI RETRIEVAL compared to the PREVIOUS CACHE -> **Output ONLY the exact text:** `{NO_CACHE_UPDATE_FLAG}` and stop processing.
+    *   **If YES, proceed to Step 3 (Update/Merge).**
+
+3.  **Update/Merge Process (Only if Step 2 determined an update is needed):**
+    *   Start with the full text of the PREVIOUSLY REFINED CACHE as the base.
+    *   **Process Character Profiles:**
+        *   Identify character profiles/descriptions in both OWI and the Previous Cache (e.g., under `# Character: Name` headings).
+        *   For existing characters: **KEEP** the core identity/traits from the Previous Cache. **MERGE/ADD** only *concise*, *significant*, and *relevant* new details, clarifications, or trait elaborations found in OWI. Avoid drastic changes based on single OWI snippets unless OWI provides clearly superior or corrective *factual* information.
+        *   For genuinely new characters found only in OWI: Summarize their essential details (Identity, Traits, Role) concisely and ADD them under a new, clear heading.
+    *   **Process Factual Lore & Background:**
+        *   Identify lore, world details, established events, locations etc., in both OWI and the Previous Cache.
+        *   If OWI provides genuinely **NEW** relevant facts -> ADD them concisely.
+        *   If OWI **ELABORATES significantly**, **CLARIFIES**, or provides important **new DETAILS** for an existing topic -> Integrate these details concisely into the relevant cache section.
+        *   If OWI provides a clear **CORRECTION/UPDATE** to existing cache info -> MODIFY the cache accordingly.
+        *   **AVOID** adding redundant information or simple rephrasing.
+    *   **Minimal Pruning:** Only remove sections/information from the Previous Cache base if they are *explicitly contradicted* by significant, reliable information in OWI or are clearly and definitively no longer relevant to the ongoing narrative. Default to keeping existing information.
+    *   **Maintain Structure:** Preserve the existing heading structure (e.g., `# Section: Topic`) where possible. Add new headings clearly for new major topics or characters. Ensure the final output is well-organized.
+
+4.  **Final Output Construction:**
+    *   If Step 2 resulted in `{NO_CACHE_UPDATE_FLAG}`, that is the entire output.
+    *   If Step 3 was performed, the output is the **complete, updated SESSION CACHE text** resulting from the merge/update process.
+    *   **Empty/Irrelevant Case:** If the PREVIOUS CACHE was empty or placeholder text, AND the CURRENT OWI RETRIEVAL contains no significant profiles or facts deemed relevant after analysis -> Output: `[No relevant background context found]`
 
 **INPUTS:**
 
 **LATEST USER QUERY:**
 {CACHE_MAINTAINER_QUERY_PLACEHOLDER}
 
-**RECENT HISTORY:**
+**RECENT CHAT HISTORY:**
 ---
 {CACHE_MAINTAINER_HISTORY_PLACEHOLDER}
 ---
 
-**PREVIOUS CACHE TEXT (Baseline Context):**
+**PREVIOUSLY REFINED CACHE (Baseline Context):**
 ---
 {CACHE_MAINTAINER_PREVIOUS_CACHE_PLACEHOLDER}
 ---
 
-**CURRENT OWI CONTEXT (Check for New Info):**
+**CURRENT OWI RETRIEVAL (Check for New/Updated Info):**
 ---
 {CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER}
 ---
 
-**OUTPUT (Either '{NO_CACHE_UPDATE_FLAG}' or the complete updated cache text):**
+**OUTPUT (Either '{NO_CACHE_UPDATE_FLAG}', the complete updated cache text, or '[No relevant background context found]'):**
 """
-# <<< END NEW: Cache Maintainer Prompt Constants >>>
+# <<< END NEW DETAILED TEMPLATE >>>
 
 # === Function Implementations ---
 
