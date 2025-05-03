@@ -279,7 +279,7 @@ DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Cache Maintainer
 
-**Task:** Critically evaluate the CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE, considering the context provided by the LATEST USER QUERY and RECENT CHAT HISTORY. Decide if a cache update is warranted, and if so, perform an intelligent merge/update.
+**Task:** Critically evaluate the CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE, considering the context provided by the LATEST USER QUERY and RECENT CHAT HISTORY. Decide if a cache update is warranted, and if so, perform an intelligent merge/update. Defualt to total output content lenght about 30000 characters. Sort most important information first.
 
 **Objective:** Maintain an accurate, concise, and consistently structured SESSION CACHE containing essential background information (character profiles, lore, key facts). The cache should provide stable context unless CURRENT OWI RETRIEVAL offers **significant**, **relevant**, and **non-redundant** updates or additions compared to the PREVIOUSLY REFINED CACHE.
 
@@ -294,7 +294,7 @@ DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 1.  **Analyze for Significance & Relevance:**
     *   Compare the information within CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE.
     *   Use LATEST USER QUERY and RECENT CHAT HISTORY to determine if any differences found in OWI are **relevant** to the current interaction or ongoing narrative threads.
-    *   Identify if OWI contains **significant** new facts, major status changes, important clarifications/elaborations, or corrections that are missing, outdated, or less detailed in the PREVIOUS CACHE.
+    *   Identify if OWI contains new facts, major status changes, important clarifications/elaborations, or corrections that are missing, outdated, or less detailed in the PREVIOUS CACHE.
     *   **Ignore** minor rephrasing, redundant information already present in the cache, or OWI details clearly irrelevant to the established context and current interaction.
 
 2.  **Decision Point:**
@@ -313,7 +313,7 @@ DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
         *   If OWI **ELABORATES significantly**, **CLARIFIES**, or provides important **new DETAILS** for an existing topic -> Integrate these details concisely into the relevant cache section.
         *   If OWI provides a clear **CORRECTION/UPDATE** to existing cache info -> MODIFY the cache accordingly.
         *   **AVOID** adding redundant information or simple rephrasing.
-    *   **Minimal Pruning:** Only remove sections/information from the Previous Cache base if they are *explicitly contradicted* by significant, reliable information in OWI or are clearly and definitively no longer relevant to the ongoing narrative. Default to keeping existing information.
+    *   **Pruning:** Remove sections/information from the Previous Cache base if they are *explicitly contradicted* by significant, reliable information in OWI or are clearly and definitively no longer relevant to the ongoing narrative. Default to keeping existing information.
     *   **Maintain Structure:** Preserve the existing heading structure (e.g., `# Section: Topic`) where possible. Add new headings clearly for new major topics or characters. Ensure the final output is well-organized.
 
 4.  **Final Output Construction:**
