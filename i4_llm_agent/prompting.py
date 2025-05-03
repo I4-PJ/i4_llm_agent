@@ -277,49 +277,53 @@ NO_CACHE_UPDATE_FLAG = "[NO_CACHE_UPDATE]"
 # <<< NEW DETAILED TEMPLATE >>>
 DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Session Background Cache Maintainer
+**Role:** Session Background Cache Maintainer & Synthesizer
 
-**Task:** Critically evaluate the CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE, considering the context provided by the LATEST USER QUERY and RECENT CHAT HISTORY. Decide if a cache update is warranted, and if so, perform an intelligent merge/update. Defualt to total output content lenght about 30000 characters. Sort most important information first.
+**Task:** Critically evaluate the PREVIOUSLY REFINED CACHE against **both** the CURRENT OWI RETRIEVAL **and** the RECENT CHAT HISTORY, considering the LATEST USER QUERY for immediate relevance. Decide if a cache update is warranted. If yes, perform an intelligent merge/update, prioritizing **conciseness and relevance** to the ongoing narrative and immediate plans.
 
-**Objective:** Maintain an accurate, concise, and consistently structured SESSION CACHE containing essential background information (character profiles, lore, key facts). The cache should provide stable context unless CURRENT OWI RETRIEVAL offers **significant**, **relevant**, and **non-redundant** updates or additions compared to the PREVIOUSLY REFINED CACHE.
+**Objective:** Maintain an accurate, concise, and consistently structured SESSION CACHE containing **essential and currently relevant** background information (active character states/goals, key plot points, immediately relevant lore/setting). The cache should provide stable context but **evolve** with the narrative. **Aggressively prune or summarize** information that is no longer central to the current plot arc or character interactions to stay within an efficient size target (e.g., aim for under 20,000 characters).
 
 **Inputs:**
 - **LATEST USER QUERY:** Provides immediate context for relevance checking.
-- **RECENT CHAT HISTORY:** Provides recent dialogue context.
+- **RECENT CHAT HISTORY:** **Primary source for recent plot developments, character decisions, and relationship shifts.**
 - **PREVIOUSLY REFINED CACHE:** The baseline state of the background context.
-- **CURRENT OWI RETRIEVAL:** The source of potential new information, details, clarifications, or corrections.
+- **CURRENT OWI RETRIEVAL:** Secondary source for *genuinely new*, significant factual details, clarifications, or corrections *not* already reflected adequately in the cache or history.
 
 **Core Logic & Instructions:**
 
-1.  **Analyze for Significance & Relevance:**
-    *   Compare the information within CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE.
-    *   Use LATEST USER QUERY and RECENT CHAT HISTORY to determine if any differences found in OWI are **relevant** to the current interaction or ongoing narrative threads.
-    *   Identify if OWI contains new facts, major status changes, important clarifications/elaborations, or corrections that are missing, outdated, or less detailed in the PREVIOUS CACHE.
-    *   **Ignore** minor rephrasing, redundant information already present in the cache, or OWI details clearly irrelevant to the established context and current interaction.
+1.  **Analyze Recent Dialogue:**
+    *   Identify key decisions, plot advancements, emotional shifts, or relationship changes revealed in the RECENT CHAT HISTORY.
+    *   Determine if these developments necessitate updates to the 'Key Plot/Goal', character profiles (current state/motivations), or relationship summaries in the cache.
 
-2.  **Decision Point:**
-    *   **If NO significant, relevant, and non-redundant updates are found** in CURRENT OWI RETRIEVAL compared to the PREVIOUS CACHE -> **Output ONLY the exact text:** `{NO_CACHE_UPDATE_FLAG}` and stop processing.
-    *   **If YES, proceed to Step 3 (Update/Merge).**
+2.  **Analyze OWI vs. Cache (Conditional):**
+    *   Compare CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE.
+    *   **Only consider OWI if it provides genuinely NEW, significant, and non-redundant factual information** (e.g., a new character reveal, a major world event correction, significant lore elaboration *directly relevant* to the current query/plot).
+    *   **IGNORE** OWI if it's merely redundant, rephrased, or contains details irrelevant to the current focus.
 
-3.  **Update/Merge Process (Only if Step 2 determined an update is needed):**
+3.  **Decision Point:**
+    *   Update is needed if:
+        *   Recent Dialogue revealed significant plot/character state changes needing integration.
+        *   *OR* OWI provided genuinely new, significant, relevant factual updates.
+    *   **If NEITHER condition is met** -> **Output ONLY the exact text:** `{NO_CACHE_UPDATE_FLAG}` and stop processing.
+    *   **If YES, proceed to Step 4 (Update/Merge/Refine).**
+
+4.  **Update/Merge/Refine Process (If Step 3 determined an update is needed):**
     *   Start with the full text of the PREVIOUSLY REFINED CACHE as the base.
-    *   **Process Character Profiles:**
-        *   Identify character profiles/descriptions in both OWI and the Previous Cache (e.g., under `# Character: Name` headings).
-        *   For existing characters: **KEEP** the core identity/traits from the Previous Cache. **MERGE/ADD** only *concise*, *significant*, and *relevant* new details, clarifications, or trait elaborations found in OWI. Avoid drastic changes based on single OWI snippets unless OWI provides clearly superior or corrective *factual* information.
-        *   For genuinely new characters found only in OWI: Summarize their essential details (Identity, Traits, Role) concisely and ADD them under a new, clear heading.
-    *   **Process Factual Lore & Background:**
-        *   Identify lore, world details, established events, locations etc., in both OWI and the Previous Cache.
-        *   If OWI provides genuinely **NEW** relevant facts -> ADD them concisely.
-        *   If OWI **ELABORATES significantly**, **CLARIFIES**, or provides important **new DETAILS** for an existing topic -> Integrate these details concisely into the relevant cache section.
-        *   If OWI provides a clear **CORRECTION/UPDATE** to existing cache info -> MODIFY the cache accordingly.
-        *   **AVOID** adding redundant information or simple rephrasing.
-    *   **Pruning:** Remove sections/information from the Previous Cache base if they are *explicitly contradicted* by significant, reliable information in OWI or are clearly and definitively no longer relevant to the ongoing narrative. Default to keeping existing information.
-    *   **Maintain Structure:** Preserve the existing heading structure (e.g., `# Section: Topic`) where possible. Add new headings clearly for new major topics or characters. Ensure the final output is well-organized.
+    *   **Integrate Dialogue Updates:** Update the 'Key Plot/Goal' section, character states (e.g., Caldric's confirmed reluctance, agreed departure timing), or relationship notes based *directly* on the analysis from Step 1. Be concise.
+    *   **Integrate OWI Updates (If Applicable):** If Step 2 identified valuable NEW info in OWI, merge it concisely:
+        *   Character Profiles: Add significant new *facts* or *major* status changes. Avoid minor elaborations unless crucial. Prefer established cache profiles unless OWI offers clear correction. Add summaries for genuinely new, relevant characters.
+        *   Factual Lore/Background: Add NEW relevant facts or MAJOR clarifications/corrections identified in OWI.
+    *   **Aggressive Pruning & Summarization (CRITICAL FOR EFFICIENCY):**
+        *   Review **all sections** of the cache (including existing parts).
+        *   **Prune:** Remove details or sections that are no longer relevant to the *current* plot arc or active character goals (e.g., resolved minor quests, detailed backstories of inactive characters, settled world lore not currently in play).
+        *   **Summarize:** Condense lengthy descriptions or established facts that are stable but not immediately critical. Retain the core information but reduce word count significantly. (e.g., summarize detailed servant descriptions unless one is actively involved; summarize travel rules if no long journey is planned).
+        *   **Prioritize:** Focus retention on: Current Plot/Goals/Plans, Active Character States & Relationships, Immediately Relevant Setting/Lore.
+    *   **Maintain Structure & Target Length:** Preserve heading structure. **Actively work to keep the total output significantly below 30,000 characters (aim for ~20k or less if possible) through pruning and summarization.** Ensure the most important info (Plot, Active Characters) is prominent.
 
-4.  **Final Output Construction:**
-    *   If Step 2 resulted in `{NO_CACHE_UPDATE_FLAG}`, that is the entire output.
-    *   If Step 3 was performed, the output is the **complete, updated SESSION CACHE text** resulting from the merge/update process.
-    *   **Empty/Irrelevant Case:** If the PREVIOUS CACHE was empty or placeholder text, AND the CURRENT OWI RETRIEVAL contains no significant profiles or facts deemed relevant after analysis -> Output: `[No relevant background context found]`
+5.  **Final Output Construction:**
+    *   If Step 3 resulted in `{NO_CACHE_UPDATE_FLAG}`, that is the entire output.
+    *   If Step 4 was performed, the output is the **complete, updated, and REFINED SESSION CACHE text**.
+    *   **Empty/Irrelevant Case:** If the PREVIOUS CACHE was empty AND Recent Dialogue/OWI contain no significant relevant info -> Output: `[No relevant background context found]`
 
 **INPUTS:**
 
@@ -341,7 +345,7 @@ DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 {CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER}
 ---
 
-**OUTPUT (Either '{NO_CACHE_UPDATE_FLAG}', the complete updated cache text, or '[No relevant background context found]'):**
+**OUTPUT (Either '{NO_CACHE_UPDATE_FLAG}', the refined cache text, or '[No relevant background context found]'):**
 """
 # <<< END NEW DETAILED TEMPLATE >>>
 
