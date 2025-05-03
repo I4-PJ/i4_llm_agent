@@ -1,4 +1,4 @@
-# === COMPLETE CORRECTED BASE FILE: i4_llm_agent/prompting.py (Added Cache Maintainer) ===
+# === START OF COMPLETE FILE: i4_llm_agent/prompting.py (Event Hint moved to Context) ===
 # i4_llm_agent/prompting.py
 
 import logging
@@ -16,13 +16,13 @@ except ImportError:
      def format_history_for_llm(*args, **kwargs): return ""
      logging.getLogger(__name__).critical("Failed to import history utils in prompting.py")
 
+# <<< Event Hint Guideline is now defined HERE directly >>>
+# Import format_hint_for_query only, the guideline text is defined below
 try:
-    # Import the guideline text constant and the formatter for event hints
-    from .event_hints import EVENT_HANDLING_GUIDELINE_TEXT, format_hint_for_query
+    from .event_hints import format_hint_for_query
 except ImportError:
-    EVENT_HANDLING_GUIDELINE_TEXT = "[EVENT GUIDELINE LOAD FAILED]"
     def format_hint_for_query(hint): return f"[[Hint Load Failed: {hint}]]"
-    logging.getLogger(__name__).error("Failed to import event_hints utils in prompting.py")
+    logging.getLogger(__name__).error("Failed to import format_hint_for_query from event_hints in prompting.py")
 
 logger = logging.getLogger(__name__) # 'i4_llm_agent.prompting'
 
@@ -36,7 +36,7 @@ KNOWN_CONTEXT_TAGS = {
 EMPTY_CONTEXT_PLACEHOLDER = "<Context type='Empty'>[No Background Information Available]</Context>"
 
 
-# === Summarizer Prompt Constants (From Base) ===
+# === Summarizer Prompt Constants ===
 SUMMARIZER_DIALOGUE_CHUNK_PLACEHOLDER = "{dialogue_chunk}"
 DEFAULT_SUMMARIZER_SYSTEM_PROMPT = f"""
 [[SYSTEM DIRECTIVE]]
@@ -120,7 +120,7 @@ Analyze the provided DIALOGUE CHUNK (representing recent chat history) and produ
 
 """
 
-# === Memory Aging Prompt Constants (From Base) ===
+# === Memory Aging Prompt Constants ===
 MEMORY_AGING_BATCH_PLACEHOLDER = "{t1_batch_text}"
 DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE = f"""
 [[SYSTEM DIRECTIVE]]
@@ -161,7 +161,7 @@ DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE = f"""
 **(Single Paragraph Narrative Recap):**
 """
 
-# === RAG Query Prompt Constant (From Base) ===
+# === RAG Query Prompt Constant ===
 DEFAULT_RAGQ_LLM_PROMPT = """Based on the latest user message and recent dialogue context, generate a concise search query focusing on the key entities, topics, or questions raised.
 
 Latest Message: {latest_message}
@@ -171,7 +171,7 @@ Dialogue Context:
 
 Search Query:"""
 
-# === Inventory Update Prompt Constants (From Base) ===
+# === Inventory Update Prompt Constants ===
 INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
@@ -241,7 +241,7 @@ DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 **OUTPUT (JSON object with detected inventory updates):**
 """
 
-# === Guideline Constants (From Base) ===
+# === Guideline Constants ===
 SCENE_USAGE_GUIDELINE_TEXT = """<SceneUsageGuideline>
 **Environment Awareness:** A static scene description is provided in each turn’s background context (e.g., stable, camp, tavern). This represents passive environmental conditions and available objects.
 
@@ -266,15 +266,31 @@ WEATHER_SUGGESTION_GUIDELINE_TEXT = """<WeatherSuggestionGuideline>
 The background information may contain a "Proposed Weather Change: From X to Y". This indicates a potential shift in the environment suggested by the system. Treat this as context or inspiration. You are NOT required to follow this suggestion if your narrative or character actions dictate different weather. Feel free to describe the weather naturally as the scene unfolds.
 </WeatherSuggestionGuideline>"""
 
-# <<< NEW: Cache Maintainer Prompt Constants >>>
+# <<< NEW EVENT HINT GUIDELINE TEXT >>>
+EVENT_HANDLING_GUIDELINE_TEXT = """--- [ EVENT HANDLING GUIDELINE ] ---
+**Optional Event Hints:** You may occasionally find an `<EventHint>...</EventHint>` tag within the Background Information block. This contains a **strictly optional** suggestion for a minor environmental detail or sensory input.
+
+**Handling Rules (Low Priority):**
+1.  **Optionality:** You are **NOT required** to use the hint. Prioritize responding to the user's query, maintaining character voice/focus, and describing the core scene context **above** incorporating the hint.
+2.  **Subtlety:** If you *choose* to use the hint, weave it in subtly and naturally. It should feel like an organic observation, not a forced event.
+3.  **Ignore If:** You **SHOULD ignore** the hint if:
+    *   It feels forced, unnatural, or contradicts the established mood/scene.
+    *   It would disrupt the flow of dialogue or the character's current focus/actions.
+    *   The scene is already detailed enough, and the hint adds little value.
+    *   It seems irrelevant to the immediate situation.
+4.  **Do Not:** Do not treat the hint as a command. Do not announce that you are using the hint. Do not let it derail the conversation.
+
+**In summary: Treat the `<EventHint>` as a low-priority, optional atmospheric suggestion. Use it sparingly and only when it genuinely enhances the scene without disrupting the core narrative flow.**
+--- [ END EVENT HANDLING GUIDELINE ] ---"""
+# <<< END NEW EVENT HINT GUIDELINE TEXT >>>
+
+
+# === Cache Maintainer Prompt Constants ===
 CACHE_MAINTAINER_QUERY_PLACEHOLDER = "{query}"
 CACHE_MAINTAINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
 CACHE_MAINTAINER_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache_text}"
 CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER = "{current_owi_context}"
-# Flag indicating no update is needed
 NO_CACHE_UPDATE_FLAG = "[NO_CACHE_UPDATE]"
-
-# <<< NEW DETAILED TEMPLATE >>>
 DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Cache Maintainer & Synthesizer
@@ -347,11 +363,10 @@ DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Either '{NO_CACHE_UPDATE_FLAG}', the refined cache text, or '[No relevant background context found]'):**
 """
-# <<< END NEW DETAILED TEMPLATE >>>
 
-# === Function Implementations ---
+# === Function Implementations ===
 
-# --- Function: Clean Context Tags (From Base) ---
+# --- Function: Clean Context Tags ---
 def clean_context_tags(system_content: str) -> str:
     """Removes known context tags (<context>, <mempipe_*>) from the system prompt."""
     if not system_content or not isinstance(system_content, str): return ""
@@ -364,7 +379,7 @@ def clean_context_tags(system_content: str) -> str:
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
 
-# --- Function: Process System Prompt (From Base) ---
+# --- Function: Process System Prompt ---
 def process_system_prompt(messages: List[Dict]) -> Tuple[str, Optional[str]]:
     """
     Extracts the base system prompt text and any OWI context block (<context>...</context>).
@@ -399,7 +414,7 @@ def process_system_prompt(messages: List[Dict]) -> Tuple[str, Optional[str]]:
     return base_system_prompt_text, extracted_owi_context
 
 
-# --- Function: Generate RAG Query (From Base) ---
+# --- Function: Generate RAG Query ---
 async def generate_rag_query(
     latest_message_str: str,
     dialogue_context_str: str,
@@ -410,7 +425,6 @@ async def generate_rag_query(
     caller_info: str = "i4_llm_agent_RAGQueryGen",
 ) -> Optional[str]:
     """Generates a RAG query using the default prompt."""
-    # ** Start of previously truncated code **
     logger.debug(f"[{caller_info}] Generating RAG query using library default prompt...")
     if not llm_call_func or not asyncio.iscoroutinefunction(llm_call_func):
         logger.error(f"[{caller_info}] Invalid llm_call_func.")
@@ -479,12 +493,11 @@ async def generate_rag_query(
             return f"[Error: {err_type} - {err_msg_detail}]"
         else:
             return f"[Error: RAGQ Failed - {error_msg[:50]}]"
-    # ** End of previously truncated code **
 
 
-# --- Function: Combine Background Context (From Base) ---
+# --- Function: Combine Background Context (MODIFIED) ---
 def combine_background_context(
-    final_selected_context: Optional[str], # This is just the extracted OWI context in base
+    final_selected_context: Optional[str],
     t1_summaries: Optional[List[Tuple[str, Dict[str, Any]]]],
     aged_summaries: Optional[List[Tuple[str, Dict[str, Any]]]],
     t2_rag_results: Optional[List[str]],
@@ -495,14 +508,15 @@ def combine_background_context(
     current_season: Optional[str] = None,
     current_weather: Optional[str] = None,
     weather_proposal: Optional[Dict[str, Optional[str]]] = None,
+    event_hint_text: Optional[str] = None, # <<< NEW PARAMETER
     labels: Optional[Dict[str, str]] = None # Labels no longer used
 ) -> str:
     """
     Combines various background context sources into a single XML-style formatted string.
     Prepends static guidelines (Scene Usage, Memory Structure, Weather Suggestion).
+    Includes event hint within an <EventHint> tag if provided. <<< MODIFIED
     Sorts Aged summaries Newest First, T1 summaries Oldest First.
     """
-    # ... (Implementation remains the same as base) ...
     func_logger = logging.getLogger(__name__ + '.combine_background_context')
     context_parts = []
     context_parts.append("<SystemContextGuidelines>")
@@ -511,6 +525,7 @@ def combine_background_context(
     context_parts.append(WEATHER_SUGGESTION_GUIDELINE_TEXT)
     context_parts.append("</SystemContextGuidelines>")
     func_logger.debug("Prepended static context guidelines.")
+
     world_state_xml_parts = []
     if isinstance(current_day, int) and current_day > 0: world_state_xml_parts.append(f"<Day>{current_day}</Day>")
     if isinstance(current_time_of_day, str) and current_time_of_day.strip() and "Unknown" not in current_time_of_day: world_state_xml_parts.append(f"<Time>{current_time_of_day.strip()}</Time>")
@@ -521,28 +536,43 @@ def combine_background_context(
         context_parts.extend(world_state_xml_parts)
         context_parts.append("</WorldState>")
         func_logger.debug(f"Adding World State section: {len(world_state_xml_parts)} parts.")
+
     if isinstance(weather_proposal, dict):
         prev_w = weather_proposal.get("previous_weather"); new_w = weather_proposal.get("new_weather")
         if isinstance(prev_w, str) and isinstance(new_w, str):
             proposal_string = f"From '{prev_w}' to '{new_w}'"
             context_parts.append(f"<WeatherProposal>{proposal_string}</WeatherProposal>")
             func_logger.debug(f"Adding Weather Proposal section: {proposal_string}")
+
+    # <<< START NEW HINT LOGIC >>>
+    safe_event_hint = event_hint_text.strip() if isinstance(event_hint_text, str) else None
+    if safe_event_hint:
+        # Basic XML escaping for the hint text itself
+        escaped_hint = safe_event_hint.replace('&', '&').replace('<', '<').replace('>', '>')
+        # Wrap the raw (but escaped) hint text in the new tag
+        context_parts.append(f"<EventHint>{escaped_hint}</EventHint>")
+        func_logger.debug(f"Adding Event Hint section: {escaped_hint[:80]}...")
+    # <<< END NEW HINT LOGIC >>>
+
     safe_scene_description = scene_description.strip() if isinstance(scene_description, str) else None
     if safe_scene_description:
         func_logger.debug(f"Adding scene description (len: {len(safe_scene_description)}).")
         escaped_scene = safe_scene_description.replace('&', '&').replace('<', '<').replace('>', '>')
         context_parts.append(f"<CurrentScene>{escaped_scene}</CurrentScene>")
+
     safe_inventory_context = inventory_context.strip() if isinstance(inventory_context, str) else None
     is_valid_inventory = safe_inventory_context and not re.search(r"\[(No Inventory|Error|Disabled)\]", safe_inventory_context, re.IGNORECASE)
     if is_valid_inventory:
         func_logger.debug(f"Adding inventory context (len: {len(safe_inventory_context)}).")
         escaped_inventory = safe_inventory_context.replace('&', '&').replace('<', '<').replace('>', '>')
         context_parts.append(f"<Inventories>{escaped_inventory}</Inventories>")
+
     safe_selected_context = final_selected_context.strip() if isinstance(final_selected_context, str) else None
     if safe_selected_context:
-        func_logger.debug(f"Adding raw OWI context (len: {len(safe_selected_context)}).")
+        func_logger.debug(f"Adding raw OWI/Cache context (len: {len(safe_selected_context)}).")
         escaped_selected = safe_selected_context.replace('&', '&').replace('<', '<').replace('>', '>')
-        context_parts.append(f"<SelectedContext source='OWI_Direct'>{escaped_selected}</SelectedContext>")
+        context_parts.append(f"<SelectedContext source='OWI_Direct'>{escaped_selected}</SelectedContext>") # Assuming OWI/Cache for label
+
     valid_aged_summaries_data = []
     if aged_summaries and isinstance(aged_summaries, list):
         try:
@@ -558,6 +588,7 @@ def combine_background_context(
              context_parts.append(f"<Summary>{escaped_summary}</Summary>")
         context_parts.append('</AgedSummaries>')
         func_logger.debug(f"Adding {len(valid_aged_summaries_data)} Aged summaries.")
+
     valid_t1_summaries_data = []
     if t1_summaries and isinstance(t1_summaries, list):
         try:
@@ -573,6 +604,7 @@ def combine_background_context(
              context_parts.append(f"<Summary>{escaped_summary}</Summary>")
         context_parts.append('</RecentSummaries>')
         func_logger.debug(f"Adding {len(valid_t1_summaries_data)} T1 summaries.")
+
     valid_t2_results = [s.strip() for s in t2_rag_results if isinstance(s, str) and s.strip()] if t2_rag_results else []
     if valid_t2_results:
         context_parts.append('<RelatedInformation source="T2_RAG">')
@@ -581,7 +613,8 @@ def combine_background_context(
              context_parts.append(f"<Info>{escaped_result}</Info>")
         context_parts.append('</RelatedInformation>')
         func_logger.debug(f"Adding {len(valid_t2_results)} T2 RAG results.")
-    if len(context_parts) <= 5:
+
+    if len(context_parts) <= 5: # Adjusted count for only guidelines
         func_logger.info("No actual background context available beyond guidelines.")
         return EMPTY_CONTEXT_PLACEHOLDER
     else:
@@ -590,33 +623,36 @@ def combine_background_context(
         return full_context_string
 
 
-# --- Function: Construct Final LLM Payload (From Base) ---
+# --- Function: Construct Final LLM Payload (MODIFIED) ---
 def construct_final_llm_payload(
     system_prompt: str, # Base system prompt text (already cleaned)
     history: List[Dict], # Dialogue history turns (user/model)
-    context: Optional[str], # Formatted background context string (XML-style, includes guidelines)
+    context: Optional[str], # Formatted background context string (XML-style, includes guidelines, MAY include hint)
     query: str, # Final user query text for this turn
     long_term_goal: Optional[str] = None, # Dynamic goal text
-    event_hint: Optional[str] = None, # Dynamic event hint text
+    event_hint: Optional[str] = None, # Parameter still received but no longer used *here*
     period_setting: Optional[str] = None, # Dynamic period setting text
     include_ack_turns: bool = True # Whether to include ACK turns
 ) -> Dict[str, Any]:
     """
-    Constructs the final payload for the LLM in Google's 'contents' format,
-    following the structure: System Instructions -> Background Context -> History -> Query.
-    Injects dynamic guidelines (Goal, Event, Period) into System Instructions.
-    Assumes Background Context string already contains static guidelines. BASE VERSION.
+    Constructs the final payload for the LLM in Google's 'contents' format.
+    Event Hint is now expected *within* the 'context' string if present. <<< MODIFIED
+    Assumes Background Context string already contains static guidelines.
     """
-    # ... (Implementation remains the same as base) ...
     func_logger = logging.getLogger(__name__ + '.construct_final_llm_payload')
     func_logger.debug(
-        f"Constructing final LLM payload (Base Structure). ACKs: {include_ack_turns}, "
-        f"Goal Provided: {bool(long_term_goal)}, Event Hint Provided: {bool(event_hint)}, "
+        f"Constructing final LLM payload (Event Hint in Context). ACKs: {include_ack_turns}, "
+        f"Goal Provided: {bool(long_term_goal)}, "
+        # Event hint existence no longer logged here as it's inside context
         f"Period Setting Provided: '{period_setting or 'None'}'"
     )
     gemini_contents = []
+
+    # --- System Instructions Block (Includes Goal, Period Setting, Event Handling Guideline) ---
     base_system_prompt_text = system_prompt.strip() if system_prompt else "You are a helpful assistant."
     final_system_instructions = base_system_prompt_text
+
+    # Append Goal if present
     safe_long_term_goal = long_term_goal.strip() if isinstance(long_term_goal, str) else None
     if safe_long_term_goal:
         goal_handling_guideline = (
@@ -638,12 +674,15 @@ def construct_final_llm_payload(
 --- [ END SESSION GOAL ] ---"""
         final_system_instructions += goal_block
         func_logger.debug(f"Appended long term goal to system instructions text.")
-    if event_hint and isinstance(event_hint, str) and event_hint.strip():
-        if EVENT_HANDLING_GUIDELINE_TEXT != "[EVENT GUIDELINE LOAD FAILED]":
-            final_system_instructions += f"\n{EVENT_HANDLING_GUIDELINE_TEXT}"
-            func_logger.debug(f"Appended event handling guideline to system instructions text.")
-        else:
-            func_logger.warning("Event hint present but guideline text failed to load. Skipping append.")
+
+    # Append Event Handling Guideline (uses the *updated* constant)
+    if EVENT_HANDLING_GUIDELINE_TEXT != "[EVENT GUIDELINE LOAD FAILED]": # Check constant load status
+        final_system_instructions += f"\n{EVENT_HANDLING_GUIDELINE_TEXT}" # Constant is updated
+        func_logger.debug(f"Appended event handling guideline (Hint in Context version) to system instructions text.")
+    else:
+        func_logger.warning("Event handling guideline text failed to load. Skipping append.")
+
+    # Append Period Setting if present
     safe_period_setting = period_setting.strip() if isinstance(period_setting, str) else None
     if safe_period_setting:
         period_block = f"""
@@ -653,55 +692,65 @@ def construct_final_llm_payload(
 --- [ END Period Setting ] ---"""
         final_system_instructions += period_block
         func_logger.debug(f"Appended period setting instruction ('{safe_period_setting}') to system instructions text.")
+
+    # --- System Instructions Turn(s) ---
     system_instructions_turn = None; system_ack_turn = None
     if final_system_instructions:
         system_instructions_turn = {"role": "user", "parts": [{"text": f"System Instructions:\n{final_system_instructions}"}]}
         if include_ack_turns:
-            ack_text = "Understood. I will follow these instructions."
-            if safe_long_term_goal: ack_text += " I will also keep the long-term goal in mind."
-            if safe_period_setting: ack_text += f" I will also maintain a '{safe_period_setting}' setting."
+            # Construct ACK text based on included elements
+            ack_text_parts = ["Understood. I will follow these instructions."]
+            if safe_long_term_goal: ack_text_parts.append("I will also keep the long-term goal in mind.")
+            if safe_period_setting: ack_text_parts.append(f"I will also maintain a '{safe_period_setting}' setting.")
+            ack_text = " ".join(ack_text_parts)
             system_ack_turn = {"role": "model", "parts": [{"text": ack_text}]}
+
+    # --- Context Block Turn(s) ---
     context_turn = None; context_ack_turn = None
     has_real_context = bool(context and context.strip() and not context.strip().startswith("<Context type='Empty'>"))
     if has_real_context:
-        context_injection_text = f"Background Information (Use this to inform your response):\n{context.strip()}"
+        context_injection_text = f"Background Information (Use this to inform your response):\n{context.strip()}" # Context now includes hint tag if present
         context_turn = {"role": "user", "parts": [{"text": context_injection_text}]}
-        if include_ack_turns: context_ack_turn = {"role": "model", "parts": [{"text": "Understood. I have reviewed the background information."}]}
+        if include_ack_turns:
+             context_ack_turn = {"role": "model", "parts": [{"text": "Understood. I have reviewed the background information."}]}
+
+    # --- History Turns ---
     history_turns = []
     for msg in history:
         role = msg.get("role"); content = msg.get("content", "").strip()
         if role == "user" and content: history_turns.append({"role": "user", "parts": [{"text": content}]})
         elif role == "assistant" and content: history_turns.append({"role": "model", "parts": [{"text": content}]})
-        elif role == "model" and content: history_turns.append({"role": "model", "parts": [{"text": content}]})
+        elif role == "model" and content: history_turns.append({"role": "model", "parts": [{"text": content}]}) # Include model role
+
+    # --- Final Query Turn ---
     safe_query = query.strip() if query and query.strip() else "[User query not provided]"
-    final_query_text = safe_query
-    if event_hint and isinstance(event_hint, str) and event_hint.strip():
-        formatted_hint = format_hint_for_query(event_hint)
-        if formatted_hint:
-            final_query_text = f"{formatted_hint}\n\n{safe_query}"
-            func_logger.debug(f"Prepended event hint to final query text.")
+    final_query_text = safe_query # <<< HINT PREPENDING IS REMOVED HERE >>>
+
     final_query_turn = {"role": "user", "parts": [{"text": final_query_text}]}
+
+    # --- Assemble Payload ---
     if system_instructions_turn: gemini_contents.append(system_instructions_turn)
     if system_ack_turn: gemini_contents.append(system_ack_turn)
     if context_turn: gemini_contents.append(context_turn)
     if context_ack_turn: gemini_contents.append(context_ack_turn)
     gemini_contents.extend(history_turns)
     gemini_contents.append(final_query_turn)
+
     final_payload = {"contents": gemini_contents}
-    func_logger.info(f"Final payload constructed with {len(gemini_contents)} turns (Base structure).")
+    func_logger.info(f"Final payload constructed with {len(gemini_contents)} turns (Hint moved to Context).")
     return final_payload
 
 
-# --- Function: Format Memory Aging Prompt (From Base) ---
+# --- Function: Format Memory Aging Prompt ---
 def format_memory_aging_prompt(t1_batch_text: str, template: Optional[str] = None) -> str:
     """Formats the prompt for the Memory Aging LLM."""
-    # ... (Implementation remains the same as base) ...
     func_logger = logging.getLogger(__name__ + '.format_memory_aging_prompt')
     prompt_template = template if template is not None else DEFAULT_MEMORY_AGING_PROMPT_TEMPLATE
     if not prompt_template or prompt_template == "[Default Memory Aging Prompt Load Failed]":
         return "[Error: Invalid or Missing Template for Memory Aging]"
     safe_batch_text = t1_batch_text.replace("{", "{{").replace("}", "}}") if isinstance(t1_batch_text, str) else ""
     try:
+        # Use .format() with placeholder name stripped of braces
         formatted_prompt = prompt_template.format(
             **{MEMORY_AGING_BATCH_PLACEHOLDER.strip('{}'): safe_batch_text}
         )
@@ -714,7 +763,7 @@ def format_memory_aging_prompt(t1_batch_text: str, template: Optional[str] = Non
         return f"[Error formatting memory aging prompt: {type(e).__name__}]"
 
 
-# --- Function: Format Inventory Update Prompt (From Base) ---
+# --- Function: Format Inventory Update Prompt ---
 def format_inventory_update_prompt(
     main_llm_response: str,
     user_query: str,
@@ -722,11 +771,11 @@ def format_inventory_update_prompt(
     template: str # Expecting the specific template for this step
 ) -> str:
     """Formats the prompt for the Inventory Update LLM."""
-    # ... (Implementation remains the same as base) ...
     func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
     if not template or not isinstance(template, str) or template == "[Default Inventory Prompt Load Failed]":
         return "[Error: Invalid Template for Inventory Update]"
     try:
+        # Use str.replace for simple placeholders if format causes issues
         formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
         formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_QUERY_PLACEHOLDER, str(user_query))
         formatted_prompt = formatted_prompt.replace(INVENTORY_UPDATE_HISTORY_PLACEHOLDER, str(recent_history_str))
@@ -736,7 +785,7 @@ def format_inventory_update_prompt(
         return f"[Error formatting inventory update prompt: {type(e).__name__}]"
 
 
-# <<< NEW: Cache Maintainer Formatting Function >>>
+# --- Function: Format Cache Maintainer Prompt ---
 def format_cache_maintainer_prompt(
     query: str,
     recent_history_str: str,
@@ -749,7 +798,7 @@ def format_cache_maintainer_prompt(
     prompt_template = template if template is not None else DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT
 
     # Use the constant added earlier
-    if not prompt_template or prompt_template == "[Prompting Const Load Error]":
+    if not prompt_template or prompt_template == "[Prompting Const Load Error]": # Check if default failed
          # Log an error if the default template constant is missing
          func_logger.error("Default Cache Maintainer template text is missing or failed to load.")
          # Return a more specific error message
@@ -769,11 +818,12 @@ def format_cache_maintainer_prompt(
                CACHE_MAINTAINER_HISTORY_PLACEHOLDER.strip('{}'): safe_history,
                CACHE_MAINTAINER_PREVIOUS_CACHE_PLACEHOLDER.strip('{}'): safe_previous_cache,
                CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER.strip('{}'): safe_current_owi
-               # NO_CACHE_UPDATE_FLAG is part of the literal template text, not formatted in
+               # NO_CACHE_UPDATE_FLAG is handled by literal replacement below
             }
         )
         # Replace the flag placeholder literally within the formatted string
         # This ensures the exact flag string is present for comparison later
+        # Ensure the placeholder `{NO_CACHE_UPDATE_FLAG}` is exactly as written here in the template text
         formatted_prompt = formatted_prompt.replace("{NO_CACHE_UPDATE_FLAG}", NO_CACHE_UPDATE_FLAG)
 
         return formatted_prompt
@@ -783,13 +833,11 @@ def format_cache_maintainer_prompt(
     except Exception as e:
         func_logger.error(f"Error formatting cache maintainer prompt: {e}", exc_info=True)
         return f"[Error formatting cache maintainer prompt: {type(e).__name__}]"
-# <<< END NEW: Cache Maintainer Formatting Function >>>
 
 
-# --- Legacy/Stub Functions (From Base) ---
+# --- Legacy/Stub Functions ---
 def assemble_tagged_context(base_prompt: str, contexts: Dict[str, Union[str, List[str]]]) -> str:
     """Simplified stub for assembling context with old-style tags. May not function correctly."""
-    # ... (Implementation remains the same as base) ...
     logger.warning("assemble_tagged_context is a simplified stub and may not function as originally intended.")
     full_context = base_prompt
     for key, value in contexts.items():
@@ -801,7 +849,6 @@ def assemble_tagged_context(base_prompt: str, contexts: Dict[str, Union[str, Lis
 
 def extract_tagged_context(system_content: str) -> Dict[str, str]:
     """Simplified stub for extracting context with old-style tags. May not function correctly."""
-    # ... (Implementation remains the same as base) ...
     logger.warning("extract_tagged_context is a simplified stub and may not function as originally intended.")
     extracted = {}
     if not system_content or not isinstance(system_content, str): return extracted
@@ -811,4 +858,4 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         if match: extracted[key] = match.group(1).strip()
     return extracted
 
-# === END COMPLETE CORRECTED BASE FILE: i4_llm_agent/prompting.py ===
+# === END OF COMPLETE FILE: i4_llm_agent/prompting.py ===

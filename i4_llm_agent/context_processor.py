@@ -354,6 +354,7 @@ async def process_context_and_prepare_payload(
     current_season_for_combine = current_world_state_dict.get('season')
     current_weather_for_combine = current_world_state_dict.get('weather')
 
+    # VV === THIS IS THE FUNCTION CALL TO MODIFY === VV
     combined_background_context = combine_background_context(
         final_selected_context=maintained_cache_text, # <<< USE MAINTAINED CACHE HERE
         t1_summaries=recent_t1_summaries_data,
@@ -366,7 +367,10 @@ async def process_context_and_prepare_payload(
         current_season=current_season_for_combine,
         current_weather=current_weather_for_combine,
         weather_proposal=generated_weather_proposal,
+        event_hint_text=generated_event_hint_text # <<< ADD THIS LINE HERE
     )
+    # ^^ === END OF FUNCTION CALL MODIFICATION === ^^
+
     final_context_tokens = _count_tokens_safe(combined_background_context)
     context_status_info["final_context_tokens"] = final_context_tokens
     func_logger.info(f"[{session_id}] Combined background context length: {len(combined_background_context)} ({final_context_tokens} tokens)")
