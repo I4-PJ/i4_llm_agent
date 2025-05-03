@@ -291,13 +291,14 @@ CACHE_MAINTAINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
 CACHE_MAINTAINER_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache_text}"
 CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER = "{current_owi_context}"
 NO_CACHE_UPDATE_FLAG = "[NO_CACHE_UPDATE]"
+# <<< REFINED TEMPLATE V2 (Less Aggressive Pruning) >>>
 DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 **Role:** Session Background Cache Maintainer & Synthesizer
 
 **Task:** Critically evaluate the PREVIOUSLY REFINED CACHE against **both** the CURRENT OWI RETRIEVAL **and** the RECENT CHAT HISTORY, considering the LATEST USER QUERY for immediate relevance. Decide if a cache update is warranted. If yes, perform an intelligent merge/update, prioritizing **conciseness and relevance** to the ongoing narrative and immediate plans.
 
-**Objective:** Maintain an accurate, concise, and consistently structured SESSION CACHE containing **essential and currently relevant** background information (active character states/goals, key plot points, immediately relevant lore/setting). The cache should provide stable context but **evolve** with the narrative. **Aggressively prune or summarize** information that is no longer central to the current plot arc or character interactions to stay within an efficient size target (e.g., aim for under 20,000 characters).
+**Objective:** Maintain an accurate, concise, and consistently structured SESSION CACHE containing **essential and currently relevant** background information (active character states/goals, key plot points, immediately relevant lore/setting). The cache should provide stable context but **evolve** with the narrative. **Prune or summarize** information that is less central to the current plot arc or character interactions to maintain an efficient size target (aim for roughly 25,000 characters).
 
 **Inputs:**
 - **LATEST USER QUERY:** Provides immediate context for relevance checking.
@@ -329,12 +330,12 @@ DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
     *   **Integrate OWI Updates (If Applicable):** If Step 2 identified valuable NEW info in OWI, merge it concisely:
         *   Character Profiles: Add significant new *facts* or *major* status changes. Avoid minor elaborations unless crucial. Prefer established cache profiles unless OWI offers clear correction. Add summaries for genuinely new, relevant characters.
         *   Factual Lore/Background: Add NEW relevant facts or MAJOR clarifications/corrections identified in OWI.
-    *   **Aggressive Pruning & Summarization (CRITICAL FOR EFFICIENCY):**
+    *   **Pruning & Summarization (For Efficiency):**
         *   Review **all sections** of the cache (including existing parts).
-        *   **Prune:** Remove details or sections that are no longer relevant to the *current* plot arc or active character goals (e.g., resolved minor quests, detailed backstories of inactive characters, settled world lore not currently in play).
-        *   **Summarize:** Condense lengthy descriptions or established facts that are stable but not immediately critical. Retain the core information but reduce word count significantly. (e.g., summarize detailed servant descriptions unless one is actively involved; summarize travel rules if no long journey is planned).
-        *   **Prioritize:** Focus retention on: Current Plot/Goals/Plans, Active Character States & Relationships, Immediately Relevant Setting/Lore.
-    *   **Maintain Structure & Target Length:** Preserve heading structure. **Actively work to keep the total output significantly below 30,000 characters (aim for ~20k or less if possible) through pruning and summarization.** Ensure the most important info (Plot, Active Characters) is prominent.
+        *   **Prune:** Remove details or sections that are clearly no longer relevant to the *current* plot arc or active character goals (e.g., fully resolved minor quests, details of inactive characters).
+        *   **Summarize:** Condense lengthy descriptions or established background facts that are stable but not immediately critical. Retain the core information but reduce word count where appropriate. (e.g., summarize detailed servant descriptions unless one is actively involved; consider summarizing detailed world history if not currently relevant).
+        *   **Prioritize:** Focus retention on: Current Plot/Goals/Plans, Active Character States & Relationships (including recent emotional or planning nuances), Immediately Relevant Setting/Lore.
+    *   **Maintain Structure & Target Length:** Preserve heading structure. **Prune and summarize less immediately relevant information to keep the total output concise and focused, aiming for roughly 25,000 characters.** Ensure the most important info (Plot, Active Characters) is prominent.
 
 5.  **Final Output Construction:**
     *   If Step 3 resulted in `{NO_CACHE_UPDATE_FLAG}`, that is the entire output.
@@ -363,6 +364,7 @@ DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
 
 **OUTPUT (Either '{NO_CACHE_UPDATE_FLAG}', the refined cache text, or '[No relevant background context found]'):**
 """
+# <<< END REFINED TEMPLATE V2 >>>
 
 # === Function Implementations ===
 
