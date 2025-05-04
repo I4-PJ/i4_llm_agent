@@ -175,71 +175,163 @@ Search Query:"""
 INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
+
 DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
-**Role:** Inventory Log Keeper
-**Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
-**Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
+Role: Narrative Inventory Analyst & Maintainer
+Task: Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify changes to character inventories. This includes explicit commands, narrative descriptions of acquiring, losing, using, breaking, replacing, or storing items. Maintain item relevance by updating status based on narrative context.
+Objective: Output a structured JSON object detailing ONLY the inventory items that were added or modified during this turn, reflecting their intended final state according to the new schema. If no changes are detected, output {{"character_updates": []}}.
+Item Schema (Required Structure for items in output):
 
-**Supported Direct Command Formats (Priority 1):**
-*   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-*   `INVENTORY: CLEAR CharacterName`
-*(Note: Use `__USER__` for the player character if their specific name isn't provided)*
+{{
+  "quantity": <integer>, // Current count of the item
+  "category": "Clothing" | "Consumable" | "Tool" | "Material" | "Quest Item" | "Currency" | "Other", // Best fit category
+  "status": "active" | "equipped" | "stored" | "broken" | "consumed" | "obsolete", // Reflects current relevance/state
+  "properties": {{ // Object for descriptive details
+    "material": "<string>", // e.g., "wool", "iron", "leather"
+    "color": "<string>", // e.g., "blue", "dark green"
+    "quality": "<string>", // e.g., "sturdy", "worn", "fine", "new", "mended"
+    // Add other observed properties as key-value pairs
+    "special_tags": ["<string>", ...] // List for flags like "waterproofed", "lined", "magical"
+  }},
+  "origin_notes": "<string>" // BRIEF note on acquisition/significance if relevant, otherwise empty string ""
+}}
+
+**Output JSON Format (Required Structure for overall output):**
+{{
+  "character_updates": [
+    {{
+      "character_name": "Name or __USER__", // Character whose inventory changed
+      "updated_items": {{
+        // Key: Canonical Name of the item (be consistent!)
+        // Value: The *complete item schema object* reflecting the item's
+        //        intended final state after this turn's events.
+        //        Include items here if they were added OR if any field
+        //        (quantity, status, properties) was modified.
+        "canonical_name_1": {{ ...item schema... }},
+        "canonical_name_2": {{ ...item schema... }}
+        // ... only include items ADDED or MODIFIED this turn.
+      }}
+    }}
+    // ... include another object in the list if a second character's inventory was also affected.
+  ]
+}}
 
 **Instructions (Follow in Order):**
 
-1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-    *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
-    *   If NO: Proceed to Instruction 2.
-
-2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-    *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
+1.  **Identify Characters:** Determine which character(s) inventories were affected (use `__USER__` for the player if name unclear).
+2.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY: ADD/REMOVE/SET/CLEAR`?
+    *   If YES: Parse the command **strictly**. Generate the `updated_items` reflecting the command's direct effect (e.g., `ADD` creates an item with `status: "active"`, `REMOVE` might imply setting quantity to 0 or status to `"obsolete"` if quantity drops to zero, `SET` updates quantity, `CLEAR` implies setting all items for that character to `status: "obsolete"`). Map command items to canonical names. **Stop processing other inputs and output the JSON.**
     *   If NO: Proceed to Instruction 3.
 
-3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
-    *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
-    *   Generate JSON `updates` based *only* on these dialogue events.
+3.  **Analyze Dialogue & Narrative:** Analyze the **ASSISTANT RESPONSE** and **USER QUERY** (using History for context) for narrative events affecting inventory:
+    *   **Acquisition:** Picking up, receiving, buying, finding, crafting items. -> Create/update item, set `status: "active"` (or `"equipped"` if worn/wielded). Extract `properties`, `category`. Assign `canonical_name`.
+    *   **Loss/Removal:** Dropping, giving away, selling items. -> Update item `status` to `"obsolete"` or `"stored"`. If quantity becomes 0, reflect that.
+    *   **Consumption/Usage:** Using potions, food rations, arrows, materials for crafting. -> Update item `status` to `"consumed"` or decrease `quantity`. If quantity becomes 0, status can also be `"consumed"`.
+    *   **Breakage:** Item explicitly described as breaking. -> Update `status` to `"broken"`.
+    *   **Replacement:** Receiving a new item that clearly replaces an older one (e.g., "new sturdy boots" replace "old worn boots"). -> Update the *old* item's `status` to `"stored"` or `"obsolete"`. Add/update the *new* item with `status: "active"` or `"equipped"`.
+    *   **Status Change:** Item being equipped, unequipped, stored. -> Update `status` accordingly. Properties might change (e.g., `quality: "worn"` after long use).
+    *   **Quest Item Obsolescence:** Item tied to a completed task. -> Update `status` to `"obsolete"`.
 
-4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
-    ```json
-    {{
-      "updates": [
-        // One entry for each detected change (from command OR dialogue)
-        {{
-          "character_name": "Name or __USER__",
-          "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
-          "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
-          "quantity": <integer>,
-          "description": "<optional string>" // Typically only for 'add' from dialogue
-        }}
-        // ... more updates if needed
-      ]
-    }}
-    ```
-    *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
+4.  **Determine Canonical Names:** For each item affected, use a consistent, descriptive `canonical_name` (e.g., "Leather Boots", "Iron Sword", "Health Potion", "Mystic Amulet"). Map variations in dialogue ("the blue cloak", "her wool wrap") to the same canonical name. If an item seems genuinely new and distinct, create a new canonical name.
 
-5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
-6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
+5.  **Apply Schema & Status Logic:** For every item identified as added or modified:
+    *   Construct the full item schema object reflecting its **final state** after the turn's events.
+    *   Pay close attention to updating the `status` field based on the narrative analysis in Step 3.
+    *   Extract `properties` (color, material, quality, tags) mentioned in the text. Assign a `category`. Add brief `origin_notes` if significant context exists.
+    *   Ensure `quantity` is correct. If status becomes `"consumed"` or `"broken"`, quantity often becomes 0, but include the item entry in the output with the final status.
+
+6.  **Handle Ambiguity:** If it's unclear whether an old item was discarded or just stored after being replaced, default to setting its `status: "stored"`. If narrative details are insufficient to populate properties, use reasonable defaults or omit them.
+
+7.  **Ignore Transient Items:** Do **not** create inventory entries for items clearly not intended for possession (e.g., food eaten immediately, scenery objects not taken, temporary tools used and left behind).
+
+8.  **Construct Final JSON:** Assemble the final JSON according to the specified **Output JSON Format** (Section 3). Only include characters who had updates, and only include items whose state was added or modified in the `updated_items` dictionary for that character.
+
+9.  **No Change:** If no commands were found and no narrative changes to any character's inventory were detected, output `{{"character_updates": []}}`.
 
 **INPUTS:**
 
 **USER QUERY (Check for commands first):**
 {INVENTORY_UPDATE_QUERY_PLACEHOLDER}
 
-**ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
+**ASSISTANT RESPONSE (Analyze for narrative changes if no command):**
 ---
 {INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
 ---
 
-**RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
+**RECENT CHAT HISTORY (For context, especially pronoun/name resolution and narrative flow):**
 ---
 {INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
 ---
 
-**OUTPUT (JSON object with detected inventory updates):**
+**OUTPUT (JSON object with detected inventory additions/modifications):**
 """
+
+# DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
+# [[SYSTEM DIRECTIVE]]
+# **Role:** Inventory Log Keeper
+# **Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
+# **Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
+
+# **Supported Direct Command Formats (Priority 1):**
+# *   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+# *   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+# *   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
+# *   `INVENTORY: CLEAR CharacterName`
+# *(Note: Use `__USER__` for the player character if their specific name isn't provided)*
+
+# **Instructions (Follow in Order):**
+
+# 1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+#     *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
+#     *   If NO: Proceed to Instruction 2.
+
+# 2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
+#     *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
+#     *   If NO: Proceed to Instruction 3.
+
+# 3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
+#     *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
+#     *   Generate JSON `updates` based *only* on these dialogue events.
+
+# 4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
+#     ```json
+#     {{
+#       "updates": [
+#         // One entry for each detected change (from command OR dialogue)
+#         {{
+#           "character_name": "Name or __USER__",
+#           "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
+#           "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
+#           "quantity": <integer>,
+#           "description": "<optional string>" // Typically only for 'add' from dialogue
+#         }}
+#         // ... more updates if needed
+#       ]
+#     }}
+#     ```
+#     *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
+
+# 5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
+# 6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
+
+# **INPUTS:**
+
+# **USER QUERY (Check for commands first):**
+# {INVENTORY_UPDATE_QUERY_PLACEHOLDER}
+
+# **ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
+# ---
+# {INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
+# ---
+
+# **RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
+# ---
+# {INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
+# ---
+
+# **OUTPUT (JSON object with detected inventory updates):**
+# """
 
 # === Guideline Constants ===
 SCENE_USAGE_GUIDELINE_TEXT = """<SceneUsageGuideline>

@@ -1,55 +1,46 @@
-# [[START MODIFIED utils.py]]
+# [[START COMPLETE CORRECTED utils.py - Added asyncio import]]
 # i4_llm_agent/utils.py
 import logging
-import difflib # Added for SequenceMatcher
-from typing import Any, Optional
+import difflib
+import os
+import json
+import asyncio  # <<< ADDED IMPORT
+from datetime import datetime, timezone
+from typing import Any, Optional, Dict, Callable, Coroutine
 
 # --- Tiktoken Import Handling ---
-# Make dependency optional at the library level, but functions using it will fail if not installed.
 try:
     import tiktoken
     TIKTOKEN_AVAILABLE = True
-    # logger.debug("tiktoken library loaded successfully.") # Optional: log on import
 except ImportError:
     tiktoken = None
     TIKTOKEN_AVAILABLE = False
-    # logger.warning("tiktoken library not found. Token counting functions will not work.") # Optional: log on import
 
 logger = logging.getLogger(__name__) # i4_llm_agent.utils
+if not TIKTOKEN_AVAILABLE:
+     logger.warning("tiktoken library not found. Token counting functions will not work.")
+
+# ==============================================================================
+# === Core Utilities                                                         ===
+# ==============================================================================
 
 # --- Token Counting Function ---
 def count_tokens(text: Optional[str], tokenizer: Optional[Any]) -> int:
     """
     Counts the number of tokens in a given text using the provided tokenizer.
-
-    Args:
-        text: The text string to count tokens for.
-        tokenizer: An initialized tokenizer instance (e.g., from tiktoken)
-                   with an .encode() method.
-
-    Returns:
-        The number of tokens, or 0 if input is invalid, tokenizer is missing,
-        or an error occurs during encoding.
+    (Implementation remains the same as provided previously)
     """
-    if not text or not isinstance(text, str):
-        # logger.debug("count_tokens: Input text is empty or not a string, returning 0.")
-        return 0
-    if not tokenizer:
-        logger.warning("count_tokens: Tokenizer instance is missing, returning 0.")
-        return 0
-    if not hasattr(tokenizer, 'encode'):
-        logger.error("count_tokens: Provided tokenizer object lacks an 'encode' method, returning 0.")
-        return 0
-
+    if not text or not isinstance(text, str): return 0
+    if not tokenizer: logger.warning("count_tokens: Tokenizer instance missing."); return 0
+    if not hasattr(tokenizer, 'encode'): logger.error("count_tokens: Tokenizer lacks 'encode' method."); return 0
     try:
-        # Attempt to encode the text and return the length of the resulting token list
         tokens = tokenizer.encode(text)
         return len(tokens)
     except Exception as e:
-        logger.error(f"count_tokens: Error during tokenization encode: {e}", exc_info=False) # Keep logs cleaner
+        logger.error(f"count_tokens: Error during tokenization encode: {e}", exc_info=False)
         return 0
 
-# --- NEW: String Similarity Function ---
+# --- String Similarity Function ---
 def calculate_string_similarity(
     text_a: Optional[str],
     text_b: Optional[str],
@@ -58,49 +49,175 @@ def calculate_string_similarity(
 ) -> float:
     """
     Calculates similarity between two strings using the specified method.
-
-    Args:
-        text_a: The first string.
-        text_b: The second string.
-        method: The similarity method ('sequencematcher'). Default is 'sequencematcher'.
-        lowercase: Whether to convert texts to lowercase before comparison. Default is True.
-
-    Returns:
-        A similarity score between 0.0 and 1.0. Returns 0.0 if inputs are invalid,
-        the method is unknown, or an error occurs.
+    (Implementation remains the same as provided previously)
     """
-    if not text_a or not isinstance(text_a, str) or not text_b or not isinstance(text_b, str):
-        # logger.debug("calculate_string_similarity: One or both inputs invalid, returning 0.0.")
-        return 0.0
-
-    str_a = text_a
-    str_b = text_b
-
-    if lowercase:
-        str_a = str_a.lower()
-        str_b = str_b.lower()
-
+    if not text_a or not isinstance(text_a, str) or not text_b or not isinstance(text_b, str): return 0.0
+    str_a = text_a.lower() if lowercase else text_a
+    str_b = text_b.lower() if lowercase else text_b
     try:
         if method == 'sequencematcher':
-            # Use difflib's SequenceMatcher. ratio() gives a float in [0, 1].
-            # It measures the similarity as twice the number of matching characters
-            # divided by the total number of characters in both sequences.
-            # isjunk=None means no characters are ignored.
-            # autojunk=False prevents the heuristic junk detection.
             similarity = difflib.SequenceMatcher(None, str_a, str_b, autojunk=False).ratio()
-            # logger.debug(f"SequenceMatcher similarity: {similarity:.4f}") # Optional debug
             return similarity
-        # Add other methods like 'jaccard' here if needed later
-        # elif method == 'jaccard':
-        #     set_a = set(str_a.split())
-        #     set_b = set(str_b.split())
-        #     intersection = len(set_a.intersection(set_b))
-        #     union = len(set_a.union(set_b))
-        #     return float(intersection) / union if union > 0 else 0.0
         else:
-            logger.warning(f"calculate_string_similarity: Unknown method '{method}'. Returning 0.0.")
+            logger.warning(f"calculate_string_similarity: Unknown method '{method}'.")
             return 0.0
     except Exception as e:
         logger.error(f"calculate_string_similarity: Error calculating similarity ({method}): {e}", exc_info=False)
         return 0.0
-# [[END MODIFIED utils.py]]
+
+# ==============================================================================
+# === Debug Logging Utilities (Moved from Orchestrator)                      ===
+# ==============================================================================
+
+def get_debug_log_path(suffix: str, config: Any, logger_instance: logging.Logger) -> Optional[str]:
+    """
+    Gets the path for a specific debug log file based on the main log path and a suffix.
+    Moved from Orchestrator.
+
+    Args:
+        suffix: The suffix to append to the base log filename (e.g., ".DEBUG_PAYLOAD").
+        config: The configuration object (must have 'log_file_path' attribute).
+        logger_instance: The logger instance to use for reporting errors.
+
+    Returns:
+        The full path string to the debug log file, or None if path cannot be determined.
+    """
+    func_logger = logger_instance
+    func_logger.debug(f"Utils Get Debug Path: Called with suffix: '{suffix}'")
+    try:
+        base_log_path = getattr(config, "log_file_path", None)
+        if not base_log_path or not isinstance(base_log_path, str):
+            func_logger.error("Utils Get Debug Path: Main log_file_path config is missing or invalid.")
+            return None
+
+        log_dir = os.path.dirname(base_log_path)
+        if not log_dir: # Handle case where path might be just a filename
+             log_dir = "."
+        func_logger.debug(f"Utils Get Debug Path: Target log directory: '{log_dir}'")
+
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except PermissionError as pe:
+            func_logger.error(f"Utils Get Debug Path: PERMISSION ERROR creating log directory '{log_dir}': {pe}")
+            return None
+        except Exception as e_mkdir:
+            func_logger.error(f"Utils Get Debug Path: Error creating log directory '{log_dir}': {e_mkdir}", exc_info=True)
+            return None
+
+        base_name, _ = os.path.splitext(os.path.basename(base_log_path))
+        # Sanitize suffix: allow alphanumeric, hyphen, underscore, dot
+        safe_suffix = "".join(c for c in suffix if c.isalnum() or c in ('-', '_', '.'))
+        if not safe_suffix.startswith('.'): # Ensure it starts like an extension
+             safe_suffix = "." + safe_suffix
+
+        debug_filename = f"{base_name}{safe_suffix}.log"
+        final_path = os.path.join(log_dir, debug_filename)
+        func_logger.debug(f"Utils Get Debug Path: Constructed debug log path: '{final_path}'")
+        return final_path
+
+    except AttributeError as ae:
+        func_logger.error(f"Utils Get Debug Path: Config object missing attribute ('log_file_path'?): {ae}")
+        return None
+    except Exception as e:
+        func_logger.error(f"Utils Get Debug Path: Failed get debug path for suffix '{suffix}': {e}", exc_info=True)
+        return None
+
+def log_debug_payload(session_id: str, payload_body: Dict, config: Any, logger_instance: logging.Logger):
+    """
+    Logs the final constructed LLM payload ('contents' structure) to a debug file.
+    Moved from Orchestrator.
+
+    Args:
+        session_id: The session ID.
+        payload_body: The dictionary containing the LLM payload (expects 'contents' key).
+        config: The configuration object (needs 'debug_log_final_payload', 'version').
+        logger_instance: The logger instance.
+    """
+    func_logger = logger_instance
+    if not getattr(config, 'debug_log_final_payload', False):
+        # func_logger.debug(f"[{session_id}] Utils Log Payload: Skipping log, debug valve is OFF.")
+        return
+
+    debug_log_path = get_debug_log_path(".DEBUG_PAYLOAD", config, func_logger)
+    if not debug_log_path:
+        func_logger.error(f"[{session_id}] Utils Log Payload: Cannot log final payload, no path determined.")
+        return
+
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+        log_entry = {
+            "ts": ts,
+            "pipe_version": getattr(config, "version", "unknown"),
+            "sid": session_id,
+            "payload_contents": payload_body.get("contents"), # Extract contents
+            "payload_other_keys": {k:v for k,v in payload_body.items() if k != 'contents'}
+        }
+        func_logger.debug(f"[{session_id}] Utils Log Payload: Attempting write FINAL PAYLOAD debug log to: {debug_log_path}")
+        # Using simple write for now
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+             f.write(f"--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- START ---\n")
+             json.dump(log_entry, f, indent=2)
+             f.write(f"\n--- [{ts}] SESSION: {session_id} - FINAL ORCHESTRATOR PAYLOAD --- END ---\n\n")
+        func_logger.debug(f"[{session_id}] Utils Log Payload: Successfully wrote FINAL PAYLOAD debug log.")
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Utils Log Payload: Failed write debug final payload log: {e}", exc_info=True)
+
+
+def log_inventory_debug(
+    session_id: str,
+    message: str,
+    log_type: str, # e.g., "LLM_Raw_Output", "Applied_Changes"
+    config: Any,
+    logger_instance: logging.Logger
+):
+    """
+    Logs inventory-specific debug messages (like raw LLM output or applied changes)
+    to the dedicated inventory debug file. This is the synchronous core logic.
+
+    Args:
+        session_id: The session ID.
+        message: The string message to log.
+        log_type: A string indicating the type of message being logged.
+        config: The configuration object.
+        logger_instance: The logger instance.
+    """
+    func_logger = logger_instance
+    debug_log_path = get_debug_log_path(".DEBUG_INVENTORY", config, func_logger)
+    if not debug_log_path:
+        func_logger.error(f"[{session_id}] Utils Inventory Log: Cannot log '{log_type}', no path determined.")
+        return
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+        # Format the log entry clearly indicating the type
+        log_entry = f"--- [{ts}] SESSION: {session_id} - TYPE: {log_type} --- START ---\n{message}\n--- [{ts}] SESSION: {session_id} - TYPE: {log_type} --- END ---\n\n"
+
+        # Using simple synchronous write for now, as async file I/O adds complexity (aiofiles)
+        # If this becomes a bottleneck, switch to aiofiles.
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+        # func_logger.debug(f"[{session_id}] Utils Inventory Log: Successfully wrote '{log_type}' to {debug_log_path}")
+
+    except Exception as e:
+        func_logger.error(f"[{session_id}] Utils Inventory Log: Failed write debug log for '{log_type}': {e}", exc_info=True)
+
+
+# --- Async Wrapper for log_inventory_debug (Corrected) ---
+async def awaitable_log_inventory_debug(
+    session_id: str,
+    message: str,
+    log_type: str,
+    config: Any,
+    logger_instance: logging.Logger
+):
+     """ Awaitable wrapper around log_inventory_debug. Corrected with asyncio import. """
+     try:
+          # Call the synchronous logging function
+          log_inventory_debug(session_id, message, log_type, config, logger_instance)
+          # Yield control back to the event loop briefly (requires asyncio)
+          await asyncio.sleep(0)
+     except Exception as e:
+          # Log any error occurring within this wrapper or the sync function it calls
+          logger_instance.error(f"[{session_id}] Error in awaitable_log_inventory_debug wrapper: {e}", exc_info=True)
+
+
+# [[END COMPLETE CORRECTED utils.py - Added asyncio import]]
