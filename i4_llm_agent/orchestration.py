@@ -633,29 +633,12 @@ class SessionPipeOrchestrator:
             else: self.logger.debug(f"[{session_id}] T1 count ({current_tier1_count}) within limit ({max_t1_blocks}). No T2 transition needed.")
         except Exception as e_t2_trans: self.logger.error(f"[{session_id}] Unexpected error during T1->T2 transition: {e_t2_trans}", exc_info=True)
 
-
-    # === _get_t1_summaries (Now handled by context_processor) ===
-    # This helper can be removed from orchestration if not used elsewhere internally.
-    # async def _get_t1_summaries(self, session_id: str) -> Tuple[List[str], int]:
-    #     """ Retrieves recent T1 summaries from the database. """
-    #     # [[ Implementation removed as context processor handles this ]]
-    #     pass
-
-
-    # === _select_t0_history_slice (Now handled by context_processor) ===
-    # This helper can be removed from orchestration if not used elsewhere internally.
-    # async def _select_t0_history_slice(self, session_id: str, history_for_processing: List[Dict]) -> Tuple[List[Dict], int]:
-    #     """ Selects the T0 history slice based on token limits or fallback count. """
-    #     # [[ Implementation removed as context processor handles this ]]
-    #     pass
-
-
-    # === _calculate_and_format_status (MODIFIED - Added Aging Status) ===
+# === _calculate_and_format_status (CORRECTED - Final Assembly Order Fixed) ===
     async def _calculate_and_format_status(
         self, session_id: str,
-        t1_retrieved_count: int,
-        summarization_prompt_tokens: int,
-        summarization_output_tokens: int,
+        # t1_retrieved_count: int, # No longer needed as direct argument
+        summarization_prompt_tokens: int, # Keep for token reporting if needed elsewhere?
+        summarization_output_tokens: int, # Keep for token reporting if needed elsewhere?
         inventory_prompt_tokens: int,
         final_llm_payload_contents: Optional[List[Dict]],
         pre_scene_changed_flag: bool,
@@ -663,71 +646,79 @@ class SessionPipeOrchestrator:
         final_confirmed_scene_state: Dict[str, Any],
         final_scene_changed_flag: bool,
         context_status_info: Dict[str, Any],
-        session_process_owi_rag: bool,
-        aging_performed_flag: bool, # <<< NEW Parameter
-        inventory_update_success_flag: bool, # <<< NEW Parameter (from process_turn)
-        inventory_update_completed: bool, # <<< NEW Parameter (from process_turn)
+        session_process_owi_rag: bool, # Not used directly in format, but keep for signature
+        aging_performed_flag: bool,
+        inventory_update_success_flag: bool,
+        inventory_update_completed: bool,
     ) -> Tuple[str, int]:
         """
-        Calculates final status string including Aging status.
+        Calculates final status string including Aging status in the new format.
+        Format: World | T1/Aged, T2, Scene | Tok | Inv | Age | Cache
         """
+        # --- Calculate Final Payload Tokens ---
         final_payload_tokens = -1
         if final_llm_payload_contents and self._count_tokens_func and self._tokenizer:
-            try: final_payload_tokens = sum( self._count_tokens_func(part["text"], self._tokenizer) for turn in final_llm_payload_contents if isinstance(turn, dict) for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str))
-            except Exception as e_tok_final: final_payload_tokens = -1; self.logger.error(f"[{session_id}] Error calculating final payload tokens: {e_tok_final}")
-        elif not final_llm_payload_contents: final_payload_tokens = 0
+            try:
+                final_payload_tokens = sum(
+                    self._count_tokens_func(part["text"], self._tokenizer)
+                    for turn in final_llm_payload_contents if isinstance(turn, dict)
+                    for part in turn.get("parts", []) if isinstance(part, dict) and isinstance(part.get("text"), str)
+                )
+            except Exception as e_tok_final:
+                final_payload_tokens = -1
+                self.logger.error(f"[{session_id}] Error calculating final payload tokens: {e_tok_final}")
+        elif not final_llm_payload_contents:
+            final_payload_tokens = 0
 
-        # Extract info from the context_status_info dict
+        # --- Extract Counts and Context Info ---
+        t1_retrieved_count = context_status_info.get("t1_retrieved_count", 0)
+        aged_retrieved_count = context_status_info.get("aged_retrieved_count", 0) # <<< Get Aged Count
         t2_retrieved_count = context_status_info.get("t2_retrieved_count", 0)
         initial_owi_context_tokens = context_status_info.get("initial_owi_context_tokens", -1)
-        refined_context_tokens = context_status_info.get("refined_context_tokens", -1)
-        final_context_selection_performed = context_status_info.get("final_context_selection_performed", False)
-        stateless_refinement_performed = context_status_info.get("stateless_refinement_performed", False)
-        t0_dialogue_tokens = context_status_info.get("t0_dialogue_tokens", -1) # Get T0 tokens from context_info now
+        # final_context_tokens = context_status_info.get("final_context_tokens", -1) # If available from context proc
+        t0_dialogue_tokens = context_status_info.get("t0_dialogue_tokens", -1)
+        cache_maintenance_performed = context_status_info.get("cache_maintenance_performed", False)
 
-        status_parts = []
-        status_parts.append(f"T1={t1_retrieved_count}") # T1 count passed in (or get from context_info?)
-        status_parts.append(f"T2={t2_retrieved_count}")
+        # --- Format Status Segments ---
 
-        # Scene status formatting
-        pre_status_str = "NEW" if pre_scene_changed_flag else "OK"; post_status_str = "NEW" if final_scene_changed_flag else "OK"
-        status_parts.append(f"Scene={pre_status_str}/{post_status_str}")
+        # 1. World State Segment
+        final_day = final_confirmed_world_state.get("day", "?")
+        final_time = final_confirmed_world_state.get("time_of_day", "?")
+        final_weather = final_confirmed_world_state.get("weather", "?")
+        final_season = final_confirmed_world_state.get("season", "?")
+        world_state_status_str = f"World: D{final_day} {final_time} {final_weather} {final_season}"
 
-        # World state string based on FINAL confirmed world state
-        final_day = final_confirmed_world_state.get("day", "?"); final_time = final_confirmed_world_state.get("time_of_day", "?")
-        final_weather = final_confirmed_world_state.get("weather", "?"); final_season = final_confirmed_world_state.get("season", "?")
-        world_state_status_str = f"| World: D{final_day} {final_time} {final_weather} {final_season}"
+        # 2. Memory Counts Segment (T1/Aged, T2)
+        t1_aged_status_str = f"T1={t1_retrieved_count}/{aged_retrieved_count}" # <<< New Format
+        t2_status_str = f"T2={t2_retrieved_count}"
 
-        # Token reporting
-        self.logger.debug(f"[{session_id}] Status Tokens Check: OWI={initial_owi_context_tokens}, Ref={refined_context_tokens}, Hist={t0_dialogue_tokens}, Inv={inventory_prompt_tokens}, Final={final_payload_tokens}")
+        # 3. Scene Status Segment
+        pre_status_str = "NEW" if pre_scene_changed_flag else "OK"
+        post_status_str = "NEW" if final_scene_changed_flag else "OK"
+        scene_status_str = f"Scene={pre_status_str}/{post_status_str}"
+
+        # 4. Token Reporting Segment
         token_parts = []
         if initial_owi_context_tokens >= 0: token_parts.append(f"OWI={initial_owi_context_tokens}")
-        if refined_context_tokens >= 0: token_parts.append(f"Ref={refined_context_tokens}")
         if t0_dialogue_tokens >= 0: token_parts.append(f"Hist={t0_dialogue_tokens}")
-        if inventory_prompt_tokens >= 0: token_parts.append(f"Inv={inventory_prompt_tokens}")
+        if inventory_prompt_tokens >= 0: token_parts.append(f"Inv={inventory_prompt_tokens}") # Note: This is prompt tokens
         if final_payload_tokens >= 0: token_parts.append(f"Final={final_payload_tokens}")
-        token_string = f" | Tok: {' '.join(token_parts)}" if token_parts else ""
+        token_string = f"Tok: {' '.join(token_parts)}" if token_parts else "" # Tok: prefix added here
 
-        # Construct base status message
-        base_status_message = ", ".join(status_parts) + world_state_status_str + token_string
-
-        # --- Determine Feature Status Indicators ---
-        # Inventory Status
+        # 5. Feature Status Indicators Segment
         inventory_enabled = getattr(self.config, 'enable_inventory_management', False)
         inv_stat_indicator = "Inv=OFF"
         if inventory_enabled:
              if not _ORCH_INVENTORY_MODULE_AVAILABLE: inv_stat_indicator = "Inv=MISSING"
              else: inv_stat_indicator = "Inv=OK" if inventory_update_success_flag else ("Inv=FAIL" if inventory_update_completed else "Inv=SKIP")
-
-        # Cache Status
-        cache_performed = final_context_selection_performed or stateless_refinement_performed
-        cache_status_indicator = "Cache=Y" if cache_performed else "Cache=N"
-
-        # Aging Status <<< NEW >>>
         aging_status_indicator = "Age=Y" if aging_performed_flag else "Age=N"
+        cache_status_indicator = "Cache=Y" if cache_maintenance_performed else "Cache=N"
+        # Combined indicators string (without leading pipe)
+        feature_status_string = f"{inv_stat_indicator} | {aging_status_indicator} | {cache_status_indicator}"
 
-        # Combine final status string
-        final_status_string = f"{base_status_message} | {inv_stat_indicator} | {aging_status_indicator} | {cache_status_indicator}"
+        # --- Combine Final Status String (CORRECTED ORDER) ---
+        # Format: World | T1/Aged, T2, Scene | Tok | Inv | Age | Cache
+        final_status_string = f"{world_state_status_str} | {t1_aged_status_str}, {t2_status_str}, {scene_status_str} | {token_string} | {feature_status_string}"
 
         return final_status_string, final_payload_tokens
 
@@ -1036,10 +1027,10 @@ class SessionPipeOrchestrator:
             pre_scene_changed_flag = False
             if pre_assessed_state_dict and isinstance(pre_assessed_state_dict, dict): pre_scene_changed_flag = pre_assessed_state_dict.get("scene_changed_flag", False)
 
-            # Call the modified status calculation function, passing aging flag
+            # Call the modified status calculation function (Argument removed)
             final_status_string, final_payload_tokens = await self._calculate_and_format_status(
                  session_id=session_id,
-                 t1_retrieved_count=t1_retrieved_count, # Now from context_status_info
+                 # t1_retrieved_count=t1_retrieved_count, # <<< LINE REMOVED >>>
                  summarization_prompt_tokens=summarization_prompt_tokens,
                  summarization_output_tokens=summarization_output_tokens,
                  inventory_prompt_tokens=inventory_prompt_tokens,
@@ -1050,9 +1041,9 @@ class SessionPipeOrchestrator:
                  final_scene_changed_flag=final_scene_changed_flag,
                  context_status_info=context_status_info,
                  session_process_owi_rag=bool(getattr(user_valves, 'process_owi_rag', True)),
-                 aging_performed_flag=aging_performed, # <<< Pass aging status
-                 inventory_update_success_flag=inventory_update_success_flag, # Pass inv status
-                 inventory_update_completed=inventory_update_completed # Pass inv status
+                 aging_performed_flag=aging_performed,
+                 inventory_update_success_flag=inventory_update_success_flag,
+                 inventory_update_completed=inventory_update_completed
             )
 
             self.logger.info(f"[{session_id}] Orchestrator FINAL STATUS: {final_status_string}")
