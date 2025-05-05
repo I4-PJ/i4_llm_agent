@@ -176,160 +176,6 @@ INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
-# <<< START REVISED INVENTORY PROMPT >>>
-DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
-[[SYSTEM DIRECTIVE]]
-Role: Narrative Inventory Analyst & Maintainer
-Task: Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify changes to character inventories. This includes explicit commands, narrative descriptions of acquiring, losing, using, breaking, replacing, or storing items. Maintain item relevance by updating status based on narrative context. **Accurate and consistent canonical naming is CRITICAL for tracking.**
-Objective: Output a structured JSON object detailing ONLY the inventory items that were added or modified during this turn, reflecting their intended final state according to the new schema. If no changes are detected, output {{"character_updates": []}}.
-
-**Item Schema (Required Structure for items in output):**
-{{
-  "quantity": <integer>, // Current count of the item
-  "category": "Clothing" | "Consumable" | "Tool" | "Material" | "Quest Item" | "Currency" | "Other", // Best fit category
-  "status": "active" | "equipped" | "stored" | "broken" | "consumed" | "obsolete", // Reflects current relevance/state
-  "properties": {{ // Object for descriptive details
-    "material": "<string>", // e.g., "wool", "iron", "leather"
-    "color": "<string>", // e.g., "blue", "dark green"
-    "quality": "<string>", // e.g., "sturdy", "worn", "fine", "new", "mended"
-    // Add other observed properties as key-value pairs
-    "special_tags": ["<string>", ...] // List for flags like "waterproofed", "lined", "magical"
-  }},
-  "origin_notes": "<string>" // BRIEF note on acquisition/significance if relevant, otherwise empty string ""
-}}
-
-**Output JSON Format (Required Structure for overall output):**
-{{
-  "character_updates": [
-    {{
-      "character_name": "Name or __USER__", // Character whose inventory changed
-      "updated_items": {{
-        // Key: Canonical Name of the item. **THIS IS THE CRITICAL UNIQUE IDENTIFIER.**
-        // Value: The *complete item schema object* reflecting the item's
-        //        intended final state after this turn's events.
-        //        Include items here if they were added OR if any field
-        //        (quantity, status, properties) was modified.
-        "Canonical Name 1": {{ ...item schema... }}, // Use TitleCase, prefer singular
-        "Canonical Name 2": {{ ...item schema... }}
-        // ... only include items ADDED or MODIFIED this turn.
-      }}
-    }}
-    // ... include another object in the list if a second character's inventory was also affected.
-  ]
-}}
-
-**Instructions (Follow in Order):**
-
-1.  **Identify Characters:** Determine which character(s) inventories were affected (use `__USER__` for the player if name unclear).
-2.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY: ADD/REMOVE/SET/CLEAR`?
-    *   If YES: Parse the command **strictly**. Apply the command to items identified by their **Canonical Name**. Generate the `updated_items` reflecting the command's direct effect (e.g., `ADD` creates an item with `status: "active"`, `REMOVE` might imply setting quantity to 0 or status to `"obsolete"` if quantity drops to zero, `SET` updates quantity, `CLEAR` implies setting all items for that character to `status: "obsolete"`). **Stop processing other inputs and output the JSON.**
-    *   If NO: Proceed to Instruction 3.
-
-3.  **Analyze Dialogue & Narrative:** Analyze the **ASSISTANT RESPONSE** and **USER QUERY** (using History for context) for narrative events affecting inventory:
-    *   **Acquisition:** Picking up, receiving, buying, finding, crafting items. -> Identify/establish the item's **Canonical Name**. Create/update the item entry. Set `status: "active"` (or `"equipped"` if worn/wielded immediately). Extract `properties`, `category`.
-    *   **Loss/Removal:** Dropping, giving away, selling items. -> Identify the item by its **Canonical Name**. Update its `status` to `"obsolete"` or `"stored"`. If quantity becomes 0, reflect that.
-    *   **Consumption/Usage:** Using potions, food rations, arrows, materials for crafting. -> Identify the item by its **Canonical Name**. Update `status` to `"consumed"` or decrease `quantity`. If quantity becomes 0, status can also be `"consumed"`.
-    *   **Breakage:** Item explicitly described as breaking. -> Identify the item by its **Canonical Name**. Update its `status` to `"broken"`.
-    *   **Replacement:** Receiving a new item that clearly replaces an older one (e.g., "new sturdy boots" replace "old worn boots"). -> Identify the *old* item by its **Canonical Name** and update its `status` to `"stored"` or `"obsolete"`. Identify/establish the **Canonical Name** for the *new* item (it might be the *same* name if only properties changed, or a *new distinct* name if significantly different) and add/update it with `status: "active"` or `"equipped"`.
-    *   **Status Change:** Item being equipped, unequipped, stored. -> Identify the item by its **Canonical Name**. Update its `status` accordingly. Properties might change (e.g., `quality: "worn"` after long use).
-    *   **Quest Item Obsolescence:** Item tied to a completed task. -> Identify the item by its **Canonical Name**. Update its `status` to `"obsolete"`.
-
-4.  **Determine Canonical Names (CRITICAL STEP):**
-    *   The `canonical_name` (used as the JSON key in `updated_items`) **MUST** be the unique identifier for a specific *type* of item.
-    *   **Consistency is MANDATORY.** You **MUST** reuse the *exact* same canonical name string (including case) for all instances of the same item type.
-    *   **Naming Convention:**
-        *   Use **Title Case** (e.g., "Iron Sword", "Leather Boots", "Health Potion").
-        *   **Prefer Singular** names (e.g., "Leather Boot", "Wool Stocking", "Coin") even if multiple exist (use the `quantity` field for count). Exceptions: intrinsically plural items like "Rations", "Arrows".
-        *   Be descriptive enough to differentiate (e.g., "Steel Sword" vs. "Iron Dagger").
-    *   **Mapping Variations:** Map variations in dialogue ("the blue cloak", "her wool wrap", "a sword") to the **established Canonical Name**. If dialogue mentions "a wool stocking" and the canonical name "Wool Stocking" already exists, **update the existing entry**.
-    *   **Resolving Ambiguity:** If unsure whether a mentioned item (e.g., "a cloak") refers to an existing canonical item (e.g., "Wool Cloak"), **assume it refers to the existing item** unless properties *clearly* differ (e.g., dialogue mentions a "silk cloak" - this would likely need a new canonical name like "Silk Cloak").
-    *   **Creating New Names:** Only create a *new* canonical name if the item is genuinely distinct from all existing items for that character (e.g., finding a "Ruby Ring" when no rings existed before).
-
-5.  **Apply Schema & Status Logic:** For every item identified as added or modified:
-    *   Use the **final, chosen Canonical Name** (from Step 4) as the key in the `updated_items` dictionary.
-    *   Construct the full item schema object (value) reflecting its **final state** after the turn's events.
-    *   Pay close attention to updating the `status` field based on the narrative analysis in Step 3.
-    *   Extract `properties` (color, material, quality, tags) mentioned in the text. Assign a `category`. Add brief `origin_notes` if significant context exists.
-    *   Ensure `quantity` is correct. If status becomes `"consumed"` or `"broken"`, quantity often becomes 0, but include the item entry in the output with the final status.
-
-6.  **Handle Ambiguity:** If it's unclear whether an old item was discarded or just stored after being replaced, default to setting its `status: "stored"`. If narrative details are insufficient to populate properties, use reasonable defaults or omit them.
-
-7.  **Ignore Transient Items:** Do **not** create inventory entries for items clearly not intended for possession (e.g., food eaten immediately from a plate, scenery objects not taken, temporary tools used and left behind like a borrowed hammer).
-
-8.  **Construct Final JSON:** Assemble the final JSON according to the specified **Output JSON Format** (Section 3). Only include characters who had updates, and only include items whose state was added or modified in the `updated_items` dictionary for that character.
-
-9.  **No Change:** If no commands were found and no narrative changes to any character's inventory were detected, output `{{"character_updates": []}}`.
-
-**INPUTS:**
-
-**USER QUERY (Check for commands first):**
-{INVENTORY_UPDATE_QUERY_PLACEHOLDER}
-
-**ASSISTANT RESPONSE (Analyze for narrative changes if no command):**
----
-{INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
----
-
-**RECENT CHAT HISTORY (For context, especially pronoun/name resolution and narrative flow):**
----
-{INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
----
-
-**OUTPUT (JSON object with detected inventory additions/modifications):**
-"""
-# <<< END REVISED INVENTORY PROMPT >>>
-
-
-# === Guideline Constants ===
-SCENE_USAGE_GUIDELINE_TEXT = """<SceneUsageGuideline>
-**Environment Awareness:** A static scene description is provided in each turn’s background context (e.g., stable, camp, tavern). This represents passive environmental conditions and available objects.
-
-**Rules:**
-1. You may reference or interact with items and features mentioned in the scene (e.g., “the lantern hanging above,” “the stool near the fire”) through NPC dialogue or Narrator tags.
-2. Do not assume or invent objects or features not mentioned unless logically implied by the description.
-3. Environmental details should influence tone, pacing, and behavior (e.g., quiet → hushed speech, rain → urgency).
-4. Avoid re-describing the environment in detail. Instead, use it to guide NPC awareness and interaction choices.
-5. If a scene implies limited light, space, or danger, adjust character actions accordingly.
-</SceneUsageGuideline>"""
-
-MEMORY_SUMMARY_STRUCTURE_GUIDELINE_TEXT = """<MemorySummaryStructureGuideline>
-The background context may contain different types of memory summaries:
-*   **Context Recaps (Aged):** These summarize *older* periods of dialogue, condensing previous T1 summaries. They are ordered **Newest Recap First** (the recap covering the most recent *older* period appears first).
-*   **Recent Dialogue Summaries (T1):** These summarize *recent* chunks of conversation. They are ordered **Oldest Summary First** to provide a chronological flow leading up to the current turn.
-*   **Related Older Information (T2 RAG):** These are retrieved based on relevance to the current query and may not follow a strict chronological order relative to T1/Aged.
-
-Use these summaries collectively to understand the narrative timeline, recent events, and emotional progression.
-</MemorySummaryStructureGuideline>"""
-
-WEATHER_SUGGESTION_GUIDELINE_TEXT = """<WeatherSuggestionGuideline>
-The background information may contain a "Proposed Weather Change: From X to Y". This indicates a potential shift in the environment suggested by the system. Treat this as context or inspiration. You are NOT required to follow this suggestion if your narrative or character actions dictate different weather. Feel free to describe the weather naturally as the scene unfolds.
-</WeatherSuggestionGuideline>"""
-
-# <<< NEW EVENT HINT GUIDELINE TEXT >>>
-EVENT_HANDLING_GUIDELINE_TEXT = """--- [ EVENT HANDLING GUIDELINE ] ---
-**Optional Event Hints:** You may occasionally find an `<EventHint>...</EventHint>` tag within the Background Information block. This contains a **strictly optional** suggestion for a minor environmental detail or sensory input.
-
-**Handling Rules (Low Priority):**
-1.  **Optionality:** You are **NOT required** to use the hint. Prioritize responding to the user's query, maintaining character voice/focus, and describing the core scene context **above** incorporating the hint.
-2.  **Subtlety:** If you *choose* to use the hint, weave it in subtly and naturally. It should feel like an organic observation, not a forced event.
-3.  **Ignore If:** You **SHOULD ignore** the hint if:
-    *   It feels forced, unnatural, or contradicts the established mood/scene.
-    *   It would disrupt the flow of dialogue or the character's current focus/actions.
-    *   The scene is already detailed enough, and the hint adds little value.
-    *   It seems irrelevant to the immediate situation.
-4.  **Do Not:** Do not treat the hint as a command. Do not announce that you are using the hint. Do not let it derail the conversation.
-
-**In summary: Treat the `<EventHint>` as a low-priority, optional atmospheric suggestion. Use it sparingly and only when it genuinely enhances the scene without disrupting the core narrative flow.**
---- [ END EVENT HANDLING GUIDELINE ] ---"""
-# <<< END NEW EVENT HINT GUIDELINE TEXT >>>
-
-
-# === Cache Maintainer Prompt Constants ===
-CACHE_MAINTAINER_QUERY_PLACEHOLDER = "{query}"
-CACHE_MAINTAINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
-CACHE_MAINTAINER_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache_text}"
-CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER = "{current_owi_context}"
-NO_CACHE_UPDATE_FLAG = "[NO_CACHE_UPDATE]"
 # <<< START REVISED INVENTORY PROMPT (v3 - Stricter Reuse) >>>
 DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
@@ -434,6 +280,132 @@ Objective: Output a structured JSON object detailing ONLY the inventory items th
 **OUTPUT (JSON object with detected inventory additions/modifications):**
 """
 # <<< END REVISED INVENTORY PROMPT (v3 - Stricter Reuse) >>>
+
+
+# === Guideline Constants ===
+SCENE_USAGE_GUIDELINE_TEXT = """<SceneUsageGuideline>
+**Environment Awareness:** A static scene description is provided in each turn’s background context (e.g., stable, camp, tavern). This represents passive environmental conditions and available objects.
+
+**Rules:**
+1. You may reference or interact with items and features mentioned in the scene (e.g., “the lantern hanging above,” “the stool near the fire”) through NPC dialogue or Narrator tags.
+2. Do not assume or invent objects or features not mentioned unless logically implied by the description.
+3. Environmental details should influence tone, pacing, and behavior (e.g., quiet → hushed speech, rain → urgency).
+4. Avoid re-describing the environment in detail. Instead, use it to guide NPC awareness and interaction choices.
+5. If a scene implies limited light, space, or danger, adjust character actions accordingly.
+</SceneUsageGuideline>"""
+
+MEMORY_SUMMARY_STRUCTURE_GUIDELINE_TEXT = """<MemorySummaryStructureGuideline>
+The background context may contain different types of memory summaries:
+*   **Context Recaps (Aged):** These summarize *older* periods of dialogue, condensing previous T1 summaries. They are ordered **Newest Recap First** (the recap covering the most recent *older* period appears first).
+*   **Recent Dialogue Summaries (T1):** These summarize *recent* chunks of conversation. They are ordered **Oldest Summary First** to provide a chronological flow leading up to the current turn.
+*   **Related Older Information (T2 RAG):** These are retrieved based on relevance to the current query and may not follow a strict chronological order relative to T1/Aged.
+
+Use these summaries collectively to understand the narrative timeline, recent events, and emotional progression.
+</MemorySummaryStructureGuideline>"""
+
+WEATHER_SUGGESTION_GUIDELINE_TEXT = """<WeatherSuggestionGuideline>
+The background information may contain a "Proposed Weather Change: From X to Y". This indicates a potential shift in the environment suggested by the system. Treat this as context or inspiration. You are NOT required to follow this suggestion if your narrative or character actions dictate different weather. Feel free to describe the weather naturally as the scene unfolds.
+</WeatherSuggestionGuideline>"""
+
+# <<< NEW EVENT HINT GUIDELINE TEXT >>>
+EVENT_HANDLING_GUIDELINE_TEXT = """--- [ EVENT HANDLING GUIDELINE ] ---
+**Optional Event Hints:** You may occasionally find an `<EventHint>...</EventHint>` tag within the Background Information block. This contains a **strictly optional** suggestion for a minor environmental detail or sensory input.
+
+**Handling Rules (Low Priority):**
+1.  **Optionality:** You are **NOT required** to use the hint. Prioritize responding to the user's query, maintaining character voice/focus, and describing the core scene context **above** incorporating the hint.
+2.  **Subtlety:** If you *choose* to use the hint, weave it in subtly and naturally. It should feel like an organic observation, not a forced event.
+3.  **Ignore If:** You **SHOULD ignore** the hint if:
+    *   It feels forced, unnatural, or contradicts the established mood/scene.
+    *   It would disrupt the flow of dialogue or the character's current focus/actions.
+    *   The scene is already detailed enough, and the hint adds little value.
+    *   It seems irrelevant to the immediate situation.
+4.  **Do Not:** Do not treat the hint as a command. Do not announce that you are using the hint. Do not let it derail the conversation.
+
+**In summary: Treat the `<EventHint>` as a low-priority, optional atmospheric suggestion. Use it sparingly and only when it genuinely enhances the scene without disrupting the core narrative flow.**
+--- [ END EVENT HANDLING GUIDELINE ] ---"""
+# <<< END NEW EVENT HINT GUIDELINE TEXT >>>
+
+
+# === Cache Maintainer Prompt Constants ===
+CACHE_MAINTAINER_QUERY_PLACEHOLDER = "{query}"
+CACHE_MAINTAINER_HISTORY_PLACEHOLDER = "{recent_history_str}"
+CACHE_MAINTAINER_PREVIOUS_CACHE_PLACEHOLDER = "{previous_cache_text}"
+CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER = "{current_owi_context}"
+NO_CACHE_UPDATE_FLAG = "[NO_CACHE_UPDATE]"
+# <<< REFINED TEMPLATE V2 (Less Aggressive Pruning) >>>
+DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT = f"""
+[[SYSTEM DIRECTIVE]]
+**Role:** Session Background Cache Maintainer & Synthesizer
+
+**Task:** Critically evaluate the PREVIOUSLY REFINED CACHE against **both** the CURRENT OWI RETRIEVAL **and** the RECENT CHAT HISTORY, considering the LATEST USER QUERY for immediate relevance. Decide if a cache update is warranted. If yes, perform an intelligent merge/update, prioritizing **conciseness and relevance** to the ongoing narrative and immediate plans.
+
+**Objective:** Maintain an accurate, concise, and consistently structured SESSION CACHE containing **essential and currently relevant** background information (active character states/goals, key plot points, immediately relevant lore/setting). The cache should provide stable context but **evolve** with the narrative. **Prune or summarize** information that is less central to the current plot arc or character interactions to maintain an efficient size target (aim for roughly 25,000 characters).
+
+**Inputs:**
+- **LATEST USER QUERY:** Provides immediate context for relevance checking.
+- **RECENT CHAT HISTORY:** **Primary source for recent plot developments, character decisions, and relationship shifts.**
+- **PREVIOUSLY REFINED CACHE:** The baseline state of the background context.
+- **CURRENT OWI RETRIEVAL:** Secondary source for *genuinely new*, significant factual details, clarifications, or corrections *not* already reflected adequately in the cache or history.
+
+**Core Logic & Instructions:**
+
+1.  **Analyze Recent Dialogue:**
+    *   Identify key decisions, plot advancements, emotional shifts, or relationship changes revealed in the RECENT CHAT HISTORY.
+    *   Determine if these developments necessitate updates to the 'Key Plot/Goal', character profiles (current state/motivations), or relationship summaries in the cache.
+
+2.  **Analyze OWI vs. Cache (Conditional):**
+    *   Compare CURRENT OWI RETRIEVAL against the PREVIOUSLY REFINED CACHE.
+    *   **Only consider OWI if it provides genuinely NEW, significant, and non-redundant factual information** (e.g., a new character reveal, a major world event correction, significant lore elaboration *directly relevant* to the current query/plot).
+    *   **IGNORE** OWI if it's merely redundant, rephrased, or contains details irrelevant to the current focus.
+
+3.  **Decision Point:**
+    *   Update is needed if:
+        *   Recent Dialogue revealed significant plot/character state changes needing integration.
+        *   *OR* OWI provided genuinely new, significant, relevant factual updates.
+    *   **If NEITHER condition is met** -> **Output ONLY the exact text:** `{NO_CACHE_UPDATE_FLAG}` and stop processing.
+    *   **If YES, proceed to Step 4 (Update/Merge/Refine).**
+
+4.  **Update/Merge/Refine Process (If Step 3 determined an update is needed):**
+    *   Start with the full text of the PREVIOUSLY REFINED CACHE as the base.
+    *   **Integrate Dialogue Updates:** Update the 'Key Plot/Goal' section, character states (e.g., Caldric's confirmed reluctance, agreed departure timing), or relationship notes based *directly* on the analysis from Step 1. Be concise.
+    *   **Integrate OWI Updates (If Applicable):** If Step 2 identified valuable NEW info in OWI, merge it concisely:
+        *   Character Profiles: Add significant new *facts* or *major* status changes. Avoid minor elaborations unless crucial. Prefer established cache profiles unless OWI offers clear correction. Add summaries for genuinely new, relevant characters.
+        *   Factual Lore/Background: Add NEW relevant facts or MAJOR clarifications/corrections identified in OWI.
+    *   **Pruning & Summarization (For Efficiency):**
+        *   Review **all sections** of the cache (including existing parts).
+        *   **Prune:** Remove details or sections that are clearly no longer relevant to the *current* plot arc or active character goals (e.g., fully resolved minor quests, details of inactive characters).
+        *   **Summarize:** Condense lengthy descriptions or established background facts that are stable but not immediately critical. Retain the core information but reduce word count where appropriate. (e.g., summarize detailed servant descriptions unless one is actively involved; consider summarizing detailed world history if not currently relevant).
+        *   **Prioritize:** Focus retention on: Current Plot/Goals/Plans, Active Character States & Relationships (including recent emotional or planning nuances), Immediately Relevant Setting/Lore.
+    *   **Maintain Structure & Target Length:** Preserve heading structure. **Prune and summarize less immediately relevant information to keep the total output concise and focused, aiming for roughly 25,000 characters.** Ensure the most important info (Plot, Active Characters) is prominent.
+
+5.  **Final Output Construction:**
+    *   If Step 3 resulted in `{NO_CACHE_UPDATE_FLAG}`, that is the entire output.
+    *   If Step 4 was performed, the output is the **complete, updated, and REFINED SESSION CACHE text**.
+    *   **Empty/Irrelevant Case:** If the PREVIOUS CACHE was empty AND Recent Dialogue/OWI contain no significant relevant info -> Output: `[No relevant background context found]`
+
+**INPUTS:**
+
+**LATEST USER QUERY:**
+{CACHE_MAINTAINER_QUERY_PLACEHOLDER}
+
+**RECENT CHAT HISTORY:**
+---
+{CACHE_MAINTAINER_HISTORY_PLACEHOLDER}
+---
+
+**PREVIOUSLY REFINED CACHE (Baseline Context):**
+---
+{CACHE_MAINTAINER_PREVIOUS_CACHE_PLACEHOLDER}
+---
+
+**CURRENT OWI RETRIEVAL (Check for New/Updated Info):**
+---
+{CACHE_MAINTAINER_CURRENT_OWI_PLACEHOLDER}
+---
+
+**OUTPUT (Either '{NO_CACHE_UPDATE_FLAG}', the refined cache text, or '[No relevant background context found]'):**
+"""
+# <<< END REFINED TEMPLATE V2 >>>
 
 # === Function Implementations ===
 

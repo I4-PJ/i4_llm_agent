@@ -98,6 +98,32 @@ i4_llm_agent/
 └── utils.py                  # Utility functions (token counting, etc.)
 ```
 
+FINAL LLM Payload structure
+```
+FINAL_PAYLOAD
+├── Metadata
+│   ├── ts
+│   ├── pipe_version
+│   └── sid
+├── payload
+│   └── contents
+│       ├── user_turn (role: user)
+│       │   └── parts[]
+│       │       └── text
+│       │           ├── System Instructions
+│       │           ├── Session Goal
+│       │           ├── Context Guidelines
+│       │           ├── World State
+│       │           ├── Event Hint
+│       │           ├── Inventories
+│       │           ├── Selected Context (Character & Lore Blocks)
+│       │           └── Memory Summaries (T1, T2, Aged)
+│       └── model_turn (role: model)
+│           └── parts[]
+│               └── text (Response)
+```
+
+
 ## Installation
 
 This package is currently used as an internal component for OpenWebUI. To install:
