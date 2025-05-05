@@ -1,13 +1,13 @@
-# === COMPLETE CORRECTED FILE: script.txt (v0.21.1 - Fixed Valve Default) ===
+# === COMPLETE CORRECTED FILE: script.txt (v0.21.2 - Improved Regen Detection) ===
 
-# [[START CORRECTED script.txt - Fixed Valve Default]]
+# [[START CORRECTED script.txt - Improved Regen Detection]]
 # === SECTION 1: METADATA HEADER ===
 # --- REQUIRED METADATA HEADER ---
 """
-title: SESSION_MEMORY PIPE (v0.21.1 - Cache Maintainer Fixed Valve)
+title: SESSION_MEMORY PIPE (v0.21.2 - Improved Regen Detection)
 author: Petr Jilek & Assistant Gemini
-version: 0.21.1
-description: Implements Cache Maintainer logic. Corrected valve default for enable flag to use direct assignment (UI controllable). Requires i4_llm_agent>=0.2.2.
+version: 0.21.2
+description: Implements Cache Maintainer logic & robust regeneration detection. Requires i4_llm_agent>=0.2.2.
 requirements: pydantic, chromadb, i4_llm_agent>=0.2.2, tiktoken, httpx, open_webui (internal utils)
 """
 # --- END HEADER ---
@@ -217,7 +217,7 @@ except ImportError:
 
 # === SECTION 3: CONSTANTS & DEFAULTS ===
 DEFAULT_LOG_DIR = r"C:\\Utils\\OpenWebUI"
-DEFAULT_LOG_FILE_NAME = "session_memory_v21_1_pipe_log.log"  # Version updated
+DEFAULT_LOG_FILE_NAME = "session_memory_v21_2_pipe_log.log"  # Version updated
 DEFAULT_LOG_LEVEL = "DEBUG"
 ENV_VAR_LOG_FILE_PATH = "SM_LOG_FILE_PATH"
 ENV_VAR_LOG_LEVEL = "SM_LOG_LEVEL"
@@ -267,15 +267,13 @@ DEFAULT_RAG_SUMMARY_RESULTS_COUNT = 3
 ENV_VAR_RAG_SUMMARY_RESULTS_COUNT = "SM_RAG_SUMMARY_RESULTS_COUNT"
 
 # --- Cache Maintainer & Shared LLM Config ---
-ENV_VAR_ENABLE_RAG_CACHE_MAINTAINER = "SM_ENABLE_RAG_CACHE_MAINTAINER"  # Env var only used if needed for external script control, UI is primary
-DEFAULT_ENABLE_RAG_CACHE_MAINTAINER = False  # Default value for UI
+ENV_VAR_ENABLE_RAG_CACHE_MAINTAINER = "SM_ENABLE_RAG_CACHE_MAINTAINER"
+DEFAULT_ENABLE_RAG_CACHE_MAINTAINER = False
 
-ENV_VAR_REFINER_API_URL = "SM_REFINER_API_URL"  # Shared LLM URL
-ENV_VAR_REFINER_API_KEY = "SM_REFINER_API_KEY"  # Shared LLM Key
-ENV_VAR_REFINER_TEMPERATURE = (
-    "SM_REFINER_TEMPERATURE"  # Default temp for shared LLM tasks
-)
-ENV_VAR_REFINER_HISTORY_COUNT = "SM_REFINER_HISTORY_COUNT"  # Default history count
+ENV_VAR_REFINER_API_URL = "SM_REFINER_API_URL"
+ENV_VAR_REFINER_API_KEY = "SM_REFINER_API_KEY"
+ENV_VAR_REFINER_TEMPERATURE = "SM_REFINER_TEMPERATURE"
+ENV_VAR_REFINER_HISTORY_COUNT = "SM_REFINER_HISTORY_COUNT"
 
 DEFAULT_REFINER_API_URL = DEFAULT_RAGQ_LLM_API_URL
 DEFAULT_REFINER_API_KEY = ""
@@ -329,12 +327,11 @@ DEFAULT_DEBUG_LOG_RAW_INPUT = False
 ENV_VAR_DEBUG_LOG_RAW_INPUT = "SM_DEBUG_LOG_RAW_INPUT"
 
 # --- Logger Setup ---
-logger = logging.getLogger("SessionMemoryPipeV21_1Logger")  # Version updated
+logger = logging.getLogger("SessionMemoryPipeV21_2Logger")  # Version updated
 logging.basicConfig(level=logging.INFO)
 
 
 # === SECTION 4: EMBEDDING WRAPPER ===
-# ... (Embedding Wrapper Class remains unchanged) ...
 class ChromaDBCompatibleEmbedder:
     def __init__(
         self,
@@ -395,9 +392,9 @@ class ChromaDBCompatibleEmbedder:
 
 # === SECTION 5: PIPE CLASS DEFINITION ===
 class Pipe:
-    version = "0.21.1"  # Version updated
+    version = "0.21.2"  # Version updated
 
-    # === SECTION 5.1: VALVES DEFINITION (Cache Maintainer Integration - Fixed Default) ===
+    # === SECTION 5.1: VALVES DEFINITION (Unchanged from v0.21.1) ===
     class Valves(BaseModel):
         # --- Logging & Paths ---
         log_file_path: str = Field(
@@ -500,12 +497,10 @@ class Pipe:
         )
 
         # --- Cache Maintainer & Shared LLM Config ---
-        # <<< CORRECTED Cache Maintainer Flag Default >>>
         enable_rag_cache_maintainer: bool = Field(
-            default=False,  # <<< Default set directly for UI control
+            default=False,
             description="Enable/disable the RAG Cache Maintainer feature. (Control via Pipeline Settings UI)",
         )
-        # Shared LLM settings (used by Maintainer, Inventory, Event Hints, State Assessment)
         refiner_llm_api_url: str = Field(
             default=os.getenv(ENV_VAR_REFINER_API_URL, DEFAULT_REFINER_API_URL)
         )
@@ -543,7 +538,7 @@ class Pipe:
         enable_inventory_management: bool = Field(
             default=False,
             description="Enable/disable the character inventory management feature. (Control via Pipeline Settings UI)",
-        )  # Use direct default
+        )
         inv_llm_api_url: str = Field(
             default=os.getenv(ENV_VAR_INV_LLM_API_URL, DEFAULT_INV_LLM_API_URL)
         )
@@ -560,7 +555,7 @@ class Pipe:
         enable_event_hints: bool = Field(
             default=False,
             description="Enable/disable dynamic event hint generation. (Control via Pipeline Settings UI)",
-        )  # Use direct default
+        )
         event_hint_llm_api_url: str = Field(
             default=os.getenv(
                 ENV_VAR_EVENT_HINT_LLM_API_URL, DEFAULT_EVENT_HINT_LLM_API_URL
@@ -602,23 +597,22 @@ class Pipe:
         include_ack_turns: bool = Field(
             default=True,
             description="Include ACK turns in payload. (Control via Pipeline Settings UI)",
-        )  # Use direct default
+        )
         emit_status_updates: bool = Field(
             default=True,
             description="Emit status updates during processing. (Control via Pipeline Settings UI)",
-        )  # Use direct default
+        )
         debug_log_final_payload: bool = Field(
             default=False,
             description="Log final LLM payload JSON to debug file. (Control via Pipeline Settings UI)",
-        )  # Use direct default
+        )
         debug_log_raw_input: bool = Field(
             default=False,
             description="Log raw input body JSON to debug file. (Control via Pipeline Settings UI)",
-        )  # Use direct default
+        )
 
         # --- Post Init Validation (Unchanged) ---
         def model_post_init(self, __context: Any) -> None:
-            # ... (implementation unchanged) ...
             if self.t0_active_history_token_limit <= 0:
                 self.t0_active_history_token_limit = (
                     DEFAULT_T0_ACTIVE_HISTORY_TOKEN_LIMIT
@@ -689,7 +683,7 @@ class Pipe:
                     "Memory Config: aging_trigger_threshold is 0, Memory Aging is disabled."
                 )
             logger.info(
-                "Valves model_post_init validation complete (Cache Maintainer Version)."
+                "Valves model_post_init validation complete (Improved Regen Version)."
             )
 
     # === User Valves (Unchanged) ===
@@ -711,11 +705,10 @@ class Pipe:
             description="Optional historical period or setting (e.g., 'Late Medieval', 'Cyberpunk', 'Victorian Era') to guide LLM generation.",
         )
 
-    # === SECTION 5.2: INITIALIZATION METHOD (Unchanged from previous version) ===
+    # === SECTION 5.2: INITIALIZATION METHOD (Unchanged) ===
     def __init__(self):
-        # ... (implementation unchanged) ...
         self.type = "pipe"
-        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Cache Maintainer Fixed Valve)"  # Updated name
+        self.name = f"SESSION_MEMORY PIPE (v{self.version} - Improved Regen Detection)"  # Updated name
         self.logger = logger
         self.logger.info(f"Initializing '{self.name}'...")
         logging.getLogger("i4_llm_agent").setLevel(logging.DEBUG)
@@ -740,7 +733,7 @@ class Pipe:
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
             self.logger.info(
-                f"Pipe.__init__: self.valves loaded (Cache Maintainer Fixed): {init_log_valves}"
+                f"Pipe.__init__: self.valves loaded (Improved Regen): {init_log_valves}"
             )
             if not self.valves.summarizer_api_key:
                 self.logger.warning("Global Summarizer/Aging API Key MISSING.")
@@ -857,7 +850,6 @@ class Pipe:
 
     # === SECTION 5.3: LOGGER CONFIGURATION (Unchanged) ===
     def configure_logger(self):
-        # ... (implementation unchanged) ...
         log_level_str = self.valves.log_level.upper()
         log_path = self.valves.log_file_path
         try:
@@ -901,7 +893,6 @@ class Pipe:
 
     # === SECTION 5.4: LIFECYCLE METHODS (Unchanged) ===
     async def on_startup(self):
-        # ... (implementation unchanged) ...
         self.logger.info(f"on_startup: '{self.name}' (v{self.version}) starting...")
         init_success_main = False
         if self._sqlite_cursor:
@@ -1008,7 +999,6 @@ class Pipe:
         self.logger.info(f"'{self.name}' startup complete.")
 
     async def on_shutdown(self):
-        # ... (implementation unchanged) ...
         self.logger.info(f"on_shutdown: '{self.name}' shutting down...")
         if self._sqlite_conn:
             try:
@@ -1029,9 +1019,8 @@ class Pipe:
                 print(f"ERROR closing log handler: {handler}: {e}")
         self.logger.info(f"'{self.name}' shutdown complete.")
 
-    # === SECTION 5.6: ON VALVES UPDATED (Unchanged from previous version) ===
+    # === SECTION 5.6: ON VALVES UPDATED (Unchanged) ===
     async def on_valves_updated(self):
-        # ... (implementation unchanged) ...
         self.logger.info(
             f"on_valves_updated: Reloading global settings for '{self.name}'..."
         )
@@ -1056,7 +1045,7 @@ class Pipe:
                 self.valves, "enable_event_hints", "LOAD_FAILED"
             )
             self.logger.info(
-                f"Pipe.on_valves_updated: self.valves RE-loaded (Cache Maintainer Fixed): {update_log_valves}"
+                f"Pipe.on_valves_updated: self.valves RE-loaded (Improved Regen): {update_log_valves}"
             )
             if hasattr(self, "orchestrator"):
                 self.orchestrator.config = self.valves
@@ -1103,7 +1092,6 @@ class Pipe:
     def _get_owi_embedding_function(
         self, __request__: Request, __user__: Optional[Dict]
     ) -> Optional[OwiEmbeddingFunction]:
-        # ... (implementation unchanged) ...
         if (
             hasattr(self, "_owi_embedding_func_cache")
             and self._owi_embedding_func_cache
@@ -1163,7 +1151,6 @@ class Pipe:
 
     # === SECTION 5.8 & 5.9: HELPER - Debug Logging (Unchanged) ===
     def _get_debug_log_path(self, suffix: str) -> Optional[str]:
-        # ... (implementation unchanged) ...
         func_logger = self.logger
         func_logger.debug(f"_get_debug_log_path called with suffix: '{suffix}'")
         try:
@@ -1197,7 +1184,6 @@ class Pipe:
             return None
 
     def _log_debug_raw_input(self, session_id: str, body: Dict):
-        # ... (implementation unchanged) ...
         if not getattr(self.valves, "debug_log_raw_input", False):
             return
         debug_log_path = self._get_debug_log_path(".DEBUG_INPUT")
@@ -1222,7 +1208,7 @@ class Pipe:
                 f"[{session_id}] Failed write debug raw input log: {e}", exc_info=True
             )
 
-    # === SECTION 5.11: MAIN PIPE METHOD (Unchanged) ===
+    # === SECTION 5.11: MAIN PIPE METHOD (Improved Regen Detection) ===
     async def pipe(
         self,
         body: dict,
@@ -1235,7 +1221,6 @@ class Pipe:
         __task__=None,
         __task_body__: Optional[dict] = None,
     ) -> Union[dict, AsyncGenerator[str, None], str]:
-        # ... (implementation unchanged - it relies on orchestrator.process_turn which now uses the modified context_processor) ...
         pipe_start_time_iso = datetime.now(timezone.utc).isoformat()
         self.logger.info(f"Pipe.pipe v{self.version}: Entered at {pipe_start_time_iso}")
         self._current_event_emitter = __event_emitter__
@@ -1303,7 +1288,7 @@ class Pipe:
             if hasattr(self, "orchestrator") and hasattr(self, "valves"):
                 self.orchestrator.config = self.valves
                 self.orchestrator.pipe_logger = self.logger
-                self.orchestrator.pipe_debug_path_getter = self._get_debug_log_path
+                # self.orchestrator.pipe_debug_path_getter = self._get_debug_log_path # Removed from orchestrator
                 self.orchestrator.aging_trigger_threshold = (
                     self.valves.aging_trigger_threshold
                 )
@@ -1345,25 +1330,78 @@ class Pipe:
                 user_valves_obj = self.UserValves()
             self.session_manager.set_user_valves(session_id, user_valves_obj)
             self.logger.debug(f"[{session_id}] Stored final UserValves in session.")
-            await emit_status("Status: Pipe handling history...")
+
+            # --- START IMPROVED REGENERATION DETECTION ---
+            await emit_status("Status: Pipe handling history (Regen Check)...")
+            is_regeneration_heuristic = False
             incoming_messages = body.get("messages", [])
             previous_input = self.session_manager.get_previous_input_messages(
                 session_id
             )
-            is_regeneration_heuristic = (
-                previous_input is not None
-                and incoming_messages == previous_input
-                and len(incoming_messages) > 0
-            )
-            log_msg = f"[{session_id}] Regeneration heuristic: {'DETECTED' if is_regeneration_heuristic else 'Not detected'}."
-            (
-                self.logger.info(log_msg)
-                if is_regeneration_heuristic
-                else self.logger.debug(log_msg)
-            )
+
+            if previous_input and incoming_messages:
+                try:
+                    # Filter out non-user messages for comparison
+                    incoming_user_msgs = [
+                        msg
+                        for msg in incoming_messages
+                        if isinstance(msg, dict) and msg.get("role") == "user"
+                    ]
+                    previous_user_msgs = [
+                        msg
+                        for msg in previous_input
+                        if isinstance(msg, dict) and msg.get("role") == "user"
+                    ]
+
+                    # Check if previous input ended with an assistant message
+                    previous_ended_with_assistant = (
+                        len(previous_input) > 0
+                        and isinstance(previous_input[-1], dict)
+                        and previous_input[-1].get("role") in ("assistant", "model")
+                    )
+
+                    # Check if the user messages match AND the previous turn ended with an assistant
+                    if (
+                        incoming_user_msgs == previous_user_msgs
+                        and previous_ended_with_assistant
+                    ):
+                        is_regeneration_heuristic = True
+                        self.logger.info(
+                            f"[{session_id}] Regeneration heuristic DETECTED (User msgs match, prev ended with assistant)."
+                        )
+                    else:
+                        # Fallback: Check if the full history matches (original less reliable check)
+                        if (
+                            incoming_messages == previous_input
+                            and len(incoming_messages) > 0
+                        ):
+                            is_regeneration_heuristic = True
+                            self.logger.info(
+                                f"[{session_id}] Regeneration heuristic DETECTED (Full history match)."
+                            )
+                        else:
+                            self.logger.debug(
+                                f"[{session_id}] Regeneration heuristic: Not detected."
+                            )
+
+                except Exception as e_regen_check:
+                    self.logger.error(
+                        f"[{session_id}] Error during regeneration check: {e_regen_check}",
+                        exc_info=True,
+                    )
+                    is_regeneration_heuristic = False  # Default to false on error
+
+            else:
+                self.logger.debug(
+                    f"[{session_id}] Regeneration heuristic: Not detected (No prev/current input)."
+                )
+
+            # Always store the current input for the *next* request's comparison
             self.session_manager.set_previous_input_messages(
                 session_id, incoming_messages.copy()
             )
+            # --- END IMPROVED REGENERATION DETECTION ---
+
             await emit_status("Status: Pipe resolving embeddings...")
             owi_embed_func = None
             chroma_embed_wrapper = None
@@ -1394,8 +1432,11 @@ class Pipe:
                 self.logger.debug(
                     f"[{session_id}] Skipping embedding setup: OWI Request context missing."
                 )
+
             await emit_status("Status: Pipe delegating to orchestrator...")
-            self.logger.info(f"[{session_id}] Calling orchestrator.process_turn...")
+            self.logger.info(
+                f"[{session_id}] Calling orchestrator.process_turn (Regen Flag: {is_regeneration_heuristic})..."
+            )
             orchestrator_result = await self.orchestrator.process_turn(
                 session_id=session_id,
                 user_id=user_id,
@@ -1404,7 +1445,7 @@ class Pipe:
                 event_emitter=self._current_event_emitter,
                 embedding_func=owi_embed_func,
                 chroma_embed_wrapper=chroma_embed_wrapper,
-                is_regeneration_heuristic=is_regeneration_heuristic,
+                is_regeneration_heuristic=is_regeneration_heuristic,  # Pass the calculated flag
             )
             self.logger.info(
                 f"[{session_id}] Orchestrator returned result type: {type(orchestrator_result).__name__}"
@@ -1428,8 +1469,9 @@ class Pipe:
             await emit_status(
                 f"ERROR: Pipe Failed ({type(e_pipe_global).__name__})", done=True
             )
+            # Return a simple string error to the UI in this critical failure case
             return f"Apologies, a critical error occurred in the Session Memory Pipe: {type(e_pipe_global).__name__}."
 
 
-# [[END CORRECTED script.txt - Fixed Valve Default]]
+# [[END CORRECTED script.txt - Improved Regen Detection]]
 # === END COMPLETE CORRECTED FILE: script.txt ===

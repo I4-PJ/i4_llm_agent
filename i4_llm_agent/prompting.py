@@ -1,4 +1,4 @@
-# === START OF COMPLETE FILE: i4_llm_agent/prompting.py (Event Hint moved to Context) ===
+# === START OF COMPLETE FILE: i4_llm_agent/prompting.py (Revised Inventory Prompt) ===
 # i4_llm_agent/prompting.py
 
 import logging
@@ -176,13 +176,14 @@ INVENTORY_UPDATE_RESPONSE_PLACEHOLDER = "{main_llm_response}"
 INVENTORY_UPDATE_QUERY_PLACEHOLDER = "{user_query}"
 INVENTORY_UPDATE_HISTORY_PLACEHOLDER = "{recent_history_str}"
 
+# <<< START REVISED INVENTORY PROMPT >>>
 DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
 [[SYSTEM DIRECTIVE]]
 Role: Narrative Inventory Analyst & Maintainer
-Task: Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify changes to character inventories. This includes explicit commands, narrative descriptions of acquiring, losing, using, breaking, replacing, or storing items. Maintain item relevance by updating status based on narrative context.
+Task: Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify changes to character inventories. This includes explicit commands, narrative descriptions of acquiring, losing, using, breaking, replacing, or storing items. Maintain item relevance by updating status based on narrative context. **Accurate and consistent canonical naming is CRITICAL for tracking.**
 Objective: Output a structured JSON object detailing ONLY the inventory items that were added or modified during this turn, reflecting their intended final state according to the new schema. If no changes are detected, output {{"character_updates": []}}.
-Item Schema (Required Structure for items in output):
 
+**Item Schema (Required Structure for items in output):**
 {{
   "quantity": <integer>, // Current count of the item
   "category": "Clothing" | "Consumable" | "Tool" | "Material" | "Quest Item" | "Currency" | "Other", // Best fit category
@@ -203,13 +204,13 @@ Item Schema (Required Structure for items in output):
     {{
       "character_name": "Name or __USER__", // Character whose inventory changed
       "updated_items": {{
-        // Key: Canonical Name of the item (be consistent!)
+        // Key: Canonical Name of the item. **THIS IS THE CRITICAL UNIQUE IDENTIFIER.**
         // Value: The *complete item schema object* reflecting the item's
         //        intended final state after this turn's events.
         //        Include items here if they were added OR if any field
         //        (quantity, status, properties) was modified.
-        "canonical_name_1": {{ ...item schema... }},
-        "canonical_name_2": {{ ...item schema... }}
+        "Canonical Name 1": {{ ...item schema... }}, // Use TitleCase, prefer singular
+        "Canonical Name 2": {{ ...item schema... }}
         // ... only include items ADDED or MODIFIED this turn.
       }}
     }}
@@ -221,29 +222,39 @@ Item Schema (Required Structure for items in output):
 
 1.  **Identify Characters:** Determine which character(s) inventories were affected (use `__USER__` for the player if name unclear).
 2.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY: ADD/REMOVE/SET/CLEAR`?
-    *   If YES: Parse the command **strictly**. Generate the `updated_items` reflecting the command's direct effect (e.g., `ADD` creates an item with `status: "active"`, `REMOVE` might imply setting quantity to 0 or status to `"obsolete"` if quantity drops to zero, `SET` updates quantity, `CLEAR` implies setting all items for that character to `status: "obsolete"`). Map command items to canonical names. **Stop processing other inputs and output the JSON.**
+    *   If YES: Parse the command **strictly**. Apply the command to items identified by their **Canonical Name**. Generate the `updated_items` reflecting the command's direct effect (e.g., `ADD` creates an item with `status: "active"`, `REMOVE` might imply setting quantity to 0 or status to `"obsolete"` if quantity drops to zero, `SET` updates quantity, `CLEAR` implies setting all items for that character to `status: "obsolete"`). **Stop processing other inputs and output the JSON.**
     *   If NO: Proceed to Instruction 3.
 
 3.  **Analyze Dialogue & Narrative:** Analyze the **ASSISTANT RESPONSE** and **USER QUERY** (using History for context) for narrative events affecting inventory:
-    *   **Acquisition:** Picking up, receiving, buying, finding, crafting items. -> Create/update item, set `status: "active"` (or `"equipped"` if worn/wielded). Extract `properties`, `category`. Assign `canonical_name`.
-    *   **Loss/Removal:** Dropping, giving away, selling items. -> Update item `status` to `"obsolete"` or `"stored"`. If quantity becomes 0, reflect that.
-    *   **Consumption/Usage:** Using potions, food rations, arrows, materials for crafting. -> Update item `status` to `"consumed"` or decrease `quantity`. If quantity becomes 0, status can also be `"consumed"`.
-    *   **Breakage:** Item explicitly described as breaking. -> Update `status` to `"broken"`.
-    *   **Replacement:** Receiving a new item that clearly replaces an older one (e.g., "new sturdy boots" replace "old worn boots"). -> Update the *old* item's `status` to `"stored"` or `"obsolete"`. Add/update the *new* item with `status: "active"` or `"equipped"`.
-    *   **Status Change:** Item being equipped, unequipped, stored. -> Update `status` accordingly. Properties might change (e.g., `quality: "worn"` after long use).
-    *   **Quest Item Obsolescence:** Item tied to a completed task. -> Update `status` to `"obsolete"`.
+    *   **Acquisition:** Picking up, receiving, buying, finding, crafting items. -> Identify/establish the item's **Canonical Name**. Create/update the item entry. Set `status: "active"` (or `"equipped"` if worn/wielded immediately). Extract `properties`, `category`.
+    *   **Loss/Removal:** Dropping, giving away, selling items. -> Identify the item by its **Canonical Name**. Update its `status` to `"obsolete"` or `"stored"`. If quantity becomes 0, reflect that.
+    *   **Consumption/Usage:** Using potions, food rations, arrows, materials for crafting. -> Identify the item by its **Canonical Name**. Update `status` to `"consumed"` or decrease `quantity`. If quantity becomes 0, status can also be `"consumed"`.
+    *   **Breakage:** Item explicitly described as breaking. -> Identify the item by its **Canonical Name**. Update its `status` to `"broken"`.
+    *   **Replacement:** Receiving a new item that clearly replaces an older one (e.g., "new sturdy boots" replace "old worn boots"). -> Identify the *old* item by its **Canonical Name** and update its `status` to `"stored"` or `"obsolete"`. Identify/establish the **Canonical Name** for the *new* item (it might be the *same* name if only properties changed, or a *new distinct* name if significantly different) and add/update it with `status: "active"` or `"equipped"`.
+    *   **Status Change:** Item being equipped, unequipped, stored. -> Identify the item by its **Canonical Name**. Update its `status` accordingly. Properties might change (e.g., `quality: "worn"` after long use).
+    *   **Quest Item Obsolescence:** Item tied to a completed task. -> Identify the item by its **Canonical Name**. Update its `status` to `"obsolete"`.
 
-4.  **Determine Canonical Names:** For each item affected, use a consistent, descriptive `canonical_name` (e.g., "Leather Boots", "Iron Sword", "Health Potion", "Mystic Amulet"). Map variations in dialogue ("the blue cloak", "her wool wrap") to the same canonical name. If an item seems genuinely new and distinct, create a new canonical name.
+4.  **Determine Canonical Names (CRITICAL STEP):**
+    *   The `canonical_name` (used as the JSON key in `updated_items`) **MUST** be the unique identifier for a specific *type* of item.
+    *   **Consistency is MANDATORY.** You **MUST** reuse the *exact* same canonical name string (including case) for all instances of the same item type.
+    *   **Naming Convention:**
+        *   Use **Title Case** (e.g., "Iron Sword", "Leather Boots", "Health Potion").
+        *   **Prefer Singular** names (e.g., "Leather Boot", "Wool Stocking", "Coin") even if multiple exist (use the `quantity` field for count). Exceptions: intrinsically plural items like "Rations", "Arrows".
+        *   Be descriptive enough to differentiate (e.g., "Steel Sword" vs. "Iron Dagger").
+    *   **Mapping Variations:** Map variations in dialogue ("the blue cloak", "her wool wrap", "a sword") to the **established Canonical Name**. If dialogue mentions "a wool stocking" and the canonical name "Wool Stocking" already exists, **update the existing entry**.
+    *   **Resolving Ambiguity:** If unsure whether a mentioned item (e.g., "a cloak") refers to an existing canonical item (e.g., "Wool Cloak"), **assume it refers to the existing item** unless properties *clearly* differ (e.g., dialogue mentions a "silk cloak" - this would likely need a new canonical name like "Silk Cloak").
+    *   **Creating New Names:** Only create a *new* canonical name if the item is genuinely distinct from all existing items for that character (e.g., finding a "Ruby Ring" when no rings existed before).
 
 5.  **Apply Schema & Status Logic:** For every item identified as added or modified:
-    *   Construct the full item schema object reflecting its **final state** after the turn's events.
+    *   Use the **final, chosen Canonical Name** (from Step 4) as the key in the `updated_items` dictionary.
+    *   Construct the full item schema object (value) reflecting its **final state** after the turn's events.
     *   Pay close attention to updating the `status` field based on the narrative analysis in Step 3.
     *   Extract `properties` (color, material, quality, tags) mentioned in the text. Assign a `category`. Add brief `origin_notes` if significant context exists.
     *   Ensure `quantity` is correct. If status becomes `"consumed"` or `"broken"`, quantity often becomes 0, but include the item entry in the output with the final status.
 
 6.  **Handle Ambiguity:** If it's unclear whether an old item was discarded or just stored after being replaced, default to setting its `status: "stored"`. If narrative details are insufficient to populate properties, use reasonable defaults or omit them.
 
-7.  **Ignore Transient Items:** Do **not** create inventory entries for items clearly not intended for possession (e.g., food eaten immediately, scenery objects not taken, temporary tools used and left behind).
+7.  **Ignore Transient Items:** Do **not** create inventory entries for items clearly not intended for possession (e.g., food eaten immediately from a plate, scenery objects not taken, temporary tools used and left behind like a borrowed hammer).
 
 8.  **Construct Final JSON:** Assemble the final JSON according to the specified **Output JSON Format** (Section 3). Only include characters who had updates, and only include items whose state was added or modified in the `updated_items` dictionary for that character.
 
@@ -266,72 +277,8 @@ Item Schema (Required Structure for items in output):
 
 **OUTPUT (JSON object with detected inventory additions/modifications):**
 """
+# <<< END REVISED INVENTORY PROMPT >>>
 
-# DEFAULT_INVENTORY_UPDATE_TEMPLATE_TEXT = f"""
-# [[SYSTEM DIRECTIVE]]
-# **Role:** Inventory Log Keeper
-# **Task:** Analyze the latest interaction (User Query, Assistant Response, Recent History) to identify explicit changes to character inventories, stated via direct commands OR described in dialogue.
-# **Objective:** Output a structured JSON object detailing ONLY the inventory changes detected. If no changes are detected, output an empty JSON object.
-
-# **Supported Direct Command Formats (Priority 1):**
-# *   `INVENTORY: ADD CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-# *   `INVENTORY: REMOVE CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-# *   `INVENTORY: SET CharacterName: Item Name=Quantity[, Item Name=Quantity...]`
-# *   `INVENTORY: CLEAR CharacterName`
-# *(Note: Use `__USER__` for the player character if their specific name isn't provided)*
-
-# **Instructions (Follow in Order):**
-
-# 1.  **Check for Strict Commands:** Examine the **USER QUERY**. Does it start with `INVENTORY:` followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-#     *   If YES: Parse the command **strictly** according to the formats above. Generate JSON `updates` based *only* on the parsed command. **Stop processing and output the JSON.**
-#     *   If NO: Proceed to Instruction 2.
-
-# 2.  **Check for Natural Language Command:** Examine the **USER QUERY**. Does it start with `INVENTORY:` but is **NOT** followed immediately by `ADD`, `REMOVE`, `SET`, or `CLEAR`?
-#     *   If YES: Attempt to interpret the text *after* the `INVENTORY:` prefix as a **natural language instruction** about desired inventory changes (e.g., "Emily doesn't need her dress anymore", "Give the health potion to Caldric"). Generate the corresponding JSON `updates` array based on your best interpretation of the instruction. **If the natural language instruction is ambiguous, unclear, or seems unrelated to inventory, output `{{"updates": []}}`. Stop processing and output the JSON.**
-#     *   If NO: Proceed to Instruction 3.
-
-# 3.  **Analyze Dialogue (Fallback):** Since no `INVENTORY:` command (strict or natural language) was found in the User Query, analyze the **ASSISTANT RESPONSE** (using User Query and History for context) for narrative descriptions of inventory changes (e.g., picking up, dropping, giving, receiving, using consumables, crafting, buying, selling).
-#     *   Identify actions, characters (use `__USER__` if needed, resolve pronouns), items, and quantities (default 1) from the dialogue.
-#     *   Generate JSON `updates` based *only* on these dialogue events.
-
-# 4.  **Format Output as JSON:** Structure the output STRICTLY as the following JSON format:
-#     ```json
-#     {{
-#       "updates": [
-#         // One entry for each detected change (from command OR dialogue)
-#         {{
-#           "character_name": "Name or __USER__",
-#           "action": "add | remove | set_quantity", // Use 'set_quantity' for SET command
-#           "item_name": "Exact Item Name or __ALL_ITEMS__", // Use __ALL_ITEMS__ only for CLEAR
-#           "quantity": <integer>,
-#           "description": "<optional string>" // Typically only for 'add' from dialogue
-#         }}
-#         // ... more updates if needed
-#       ]
-#     }}
-#     ```
-#     *   **Important:** The `updates` array should contain entries derived from ONLY ONE of the instructions above (Strict Command, NLP Command, OR Dialogue Analysis), whichever matched first.
-
-# 5.  **Accuracy is Key:** Only report changes explicitly stated or directly implied. Do NOT infer. Resolve character names and item names as best as possible from context.
-# 6.  **No Change:** If Instructions 1 & 2 didn't match, and Instruction 3 found no dialogue changes, output `{{"updates": []}}`.
-
-# **INPUTS:**
-
-# **USER QUERY (Check for commands first):**
-# {INVENTORY_UPDATE_QUERY_PLACEHOLDER}
-
-# **ASSISTANT RESPONSE (Analyze for dialogue changes if no command):**
-# ---
-# {INVENTORY_UPDATE_RESPONSE_PLACEHOLDER}
-# ---
-
-# **RECENT CHAT HISTORY (For context, especially pronoun/name resolution):**
-# ---
-# {INVENTORY_UPDATE_HISTORY_PLACEHOLDER}
-# ---
-
-# **OUTPUT (JSON object with detected inventory updates):**
-# """
 
 # === Guideline Constants ===
 SCENE_USAGE_GUIDELINE_TEXT = """<SceneUsageGuideline>
@@ -866,8 +813,8 @@ def format_inventory_update_prompt(
 ) -> str:
     """Formats the prompt for the Inventory Update LLM."""
     func_logger = logging.getLogger(__name__ + '.format_inventory_update_prompt')
-    if not template or not isinstance(template, str) or template == "[Default Inventory Prompt Load Failed]":
-        return "[Error: Invalid Template for Inventory Update]"
+    if not template or not isinstance(template, str) or template == "[Default Inventory Prompt Load Failed]": # Check against the constant name
+        return "[Error: Invalid or Missing Template for Inventory Update]"
     try:
         # Use str.replace for simple placeholders if format causes issues
         formatted_prompt = template.replace(INVENTORY_UPDATE_RESPONSE_PLACEHOLDER, str(main_llm_response))
@@ -892,7 +839,7 @@ def format_cache_maintainer_prompt(
     prompt_template = template if template is not None else DEFAULT_CACHE_MAINTAINER_TEMPLATE_TEXT
 
     # Use the constant added earlier
-    if not prompt_template or prompt_template == "[Prompting Const Load Error]": # Check if default failed
+    if not prompt_template or prompt_template == "[Default Cache Maintainer Prompt Load Failed]": # Check if default failed
          # Log an error if the default template constant is missing
          func_logger.error("Default Cache Maintainer template text is missing or failed to load.")
          # Return a more specific error message
@@ -952,4 +899,4 @@ def extract_tagged_context(system_content: str) -> Dict[str, str]:
         if match: extracted[key] = match.group(1).strip()
     return extracted
 
-# === END OF COMPLETE FILE: i4_llm_agent/prompting.py ===
+# === END OF COMPLETE FILE: i4_llm_agent/prompting.py (Revised Inventory Prompt) ===
