@@ -1,4 +1,4 @@
-# [[START FINAL COMPLETE inventory.py]]
+# [[START FINAL COMPLETE inventory.py - With Property Merging Logic]]
 # i4_llm_agent/inventory.py
 
 import logging
@@ -77,7 +77,9 @@ def format_inventory_for_prompt(
                     continue # Skip excluded categories
 
                 # Skip items with zero quantity unless specifically equipped (edge case)
-                if item_quantity <= 0 and item_status != "equipped":
+                # or if status indicates relevance despite zero quantity (e.g., broken, consumed, obsolete)
+                relevant_zero_qty_statuses = ["equipped", "broken", "consumed", "obsolete"]
+                if item_quantity <= 0 and item_status not in relevant_zero_qty_statuses:
                      continue
 
                 # --- Formatting Logic ---
@@ -86,10 +88,21 @@ def format_inventory_for_prompt(
                     item_line_parts.append(f"({item_quantity})")
 
                 # Indicate status clearly if relevant
-                if item_status == "equipped":
-                    item_line_parts.append("[Equipped]")
-                elif item_status == "stored":
-                     item_line_parts.append("[Stored]") # Only shown if show_stored=True allows it
+                status_indicators = {
+                    "equipped": "[Equipped]",
+                    "stored": "[Stored]",
+                    "broken": "[Broken]",
+                    "consumed": "[Consumed]",
+                    "obsolete": "[Obsolete]"
+                }
+                status_indicator = status_indicators.get(item_status)
+
+                # Only show [Stored] if show_stored=True allows it
+                if item_status == "stored" and not show_stored:
+                    status_indicator = None # Suppress indicator if not showing stored
+
+                if status_indicator:
+                    item_line_parts.append(status_indicator)
 
                 # Add properties concisely
                 properties = item_details.get("properties")
@@ -139,7 +152,7 @@ def format_inventory_for_prompt(
 
 
 # ==============================================================================
-# === 2. Inventory State Modification Helper (Refactored for New Schema)    ===
+# === 2. Inventory State Modification Helper (MODIFIED FOR PROPERTY MERGE)  ===
 # ==============================================================================
 
 async def _apply_inventory_updates(
@@ -149,11 +162,12 @@ async def _apply_inventory_updates(
     db_update_func: Callable[..., Coroutine[Any, Any, bool]],
     character_name: str,
     llm_updated_items: Dict[str, Dict[str, Any]], # Dict {"canonical_name": {item_schema}}
-    inventory_log_func: Optional[Callable[[str, str, str], Coroutine[Any, Any, None]]] = None # Added logger
+    inventory_log_func: Optional[Callable[[str, str, str], Coroutine[Any, Any, None]]] = None
 ) -> bool:
     """
-    Fetches current inventory state, merges updates from the LLM, logs changes,
-    and saves the new state. Handles the new structured item schema.
+    Fetches current inventory state, merges updates from the LLM (intelligently
+    merging properties for existing items), logs changes, and saves the new state.
+    Handles the new structured item schema.
     """
     func_logger = logging.getLogger(__name__ + '._apply_inventory_updates')
     if not cursor: func_logger.error(f"[{session_id}] Missing cursor for {character_name}."); return False
@@ -192,18 +206,62 @@ async def _apply_inventory_updates(
 
             try:
                 full_log_message = "\n".join(log_messages)
-                # Use the specific log_type expected by the utility function
                 await inventory_log_func(session_id, full_log_message, "Applied_Changes")
             except Exception as e_log:
                 func_logger.error(f"[{session_id}] Failed to call inventory_log_func for {character_name}: {e_log}", exc_info=True)
         # --- End Logging Changes ---
 
-        # 3. Merge LLM Updates
-        for canonical_name, item_data in llm_updated_items.items():
-            if isinstance(item_data, dict) and "quantity" in item_data and "category" in item_data and "status" in item_data:
-                current_inventory_state[canonical_name] = item_data # Overwrite/add with final state from LLM
+        # 3. Merge LLM Updates (WITH PROPERTY MERGE LOGIC)
+        for canonical_name, new_item_data in llm_updated_items.items():
+            # Basic validation of the incoming data structure
+            if not isinstance(new_item_data, dict) or not all(k in new_item_data for k in ["quantity", "category", "status"]):
+                func_logger.warning(f"[{session_id}] Skipping invalid item data structure from LLM for '{canonical_name}' for {character_name}. Missing required keys.")
+                continue
+
+            if canonical_name in current_inventory_state:
+                # --- UPDATE EXISTING ITEM ---
+                func_logger.debug(f"[{session_id}] Updating existing item: '{canonical_name}'")
+                existing_item_data = current_inventory_state[canonical_name]
+
+                # Update core fields directly from new data
+                existing_item_data['quantity'] = new_item_data.get('quantity', existing_item_data.get('quantity', 0))
+                existing_item_data['status'] = new_item_data.get('status', existing_item_data.get('status', 'active'))
+                existing_item_data['category'] = new_item_data.get('category', existing_item_data.get('category', 'Other'))
+
+                # Merge properties intelligently
+                existing_props = existing_item_data.get('properties', {})
+                new_props = new_item_data.get('properties', {})
+
+                if not isinstance(existing_props, dict): # Ensure existing props is a dict
+                    existing_props = {}
+                if isinstance(new_props, dict): # Only merge if new props is a dict
+                    # Update existing props with new ones (new overwrites old if key exists)
+                    existing_props.update(new_props)
+                    func_logger.debug(f"[{session_id}] Merged properties for '{canonical_name}'. New keys: {list(new_props.keys())}")
+
+                existing_item_data['properties'] = existing_props # Assign merged/validated dict back
+
+                # Update origin notes only if new notes are provided and non-empty
+                new_origin = new_item_data.get('origin_notes')
+                if new_origin is not None and isinstance(new_origin, str) and new_origin.strip():
+                    existing_item_data['origin_notes'] = new_origin
+                    func_logger.debug(f"[{session_id}] Updated origin notes for '{canonical_name}'.")
+
+                # No need to reassign existing_item_data to current_inventory_state[canonical_name]
+                # as we modified the dictionary in place.
+
             else:
-                 func_logger.warning(f"[{session_id}] Skipping invalid item data structure from LLM for '{canonical_name}' for {character_name}.")
+                # --- ADD NEW ITEM ---
+                func_logger.debug(f"[{session_id}] Adding new item: '{canonical_name}'")
+                # Validate properties is a dict if present
+                if 'properties' in new_item_data and not isinstance(new_item_data.get('properties'), dict):
+                    func_logger.warning(f"[{session_id}] Properties for new item '{canonical_name}' is not a dict. Setting to empty.")
+                    new_item_data['properties'] = {}
+                # Ensure origin_notes is present and a string
+                if 'origin_notes' not in new_item_data or not isinstance(new_item_data.get('origin_notes'), str):
+                     new_item_data['origin_notes'] = ""
+
+                current_inventory_state[canonical_name] = new_item_data
 
         # 4. Serialize New State
         try:
@@ -246,7 +304,7 @@ async def update_inventories_from_llm(
     db_get_inventory_func: Callable[..., Coroutine[Any, Any, Optional[str]]],
     db_update_inventory_func: Callable[..., Coroutine[Any, Any, bool]],
     inventory_llm_config: Dict[str, Any],
-    inventory_log_func: Optional[Callable[[str, str, str], Coroutine[Any, Any, None]]] = None # Added logger
+    inventory_log_func: Optional[Callable[[str, str, str], Coroutine[Any, Any, None]]] = None
 ) -> bool:
     """
     Orchestrates the inventory update process for a turn using the new structured schema.
@@ -314,16 +372,29 @@ async def update_inventories_from_llm(
         if match: json_string_to_parse = match.group(1).strip(); func_logger.debug(f"[{session_id}] Stripped markdown fences.")
         else: func_logger.debug(f"[{session_id}] No markdown fences found.")
 
-        if json_string_to_parse == '{}': parsed_updates = {"character_updates": []}
-        else: parsed_updates = json.loads(json_string_to_parse)
+        if json_string_to_parse == '{}' or json_string_to_parse == '[]': # Handle empty object or list
+             parsed_updates = {"character_updates": []}
+        else:
+            parsed_data = json.loads(json_string_to_parse)
+            # Check if LLM directly output the list or the full structure
+            if isinstance(parsed_data, list):
+                # Assume it's the list meant for character_updates
+                parsed_updates = {"character_updates": parsed_data}
+                func_logger.debug(f"[{session_id}] Parsed list output, wrapped into standard structure.")
+            elif isinstance(parsed_data, dict) and "character_updates" in parsed_data:
+                # It's the expected structure
+                parsed_updates = parsed_data
+                func_logger.debug(f"[{session_id}] Parsed expected dict structure.")
+            else:
+                # Unexpected structure
+                func_logger.error(f"[{session_id}] Inventory LLM JSON missing 'character_updates' list or not a dict/list. Type: {type(parsed_data)}")
+                return False
 
+        # Final validation of the parsed structure
         if not isinstance(parsed_updates, dict) or "character_updates" not in parsed_updates or not isinstance(parsed_updates.get("character_updates"), list):
-             if isinstance(parsed_updates, list): # Allow list as fallback
-                  func_logger.warning(f"[{session_id}] Inventory LLM output was a list, wrapping.")
-                  parsed_updates = {"character_updates": parsed_updates}
-             else:
-                  func_logger.error(f"[{session_id}] Inventory LLM JSON missing 'character_updates' list or not a dict. Type: {type(parsed_updates)}")
-                  return False
+             func_logger.error(f"[{session_id}] Final parsed structure is invalid. Type: {type(parsed_updates)}")
+             return False
+
     except json.JSONDecodeError as e:
         func_logger.error(f"[{session_id}] Failed decode Inventory LLM JSON: {e}. String: '{json_string_to_parse[:500]}...'"); return False
     except Exception as e:
@@ -366,4 +437,4 @@ async def update_inventories_from_llm(
 
     return overall_success and (successful_updates_count == total_updates_attempted)
 
-# [[END FINAL COMPLETE inventory.py]]
+# [[END FINAL COMPLETE inventory.py - With Property Merging Logic]]
